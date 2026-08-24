@@ -1,0 +1,353 @@
+name: Commander XP immutable control packet
+run-name: Commander XP control ${{ inputs.experiment_id }} / ${{ inputs.source_sha }} / provision ${{ inputs.provision_artifact_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      experiment_id:
+        description: Unique immutable Commander experiment ID
+        required: true
+        type: string
+      source_sha:
+        description: Exact protected-main Commander implementation source
+        required: true
+        type: string
+      source_ci_run_id:
+        description: Successful exact-source CI workflow run ID
+        required: true
+        type: string
+      source_ci_run_attempt:
+        description: Exact-source CI workflow run attempt
+        required: true
+        type: string
+      provision_artifact_id:
+        description: Attested immutable eval-image/policy/Coworld provision artifact ID
+        required: true
+        type: string
+      recover_existing_preregistration_fence:
+        description: Rebuild the byte-identical control packet after an interrupted fenced run
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: commander-xp-control-${{ inputs.experiment_id }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  artifact-metadata: write
+  attestations: write
+  contents: write
+  id-token: write
+
+env:
+  EXPERIMENT_ID: ${{ inputs.experiment_id }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+  SOURCE_CI_RUN_ATTEMPT: ${{ inputs.source_ci_run_attempt }}
+  PROVISION_ARTIFACT_ID: ${{ inputs.provision_artifact_id }}
+  RECOVER_EXISTING_PREREGISTRATION_FENCE: ${{ inputs.recover_existing_preregistration_fence }}
+
+jobs:
+  control:
+    name: Verify provision authority and attest preregistration control
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact protected source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Authorize exact source and provision artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REPOSITORY" = "0xNad/ProxyWar"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = "true"
+          [[ "$EXPERIMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PROVISION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/source-ci.json"
+          jq -e --arg source "$SOURCE_SHA" --argjson attempt "$SOURCE_CI_RUN_ATTEMPT" '
+            .status == "completed" and .conclusion == "success" and
+            .head_sha == $source and .run_attempt == $attempt and
+            .head_branch == "main" and .path == ".github/workflows/ci.yml" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .event == "push"
+          ' "$RUNNER_TEMP/source-ci.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROVISION_ARTIFACT_ID" > "$RUNNER_TEMP/provision-artifact.json"
+          test "$(jq -r .expired "$RUNNER_TEMP/provision-artifact.json")" = "false"
+          PROVISION_RUN_ID=$(jq -r .workflow_run.id "$RUNNER_TEMP/provision-artifact.json")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROVISION_RUN_ID" > "$RUNNER_TEMP/provision-run.json"
+          PROVISION_ATTEMPT=$(jq -r .run_attempt "$RUNNER_TEMP/provision-run.json")
+          PROVISION_COMPLETED_AT=$(jq -r .updated_at "$RUNNER_TEMP/provision-run.json")
+          PROVISION_ARTIFACT_DIGEST=$(jq -r .digest "$RUNNER_TEMP/provision-artifact.json")
+          [[ "$PROVISION_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          node -e 'if (!Number.isFinite(Date.parse(process.argv[1]))) process.exit(1)' "$PROVISION_COMPLETED_AT"
+          test "$(jq -r .name "$RUNNER_TEMP/provision-artifact.json")" = "commander-xp-provision-$SOURCE_SHA-$PROVISION_RUN_ID-$PROVISION_ATTEMPT"
+          jq -e --arg source "$SOURCE_SHA" '
+            .status == "completed" and .conclusion == "success" and
+            .head_sha == $source and .head_branch == "main" and
+            .path == ".github/workflows/commander-xp-provision.yml" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .event == "workflow_dispatch"
+          ' "$RUNNER_TEMP/provision-run.json" >/dev/null
+          echo "PROVISION_RUN_ID=$PROVISION_RUN_ID" >> "$GITHUB_ENV"
+          echo "PROVISION_RUN_ATTEMPT=$PROVISION_ATTEMPT" >> "$GITHUB_ENV"
+          echo "PROVISION_COMPLETED_AT=$PROVISION_COMPLETED_AT" >> "$GITHUB_ENV"
+          echo "PROVISION_ARTIFACT_DIGEST=$PROVISION_ARTIFACT_DIGEST" >> "$GITHUB_ENV"
+
+      - name: Download and verify the immutable provision packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PROVISION_ROOT="$RUNNER_TEMP/commander-xp-provision"
+          mkdir -m 700 "$PROVISION_ROOT"
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROVISION_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/provision.zip"
+          python - "$RUNNER_TEMP/provision.zip" "$PROVISION_ROOT" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe provision member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special provision member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"provision path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = "16"
+          test "$(find "$PROVISION_ROOT" -type l | wc -l | tr -d ' ')" = "0"
+          MANIFEST="$PROVISION_ROOT/commander-xp-provision-manifest-v2.json"
+          test -f "$MANIFEST"
+          gh attestation verify "$MANIFEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-provision.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
+          node --input-type=module - "$MANIFEST" "$PROVISION_ROOT" "$(git rev-parse HEAD^{tree})" <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+          const [manifestPath, root, sourceTree] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const exact = (actual, expected) => JSON.stringify(Object.keys(actual).sort()) === JSON.stringify([...expected].sort());
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const sha = (value) => createHash("sha256").update(value).digest("hex");
+          const required = ["commander-xp-plan-input-base-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
+          const { manifestSha256, ...body } = manifest;
+          if (!exact(manifest, ["schemaVersion","authority","repository","workflowPath","sourceSha","sourceTreeSha","createdAt","files","manifestSha256"]) || manifest.schemaVersion !== 2 || manifest.authority !== "github-actions-attested-provision-packet-v1" || manifest.repository !== "0xNad/ProxyWar" || manifest.workflowPath !== ".github/workflows/commander-xp-provision.yml" || manifest.sourceSha !== process.env.SOURCE_SHA || manifest.sourceTreeSha !== sourceTree || !Number.isFinite(Date.parse(manifest.createdAt)) || manifestSha256 !== sha(JSON.stringify(sort(body))) || !Array.isArray(manifest.files) || JSON.stringify(manifest.files.map((entry) => entry.path)) !== JSON.stringify(required)) throw new Error("Commander XP provision manifest is invalid");
+          for (const entry of manifest.files) {
+            if (!exact(entry, ["path","sha256"]) || !/^[0-9a-f]{64}$/.test(entry.sha256) || sha(fs.readFileSync(path.join(root, entry.path))) !== entry.sha256) throw new Error(`Commander XP provision file mismatch: ${entry.path}`);
+          }
+          const runtime = JSON.parse(fs.readFileSync(path.join(root, "coworld-runtime-inventory-v1.json"), "utf8"));
+          const {receiptSha256, ...runtimeBody} = runtime;
+          if (!exact(runtime, ["schemaVersion","authority","sourceSha","sourceTreeSha","coworldClientVersion","uvVersion","pythonVersion","platform","requirementsInputSha256","requirementsLockSha256","inventorySha256","packageCount","receiptSha256"]) || runtime.schemaVersion !== 1 || runtime.authority !== "hash-locked-coworld-runtime-inventory-v1" || runtime.sourceSha !== process.env.SOURCE_SHA || runtime.sourceTreeSha !== sourceTree || runtime.coworldClientVersion !== "0.1.42" || runtime.uvVersion !== "0.8.12" || runtime.pythonVersion !== "3.12" || runtime.platform !== "linux/amd64" || runtime.requirementsInputSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.in")) || runtime.requirementsLockSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.lock.txt")) || runtime.inventorySha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-inventory.lock.txt")) || runtime.packageCount !== 50 || receiptSha256 !== sha(JSON.stringify(sort(runtimeBody)))) throw new Error("Commander XP provision runtime inventory mismatch");
+          NODE
+          LINEAGE="$PROVISION_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          FINAL_STATE="$PROVISION_ROOT/commander-xp-provision-recovery-v3.json"
+          LINEAGE_EVAL_VERSION=$(jq -r .evalVersion "$LINEAGE")
+          LINEAGE_NAME_PREFIX=$(jq -r .namePrefix "$LINEAGE")
+          LINEAGE_FENCE_REF=$(jq -r .fenceRef "$LINEAGE")
+          node .github/scripts/commander-xp-provision-lineage.mjs validate \
+            "$LINEAGE" "$FINAL_STATE" "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})" \
+            "$LINEAGE_EVAL_VERSION" "$LINEAGE_NAME_PREFIX" "$LINEAGE_FENCE_REF" \
+            > "$RUNNER_TEMP/provision-recovery-lineage-validation.json"
+          test "$LINEAGE_EVAL_VERSION" = "$(jq -r .coworldVersion "$PROVISION_ROOT/eval-coworld-identity-v2.json")"
+          if test "$(jq -r .mode "$LINEAGE")" = recovered; then
+            RECOVERY_ARTIFACT_ID=$(jq -r .inputBoundary.artifactID "$LINEAGE")
+            RECOVERY_RUN_ID=$(jq -r .inputBoundary.workflowRunID "$LINEAGE")
+            RECOVERY_RUN_ATTEMPT=$(jq -r .inputBoundary.workflowRunAttempt "$LINEAGE")
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_ARTIFACT_ID" > "$RUNNER_TEMP/prior-provision-boundary-artifact.json"
+            test "$(jq -r .expired "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = false
+            test "$(jq -r .name "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$(jq -r .inputBoundary.name "$LINEAGE")"
+            test "$(jq -r .digest "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$(jq -r .inputBoundary.digest "$LINEAGE")"
+            test "$(jq -r .workflow_run.id "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$RECOVERY_RUN_ID"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/prior-provision-boundary-run.json"
+            jq -e --arg source "$SOURCE_SHA" --argjson attempt "$RECOVERY_RUN_ATTEMPT" '
+              .status == "completed" and .conclusion != "success" and
+              .head_sha == $source and .run_attempt == $attempt and
+              .head_branch == "main" and .path == ".github/workflows/commander-xp-provision.yml" and
+              .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+              .head_repository.full_name == "0xNad/ProxyWar" and
+              .repository.full_name == "0xNad/ProxyWar" and .event == "workflow_dispatch"
+            ' "$RUNNER_TEMP/prior-provision-boundary-run.json" >/dev/null
+          fi
+          echo "PROVISION_ROOT=$PROVISION_ROOT" >> "$GITHUB_ENV"
+
+      - name: Derive the single preregistration fence identity
+        run: |
+          set -euo pipefail
+          FENCE_KEY_SHA=$(printf '%s\n%s\n' "$EXPERIMENT_ID" "$SOURCE_SHA" | sha256sum | cut -d' ' -f1)
+          PREREGISTRATION_FENCE_GIT_REF="refs/tags/commander-xp-preregistration-fence-v1/$FENCE_KEY_SHA"
+          echo "PREREGISTRATION_FENCE_GIT_REF=$PREREGISTRATION_FENCE_GIT_REF" >> "$GITHUB_ENV"
+
+      - name: Setup exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Install exact dependencies and build preregistration
+        run: |
+          set -euo pipefail
+          node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+          CREATED_AT="$PROVISION_COMPLETED_AT"
+          jq --arg experimentID "$EXPERIMENT_ID" --arg createdAt "$CREATED_AT" \
+            '. + {experimentID:$experimentID,createdAt:$createdAt}' \
+            "$PROVISION_ROOT/commander-xp-plan-input-base-v2.json" \
+            > "$RUNNER_TEMP/commander-xp-plan-input-v2.json"
+          npm run --silent agent:commander:xp:plan -- \
+            "$RUNNER_TEMP/commander-xp-plan-input-v2.json" \
+            "$RUNNER_TEMP/commander-xp-plan" \
+            > "$RUNNER_TEMP/commander-xp-plan-result.json"
+          jq -e '.ok == true and .mode == "plan-only-no-requests-created" and .providerPreflightRequestCount == 3 and .gameplayRequestCount == 108 and .requestCount == 111' \
+            "$RUNNER_TEMP/commander-xp-plan-result.json" >/dev/null
+          echo "CONTROL_CREATED_AT=$CREATED_AT" >> "$GITHUB_ENV"
+
+      - name: Build and validate the immutable control packet
+        run: |
+          set -euo pipefail
+          CONTROL_ROOT="$RUNNER_TEMP/commander-xp-control"
+          mkdir -m 700 "$CONTROL_ROOT"
+          cp "$RUNNER_TEMP/commander-xp-plan/commander-xp-preregistration-v2.json" "$CONTROL_ROOT/commander-xp-preregistration-v2.json"
+          cp "$PROVISION_ROOT/policy-identities-v2.json" "$CONTROL_ROOT/policy-identities-v2.json"
+          mkdir -m 700 "$CONTROL_ROOT/policy-inspect"
+          cp "$PROVISION_ROOT/policy-inspect/A.json" "$CONTROL_ROOT/policy-inspect/A.json"
+          cp "$PROVISION_ROOT/policy-inspect/B.json" "$CONTROL_ROOT/policy-inspect/B.json"
+          cp "$PROVISION_ROOT/policy-inspect/C.json" "$CONTROL_ROOT/policy-inspect/C.json"
+          cp "$PROVISION_ROOT/eval-coworld-identity-v2.json" "$CONTROL_ROOT/eval-coworld-identity-v2.json"
+          cp "$PROVISION_ROOT/eval-coworld-inspect.json" "$CONTROL_ROOT/eval-coworld-inspect.json"
+          cp "$PROVISION_ROOT/eval-coworld-manifest-v2.json" "$CONTROL_ROOT/eval-coworld-manifest-v2.json"
+          cp "$PROVISION_ROOT/eval-coworld-terminal-proof-v2.json" "$CONTROL_ROOT/eval-coworld-terminal-proof-v2.json"
+          cp "$PROVISION_ROOT/commander-xp-source-provenance-v2.json" "$CONTROL_ROOT/commander-xp-source-provenance-v2.json"
+          cp "$PROVISION_ROOT/commander-xp-source-tree-diff-v1.json" "$CONTROL_ROOT/commander-xp-source-tree-diff-v1.json"
+          cp "$PROVISION_ROOT/xp-openapi-contract-v2.json" "$CONTROL_ROOT/xp-openapi-contract-v2.json"
+          cp "$PROVISION_ROOT/coworld-runtime-inventory-v1.json" "$CONTROL_ROOT/coworld-runtime-inventory-v1.json"
+          cp "$PROVISION_ROOT/commander-xp-provision-recovery-lineage-v1.json" "$CONTROL_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          cp "$PROVISION_ROOT/commander-xp-provision-recovery-v3.json" "$CONTROL_ROOT/commander-xp-provision-recovery-v3.json"
+          node --input-type=module - "$CONTROL_ROOT" "$(git rev-parse HEAD^{tree})" <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+          const [root, sourceTree] = process.argv.slice(2);
+          const sha = (value) => createHash("sha256").update(value).digest("hex");
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const files = ["commander-xp-preregistration-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort().map((relative) => ({path:relative,sha256:sha(fs.readFileSync(path.join(root, relative)))}));
+          const prereg = JSON.parse(fs.readFileSync(path.join(root, "commander-xp-preregistration-v2.json"), "utf8"));
+          const body = {schemaVersion:2,authority:"github-actions-attested-control-packet-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-control.yml",experimentID:prereg.experimentID,sourceSha:process.env.SOURCE_SHA,sourceTreeSha:sourceTree,provisionArtifact:{id:Number(process.env.PROVISION_ARTIFACT_ID),digest:process.env.PROVISION_ARTIFACT_DIGEST,workflowRunID:Number(process.env.PROVISION_RUN_ID),workflowRunAttempt:Number(process.env.PROVISION_RUN_ATTEMPT)},preregistrationFenceGitRef:process.env.PREREGISTRATION_FENCE_GIT_REF,createdAt:process.env.CONTROL_CREATED_AT,files};
+          fs.writeFileSync(path.join(root, "commander-xp-control-manifest-v2.json"), `${JSON.stringify({...body,manifestSha256:sha(JSON.stringify(sort(body)))}, null, 2)}\n`, {flag:"wx"});
+          NODE
+          echo "CONTROL_ROOT=$CONTROL_ROOT" >> "$GITHUB_ENV"
+
+      - name: Atomically create or verify the single preregistration fence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/control-fence-main-authorization.json"
+          PREREGISTRATION_SHA=$(jq -r .preRegistrationSha256 "$CONTROL_ROOT/commander-xp-preregistration-v2.json")
+          CONTROL_MANIFEST_SHA=$(jq -r .manifestSha256 "$CONTROL_ROOT/commander-xp-control-manifest-v2.json")
+          FENCE_MESSAGE=$(jq -cS -n \
+            --arg experimentID "$EXPERIMENT_ID" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$(git rev-parse HEAD^{tree})" \
+            --argjson provisionArtifactID "$PROVISION_ARTIFACT_ID" \
+            --arg provisionArtifactDigest "$PROVISION_ARTIFACT_DIGEST" \
+            --argjson provisionRunID "$PROVISION_RUN_ID" \
+            --argjson provisionRunAttempt "$PROVISION_RUN_ATTEMPT" \
+            --arg preRegistrationSha256 "$PREREGISTRATION_SHA" \
+            --arg controlManifestSha256 "$CONTROL_MANIFEST_SHA" \
+            '{schemaVersion:1,authority:"github-annotated-preregistration-fence-v1",experimentID:$experimentID,sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,provisionArtifact:{id:$provisionArtifactID,digest:$provisionArtifactDigest,workflowRunID:$provisionRunID,workflowRunAttempt:$provisionRunAttempt},preRegistrationSha256:$preRegistrationSha256,controlManifestSha256:$controlManifestSha256}')
+          TAG_NAME=${PREREGISTRATION_FENCE_GIT_REF#refs/tags/}
+          if test "$RECOVER_EXISTING_PREREGISTRATION_FENCE" = true; then
+            TAG_OBJECT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/${PREREGISTRATION_FENCE_GIT_REF#refs/}" --jq .object.sha)
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > "$RUNNER_TEMP/preregistration-fence-tag.json"
+            test "$(jq -r .tag "$RUNNER_TEMP/preregistration-fence-tag.json")" = "$TAG_NAME"
+            test "$(jq -r .message "$RUNNER_TEMP/preregistration-fence-tag.json")" = "$FENCE_MESSAGE"
+            test "$(jq -r .object.type "$RUNNER_TEMP/preregistration-fence-tag.json")" = "commit"
+            test "$(jq -r .object.sha "$RUNNER_TEMP/preregistration-fence-tag.json")" = "$SOURCE_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+              -f tag="$TAG_NAME" -f message="$FENCE_MESSAGE" -f object="$SOURCE_SHA" -f type=commit \
+              > "$RUNNER_TEMP/preregistration-fence-tag.json"
+            TAG_OBJECT_SHA=$(jq -r .sha "$RUNNER_TEMP/preregistration-fence-tag.json")
+            [[ "$TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ]]
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="$PREREGISTRATION_FENCE_GIT_REF" -f sha="$TAG_OBJECT_SHA" \
+              > "$RUNNER_TEMP/preregistration-fence-ref.json"
+            test "$(jq -r .ref "$RUNNER_TEMP/preregistration-fence-ref.json")" = "$PREREGISTRATION_FENCE_GIT_REF"
+            test "$(jq -r .object.sha "$RUNNER_TEMP/preregistration-fence-ref.json")" = "$TAG_OBJECT_SHA"
+          fi
+
+      - name: Attest immutable control manifest
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/commander-xp-control/commander-xp-control-manifest-v2.json
+          show-summary: true
+
+      - name: Upload immutable control packet
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-control-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-control/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Verify immutable control artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          [[ '${{ steps.attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.upload.outputs.artifact-id }}" > "$RUNNER_TEMP/control-upload.json"
+          test "$(jq -r .name "$RUNNER_TEMP/control-upload.json")" = "commander-xp-control-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$(jq -r .workflow_run.id "$RUNNER_TEMP/control-upload.json")" = "$GITHUB_RUN_ID"
+          test "$(jq -r .expired "$RUNNER_TEMP/control-upload.json")" = "false"
+          ACTUAL_DIGEST=$(jq -r .digest "$RUNNER_TEMP/control-upload.json")
+          test "${ACTUAL_DIGEST#sha256:}" = '${{ steps.upload.outputs.artifact-digest }}'
+          gh attestation verify "$CONTROL_ROOT/commander-xp-control-manifest-v2.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-control.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners

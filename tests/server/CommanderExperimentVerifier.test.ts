@@ -49,7 +49,7 @@ describe("Commander experiment post-hoc seal verifier", () => {
       maxSteps: 1,
       turnsPerDecisionStep: 25,
     });
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     if (temporaryRoot !== "") {

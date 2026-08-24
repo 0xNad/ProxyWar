@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decisionRequestEnvelope,
+  normalizeCommanderExecutionEnvelope,
   normalizeDecisionResponse,
 } from "../../coworld-adapter/src/coworld-decision-wire";
 import {
@@ -13,6 +14,7 @@ import {
   DeferredAgentPlanner,
   isModelUnavailableError,
   keystoneModeFromEnv,
+  reconstructWireIntent,
   requestToBrainInput,
   spawnPreferenceDecision,
   transportFallbackResponse,
@@ -20,6 +22,7 @@ import {
   wireMaxSpawnPreferences,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
+import { UnitType } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import type {
   AgentPlanDecision,
@@ -33,6 +36,9 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
 import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
+import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
+import { buildStrategicOptions } from "../../src/server/agents/StrategicOptionBuilder";
+import { stubObservation, stubVisiblePlayer } from "./DealTestHarness";
 
 const modules: KeystoneModules = {
   plannerExecutor: plannerExecutorModule,
@@ -157,6 +163,126 @@ describe("Coworld keystone player", () => {
       score: 0.4,
     });
     expect(rebuilt.legalActions[0].metadata).toEqual({ coastal: true });
+  });
+
+  it("preserves all four Commander families across the intent-free Coworld JSON boundary", () => {
+    const rival = stubVisiblePlayer(
+      {
+        agentID: "rival-agent",
+        playerID: "RIVAL_A",
+        username: "Rival A",
+      },
+      { troops: 8_000, tilesOwned: 80, sharesBorder: true },
+    );
+    const observation = stubObservation({
+      seat: {
+        agentID: "commander-agent",
+        playerID: "SELF",
+        username: "Commander",
+      },
+      others: [rival],
+      turnNumber: 100,
+      gameID: "CMDWIRE1",
+    });
+    observation.nonCombat.buildOptions = [
+      {
+        unit: UnitType.City,
+        role: "economic",
+        targetTile: 101,
+        buildTile: 101,
+        cost: "100",
+        legalReason: "fixture can build a City",
+      },
+    ];
+    observation.nonCombat.upgradeOptions = [
+      {
+        unitID: 41,
+        unit: UnitType.Factory,
+        tile: 102,
+        level: 1,
+        cost: "100",
+        legalReason: "fixture can upgrade a Factory",
+      },
+    ];
+    observation.nonCombat.embargoOptions = [
+      {
+        targetID: rival.playerID,
+        targetName: rival.name,
+        action: "start",
+        legalReason: "fixture can embargo rival",
+      },
+    ];
+    observation.nonCombat.targetOptions = [
+      {
+        targetID: rival.playerID,
+        targetName: rival.name,
+        legalReason: "fixture can mark rival",
+      },
+    ];
+    const originalActions = new LegalActionBuilder().build({ observation });
+    const request = wireRequest({
+      observation,
+      legalActions: originalActions,
+    }) as { legalActions: Array<Record<string, unknown>> };
+
+    expect(request.legalActions).not.toHaveLength(0);
+    expect(
+      request.legalActions.every((action) => !Object.hasOwn(action, "intent")),
+    ).toBe(true);
+
+    const rebuilt = requestToBrainInput(request);
+    const options = buildStrategicOptions(rebuilt);
+    expect(options.candidates.map((candidate) => candidate.family)).toEqual([
+      "expand",
+      "develop_economy",
+      "pressure_rival",
+      "survive",
+    ]);
+
+    const offeredIDs = new Set(originalActions.map((action) => action.id));
+    for (const candidate of options.candidates) {
+      const boundIDs = [
+        ...candidate.binding.alignedPrimaryActionIDs,
+        ...candidate.binding.alignedSupportActionIDs,
+      ];
+      expect(boundIDs.length).toBeGreaterThan(0);
+      expect(boundIDs.every((id) => offeredIDs.has(id))).toBe(true);
+    }
+    expect(
+      options.candidates.find((candidate) => candidate.family === "expand")
+        ?.binding.alignedPrimaryActionIDs,
+    ).toContain("expand:terra-nullius:10");
+    expect(
+      options.candidates.find(
+        (candidate) => candidate.family === "develop_economy",
+      )?.binding.alignedPrimaryActionIDs,
+    ).toEqual(expect.arrayContaining(["build:City:101", "upgrade:Factory:41"]));
+    expect(
+      options.candidates.find(
+        (candidate) => candidate.family === "pressure_rival",
+      )?.binding.alignedPrimaryActionIDs,
+    ).toContain("attack:RIVAL_A:10");
+  });
+
+  it("fails closed on malformed compatibility metadata", () => {
+    const malformed: Array<[LegalAction["kind"], LegalAction["metadata"]]> = [
+      ["attack", { targetID: null, troops: -1 }],
+      ["attack", { targetID: null, troops: 1.5 }],
+      ["attack", { targetID: 7, troops: 100 }],
+      ["boat", { targetTile: -1, troops: 100 }],
+      ["boat", { targetTile: 1.5, troops: 100 }],
+      ["boat", { targetTile: 10, troops: -5 }],
+      ["build", { unit: UnitType.City, buildTile: 1.5 }],
+      ["upgrade_structure", { unit: UnitType.Factory, unitID: -1 }],
+      ["embargo", { targetID: "RIVAL_A", action: "stop" }],
+      ["target_player", { targetID: 7 }],
+      ["retreat", { attackID: "" }],
+    ];
+    for (const [kind, metadata] of malformed) {
+      expect(reconstructWireIntent(kind, metadata)).toBeNull();
+    }
+    expect(reconstructWireIntent("spawn", { tile: 10 })).toBeNull();
+    expect(reconstructWireIntent("hold", undefined)).toBeNull();
   });
 
   it("rejects payloads without legal actions", () => {
@@ -427,6 +553,62 @@ describe("Coworld keystone player", () => {
       metadata: { runtimeMode: "llm-policy-planner " },
     });
     expect(forged).not.toHaveProperty("runtimeMode");
+  });
+
+  it("decisionToResponse binds Commander execution metadata without changing selected actions", () => {
+    const response = decisionToResponse(
+      "req_commander",
+      {
+        actionID: "hold:primary",
+        actionIDs: ["hold:primary", "fortify:support"],
+        reason: "execute the bound plan",
+        metadata: {
+          runtimeMode: "commander-v0-selector",
+          plannerSource: "strategic-commander-v0",
+          planID: "plan-keystone-fixture",
+          planObjective: "survive",
+          commanderSelectedOptionID: "survive",
+          commanderSelectedOptionFamily: "survive",
+          commanderSelectorSource: "deterministic",
+          commanderDeterministicPreferredOptionId: "survive",
+          commanderDeterministicPreferredOptionAbsent: false,
+          commanderFidelity: "aligned_primary",
+          commanderBatchFidelities: JSON.stringify({
+            "hold:primary": "aligned_primary",
+            "fortify:support": "aligned_support",
+          }),
+          batchIndex: 0,
+          batchSize: 2,
+          batchActionIDs: "hold:primary,fortify:support",
+        },
+      },
+      5,
+    );
+    const envelope = normalizeCommanderExecutionEnvelope(
+      response.commanderExecution,
+    );
+    expect(response.selectedLegalActionId).toBe("hold:primary");
+    expect(response.selectedLegalActionIds).toEqual([
+      "hold:primary",
+      "fortify:support",
+    ]);
+    expect(envelope).not.toBeNull();
+    expect(envelope?.metadata).toMatchObject({
+      runtimeMode: "commander-v0-selector",
+      planID: "plan-keystone-fixture",
+      planObjective: "survive",
+      commanderFidelity: "aligned_primary",
+      batchSize: 2,
+    });
+    expect(envelope?.metadataSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(envelope?.selection).toEqual({
+      planID: "plan-keystone-fixture",
+      selectedOptionID: "survive",
+      selectedOptionFamily: "survive",
+      selectorSource: "deterministic",
+      deterministicPreferredOptionID: "survive",
+      deterministicPreferredOptionAbsent: false,
+    });
   });
 
   it("ranks an all-spawn menu locally and carries the independent preference field", () => {

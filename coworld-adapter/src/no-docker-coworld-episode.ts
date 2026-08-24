@@ -8,6 +8,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
+import { commanderXpEvalEvidenceEnabled } from "../../src/server/agents/CommanderXpGameEvidence.ts";
+import { CommanderXpFinalizationBarrier } from "./commander-xp-finalization.ts";
 import {
   coworldAppShellRoute,
   injectCoworldSplash,
@@ -30,7 +32,10 @@ import {
   coworldInlineRunArtifacts,
   coworldPublicReplayPayload,
 } from "./coworld-run-artifact-bundle.ts";
-import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
+import {
+  commanderXpArmInvariantSeatPlayers,
+  competitiveSeatSpecs,
+} from "./coworld-seat-specs.ts";
 import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 import {
@@ -110,6 +115,8 @@ type PendingDecision = {
 };
 
 export type CoworldConfig = {
+  commander_xp_phase?: "provider-preflight" | "canary" | "confirmatory";
+  commander_xp_run_key?: string;
   tokens: string[];
   players: Array<{ name: string }>;
   max_decision_steps: number;
@@ -120,6 +127,8 @@ export type CoworldConfig = {
   difficulty: string;
   seed?: number;
   replay_tail_turns?: number;
+  num_agents?: number;
+  episode_timeout_seconds?: number;
   player_connect_timeout_seconds?: number;
   /**
    * Zero-based episode ordinal within the commissioner's same-variant
@@ -165,6 +174,7 @@ class CoworldProtocolServer {
   // free text is off, so the flag-off envelope is byte-identical to shipped
   // behavior. Set before the first decision (see runProxyWarEpisode).
   private maxMessageChars: number | null = null;
+  private finalizationBarrier: CommanderXpFinalizationBarrier | null = null;
 
   constructor(private readonly config: CoworldConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -308,9 +318,29 @@ class CoworldProtocolServer {
     );
   }
 
-  sendFinal(): void {
+  async sendFinal(): Promise<void> {
+    const requiresFinalizationAck =
+      this.config.commander_xp_phase !== undefined;
+    if (requiresFinalizationAck) {
+      if (this.players.size !== this.config.tokens.length) {
+        throw new Error(
+          "Commander XP finalization requires every player connection",
+        );
+      }
+      this.finalizationBarrier = new CommanderXpFinalizationBarrier([
+        ...this.players.keys(),
+      ]);
+    }
     for (const [slot, websocket] of this.players.entries()) {
-      websocket.send(JSON.stringify({ type: "final", slot }));
+      websocket.send(
+        JSON.stringify({ type: "final", slot, requiresFinalizationAck }),
+      );
+    }
+    if (this.finalizationBarrier !== null) {
+      await this.finalizationBarrier.wait();
+      for (const [slot, websocket] of this.players.entries()) {
+        websocket.send(JSON.stringify({ type: "finalization_complete", slot }));
+      }
     }
   }
 
@@ -344,6 +374,9 @@ class CoworldProtocolServer {
             requestID,
             slot,
             request,
+            ...(this.config.commander_xp_run_key !== undefined
+              ? { commanderXpRunKey: this.config.commander_xp_run_key }
+              : {}),
             ...(this.maxMessageChars !== null
               ? { maxMessageChars: this.maxMessageChars }
               : {}),
@@ -424,6 +457,7 @@ class CoworldProtocolServer {
       this.players.set(slot, websocket);
       websocket.on("message", (data) => this.handlePlayerMessage(slot, data));
       websocket.on("close", () => {
+        this.finalizationBarrier?.disconnected(slot);
         if (this.players.get(slot) === websocket) {
           this.players.delete(slot);
         }
@@ -454,6 +488,10 @@ class CoworldProtocolServer {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return;
+    }
+    if (message.type === "finalization_ack") {
+      this.finalizationBarrier?.acknowledge(slot, message);
       return;
     }
     if (message.type !== "decision_response") {
@@ -714,7 +752,7 @@ async function runStandaloneNoDockerProof(): Promise<void> {
     if (process.env.PROXYWAR_SKIP_ROUTE_CHECKS !== "1") {
       await runReplayChecks(port);
     }
-    server.sendFinal();
+    await server.sendFinal();
     await waitForPlayersToExit(playerProcesses);
     await fs.writeFile(
       path.join(workspace, "coworld-report.md"),
@@ -770,8 +808,7 @@ async function runCoworldGameContainer(): Promise<void> {
       `${JSON.stringify(result.replayPayload, null, 2)}\n`,
       "application/json",
     );
-    server.sendFinal();
-    await sleep(Number(process.env.COWORLD_POSTGAME_SERVER_MS ?? 1500));
+    await server.sendFinal();
     console.log(
       JSON.stringify(
         {
@@ -834,6 +871,33 @@ async function runProxyWarEpisode(
   replayPayload: Record<string, unknown>;
   proxyWarArtifactDir: string;
 }> {
+  const commanderXpEval = commanderXpEvalEvidenceEnabled();
+  const commanderXpPhase = config.commander_xp_phase;
+  if (
+    commanderXpEval &&
+    (!["provider-preflight", "canary", "confirmatory"].includes(
+      String(commanderXpPhase),
+    ) ||
+      typeof config.commander_xp_run_key !== "string" ||
+      !/^commander-xp-v2\/[A-Za-z0-9._-]+\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C)$/.test(
+        config.commander_xp_run_key,
+      ) ||
+      !config.commander_xp_run_key.includes(`/${commanderXpPhase}/`))
+  ) {
+    throw new Error(
+      "Commander XP eval config requires exact phase/run identity",
+    );
+  }
+  const commanderXpGameplay =
+    commanderXpEval && commanderXpPhase !== "provider-preflight";
+  if (
+    commanderXpGameplay &&
+    (config.max_decision_steps !== 360 ||
+      config.turns_per_decision_step !== 100 ||
+      config.max_decision_ms !== 15_000)
+  ) {
+    throw new Error("Commander XP gameplay cadence mismatch");
+  }
   const modules = await loadProxyWarModules();
   // Publish the comms capability before any decision frame goes out. Resolved
   // from the engine's own tunables so the advertisement can never disagree
@@ -913,8 +977,11 @@ async function runProxyWarEpisode(
   // A/B (verified across 3 keystone builds). All competitive seats now get the
   // same neutral profile; skill differences come from the POLICIES, not from
   // which chair they drew.
+  const identityPlayers = config.commander_xp_phase
+    ? commanderXpArmInvariantSeatPlayers(config.players)
+    : config.players;
   const specs = competitiveSeatSpecs(
-    config.players,
+    identityPlayers,
     modules.proxyWarGameUsernameMaxLength ?? 27,
   );
   const participants = modules.createAgentParticipants(specs, log, {
@@ -997,7 +1064,7 @@ async function runProxyWarEpisode(
         maxSteps: config.max_decision_steps,
         turnsPerDecisionStep: config.turns_per_decision_step,
         maxDecisionMs: config.max_decision_ms,
-        requireWinner: false,
+        requireWinner: commanderXpGameplay,
         waitForMirrorCatchup: true,
       },
       onSnapshot: (snapshot: {
@@ -1116,6 +1183,19 @@ async function runProxyWarEpisode(
       artifacts.spectatorReplayPath === null
         ? spectatorReplay
         : JSON.parse(await fs.readFile(artifacts.spectatorReplayPath, "utf8"));
+    if (commanderXpEval) {
+      const { commanderXpGameEvidenceLine, projectCommanderXpGameEvidence } =
+        await importProxyWar("src/server/agents/CommanderXpGameEvidence.ts");
+      for (const record of league.decisionRecords()) {
+        const evidence = projectCommanderXpGameEvidence(
+          record,
+          config.commander_xp_run_key,
+        );
+        if (evidence !== null) {
+          console.log(commanderXpGameEvidenceLine(evidence));
+        }
+      }
+    }
     const results = coworldResults({
       gameId: game.id,
       seed: episodeIdentity.seed,
@@ -1438,6 +1518,8 @@ async function readReplayPayload(uri: string): Promise<unknown> {
 
 function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
   return {
+    commander_xp_phase: config.commander_xp_phase,
+    commander_xp_run_key: config.commander_xp_run_key,
     players: config.players,
     max_decision_steps: config.max_decision_steps,
     turns_per_decision_step: config.turns_per_decision_step,
@@ -1447,6 +1529,9 @@ function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
     difficulty: config.difficulty,
     seed: config.seed,
     replay_tail_turns: config.replay_tail_turns,
+    episodeIndex: config.episodeIndex,
+    num_agents: config.num_agents,
+    episode_timeout_seconds: config.episode_timeout_seconds,
     player_connect_timeout_seconds: config.player_connect_timeout_seconds,
     player_count: config.tokens.length,
   };
@@ -1501,6 +1586,16 @@ function replayConfig(payload: unknown): CoworldConfig | null {
         ? config.player_count
         : players.length;
     return {
+      commander_xp_phase:
+        config.commander_xp_phase === "provider-preflight" ||
+        config.commander_xp_phase === "canary" ||
+        config.commander_xp_phase === "confirmatory"
+          ? config.commander_xp_phase
+          : undefined,
+      commander_xp_run_key:
+        typeof config.commander_xp_run_key === "string"
+          ? config.commander_xp_run_key
+          : undefined,
       tokens: Array.from({ length: playerCount }, () => ""),
       players,
       max_decision_steps: Number(config.max_decision_steps ?? 1),
@@ -1512,6 +1607,16 @@ function replayConfig(payload: unknown): CoworldConfig | null {
       replay_tail_turns:
         typeof config.replay_tail_turns === "number"
           ? config.replay_tail_turns
+          : undefined,
+      episodeIndex:
+        typeof config.episodeIndex === "number"
+          ? config.episodeIndex
+          : undefined,
+      num_agents:
+        typeof config.num_agents === "number" ? config.num_agents : undefined,
+      episode_timeout_seconds:
+        typeof config.episode_timeout_seconds === "number"
+          ? config.episode_timeout_seconds
           : undefined,
       player_connect_timeout_seconds:
         typeof config.player_connect_timeout_seconds === "number"

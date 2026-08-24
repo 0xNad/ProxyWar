@@ -145,6 +145,8 @@ jobs:
         with:
           node-version: 24
       - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
+      - name: Install Coworld adapter test dependencies
+        run: npm ci --ignore-scripts --prefix coworld-adapter
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -312,12 +314,21 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
           submodules: false
+      - *checkout-protected-ci-control
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
       - name: Run admission and release security tests
         run: node --test tests/automation/*.test.mjs
+      - name: Install Commander workflow test dependencies
+        run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
+      - name: Run Commander XP workflow security tests
+        run: |
+          node --test \
+            .github/scripts/commander-xp-*.test.mjs \
+            .github/scripts/coworld-authenticated-command.test.mjs
       - name: Parse workflow YAML
         run: ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |f| YAML.parse_file(f) }'
       - name: Validate workflow schema, expressions, and permissions

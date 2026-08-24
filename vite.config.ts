@@ -267,6 +267,10 @@ export default defineConfig(({ mode }) => {
         "**/outputs/**",
         "**/.claude/**",
         "**/.codex/**",
+        // Commander XP workflow/security tests use node:test directly. Vitest
+        // rewrites import.meta.url and cannot execute those suites truthfully;
+        // CI runs them in the trusted release-automation job instead.
+        "**/.github/**",
         "**/.docker-context/**",
         "**/deploy/**",
         "**/tests/automation/**",

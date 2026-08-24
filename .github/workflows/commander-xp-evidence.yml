@@ -1,0 +1,1207 @@
+name: Commander XP protected experiment evidence
+run-name: Commander XP ${{ inputs.phase }} / ${{ inputs.source_sha }} / control ${{ inputs.control_artifact_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Exact preregistered phase
+        required: true
+        type: choice
+        options:
+          - preregistration
+          - provider-preflight
+          - canary
+          - confirmatory
+      experiment_id:
+        description: Exact immutable Commander experiment ID
+        required: true
+        type: string
+      source_sha:
+        description: Exact protected-main Commander source commit
+        required: true
+        type: string
+      source_ci_run_id:
+        description: Successful exact-source CI workflow run ID
+        required: true
+        type: string
+      source_ci_run_attempt:
+        description: Exact-source CI workflow run attempt
+        required: true
+        type: string
+      control_artifact_id:
+        description: Attested immutable Commander control-packet artifact ID
+        required: true
+        type: string
+      preregistration_binding_artifact_id:
+        description: Attested preregistration phase-binding artifact ID for later phases
+        required: false
+        type: string
+      provider_preflight_binding_artifact_id:
+        description: Attested provider-preflight phase-binding artifact ID for gameplay phases
+        required: false
+        type: string
+      canary_binding_artifact_id:
+        description: Attested canary phase-binding artifact ID for confirmation
+        required: false
+        type: string
+      recovery_dispatch_artifact_id:
+        description: Exact retained partial-dispatch artifact ID to adopt; empty for a first attempt
+        required: false
+        type: string
+
+concurrency:
+  group: commander-xp-evidence-${{ inputs.experiment_id }}-${{ inputs.phase }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+env:
+  PHASE: ${{ inputs.phase }}
+  EXPERIMENT_ID: ${{ inputs.experiment_id }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+  SOURCE_CI_RUN_ATTEMPT: ${{ inputs.source_ci_run_attempt }}
+  CONTROL_ARTIFACT_ID: ${{ inputs.control_artifact_id }}
+  PREREGISTRATION_BINDING_ARTIFACT_ID: ${{ inputs.preregistration_binding_artifact_id }}
+  PROVIDER_PREFLIGHT_BINDING_ARTIFACT_ID: ${{ inputs.provider_preflight_binding_artifact_id }}
+  CANARY_BINDING_ARTIFACT_ID: ${{ inputs.canary_binding_artifact_id }}
+  RECOVERY_DISPATCH_ARTIFACT_ID: ${{ inputs.recovery_dispatch_artifact_id }}
+
+jobs:
+  collect:
+    name: Fence, dispatch, sanitize, and publish exact evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    environment: coworld-production
+    steps:
+      - name: Checkout exact protected source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Authorize exact protected-main source and CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          require_positive_integer() {
+            case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+          }
+          require_sha1() {
+            test "${#1}" = 40 || return 1
+            case "$1" in *[!0-9a-f]*) return 1 ;; esac
+          }
+          require_experiment_id() {
+            test "${#1}" -ge 1 && test "${#1}" -le 200 || return 1
+            case "$1" in [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+          }
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REPOSITORY" = "0xNad/ProxyWar"
+          require_sha1 "$SOURCE_SHA"
+          require_experiment_id "$EXPERIMENT_ID"
+          require_positive_integer "$SOURCE_CI_RUN_ID"
+          require_positive_integer "$SOURCE_CI_RUN_ATTEMPT"
+          require_positive_integer "$CONTROL_ARTIFACT_ID"
+          case "$PHASE" in
+            preregistration)
+              test -z "$RECOVERY_DISPATCH_ARTIFACT_ID"
+              test -z "$PREREGISTRATION_BINDING_ARTIFACT_ID"
+              test -z "$PROVIDER_PREFLIGHT_BINDING_ARTIFACT_ID"
+              test -z "$CANARY_BINDING_ARTIFACT_ID"
+              ;;
+            provider-preflight)
+              require_positive_integer "$PREREGISTRATION_BINDING_ARTIFACT_ID"
+              test -z "$PROVIDER_PREFLIGHT_BINDING_ARTIFACT_ID"
+              test -z "$CANARY_BINDING_ARTIFACT_ID"
+              ;;
+            canary)
+              require_positive_integer "$PREREGISTRATION_BINDING_ARTIFACT_ID"
+              require_positive_integer "$PROVIDER_PREFLIGHT_BINDING_ARTIFACT_ID"
+              test -z "$CANARY_BINDING_ARTIFACT_ID"
+              ;;
+            confirmatory)
+              require_positive_integer "$PREREGISTRATION_BINDING_ARTIFACT_ID"
+              require_positive_integer "$PROVIDER_PREFLIGHT_BINDING_ARTIFACT_ID"
+              require_positive_integer "$CANARY_BINDING_ARTIFACT_ID"
+              ;;
+            *) exit 1 ;;
+          esac
+          if test -n "$RECOVERY_DISPATCH_ARTIFACT_ID"; then
+            require_positive_integer "$RECOVERY_DISPATCH_ARTIFACT_ID"
+          fi
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = "true"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/source-ci.json"
+          test "$(jq -r .head_sha "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_SHA"
+          test "$(jq -r .run_attempt "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_CI_RUN_ATTEMPT"
+          test "$(jq -r .path "$RUNNER_TEMP/source-ci.json")" = ".github/workflows/ci.yml"
+          test "$(jq -r .actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
+          test "$(jq -r .triggering_actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
+          test "$(jq -r .head_branch "$RUNNER_TEMP/source-ci.json")" = "main"
+          test "$(jq -r .head_repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status "$RUNNER_TEMP/source-ci.json")" = "completed"
+          test "$(jq -r .conclusion "$RUNNER_TEMP/source-ci.json")" = "success"
+          test "$(jq -r .event "$RUNNER_TEMP/source-ci.json")" = "push"
+      - name: Download and verify the immutable control packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CONTROL_ROOT="$RUNNER_TEMP/commander-xp-control"
+          mkdir -m 700 "$CONTROL_ROOT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CONTROL_ARTIFACT_ID" > "$RUNNER_TEMP/control-artifact.json"
+          test "$(jq -r .id "$RUNNER_TEMP/control-artifact.json")" = "$CONTROL_ARTIFACT_ID"
+          test "$(jq -r .expired "$RUNNER_TEMP/control-artifact.json")" = "false"
+          CONTROL_RUN_ID=$(jq -r .workflow_run.id "$RUNNER_TEMP/control-artifact.json")
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$CONTROL_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/control-artifact.zip"
+          python - "$RUNNER_TEMP/control-artifact.zip" "$CONTROL_ROOT" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe control artifact member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special control artifact member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"control artifact path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+          COMMON=(
+            commander-xp-preregistration-v2.json
+            commander-xp-provision-recovery-lineage-v1.json
+            commander-xp-provision-recovery-v3.json
+            commander-xp-source-provenance-v2.json
+            commander-xp-source-tree-diff-v1.json
+            coworld-runtime-inventory-v1.json
+            policy-identities-v2.json
+            policy-inspect/A.json
+            policy-inspect/B.json
+            policy-inspect/C.json
+            eval-coworld-identity-v2.json
+            eval-coworld-inspect.json
+            eval-coworld-manifest-v2.json
+            eval-coworld-terminal-proof-v2.json
+            xp-openapi-contract-v2.json
+          )
+          EXPECTED=$(( ${#COMMON[@]} + 1 ))
+          test "$(find "$CONTROL_ROOT" -type f | wc -l | tr -d ' ')" = "$EXPECTED"
+          test "$(find "$CONTROL_ROOT" -type l | wc -l | tr -d ' ')" = "0"
+          for RELATIVE in "${COMMON[@]}"; do
+            test -f "$CONTROL_ROOT/$RELATIVE"
+            test ! -L "$CONTROL_ROOT/$RELATIVE"
+          done
+          MANIFEST="$CONTROL_ROOT/commander-xp-control-manifest-v2.json"
+          test -f "$MANIFEST"
+          test ! -L "$MANIFEST"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CONTROL_RUN_ID" > "$RUNNER_TEMP/control-run.json"
+          CONTROL_ATTEMPT=$(jq -r .run_attempt "$RUNNER_TEMP/control-run.json")
+          test "$(jq -r .name "$RUNNER_TEMP/control-artifact.json")" = "commander-xp-control-$SOURCE_SHA-$CONTROL_RUN_ID-$CONTROL_ATTEMPT"
+          jq -e --arg source "$SOURCE_SHA" '
+            .status == "completed" and .conclusion == "success" and
+            .head_sha == $source and .head_branch == "main" and
+            .path == ".github/workflows/commander-xp-control.yml" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .event == "workflow_dispatch"
+          ' "$RUNNER_TEMP/control-run.json" >/dev/null
+          gh attestation verify "$MANIFEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-control.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
+          node --input-type=module - "$MANIFEST" "$CONTROL_ROOT" "$(git rev-parse HEAD^{tree})" <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+          const [manifestPath, root, sourceTree] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const exact = (actual, expected) => JSON.stringify(Object.keys(actual).sort()) === JSON.stringify([...expected].sort());
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const sha = (value) => createHash("sha256").update(value).digest("hex");
+          const required = ["commander-xp-preregistration-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
+          const { manifestSha256, ...body } = manifest;
+          const expectedFenceRef = `refs/tags/commander-xp-preregistration-fence-v1/${sha(`${manifest.experimentID}\n${process.env.SOURCE_SHA}\n`)}`;
+          if (!exact(manifest, ["schemaVersion","authority","repository","workflowPath","experimentID","sourceSha","sourceTreeSha","provisionArtifact","preregistrationFenceGitRef","createdAt","files","manifestSha256"]) || !exact(manifest.provisionArtifact, ["id","digest","workflowRunID","workflowRunAttempt"]) || manifest.schemaVersion !== 2 || manifest.authority !== "github-actions-attested-control-packet-v1" || manifest.repository !== "0xNad/ProxyWar" || manifest.workflowPath !== ".github/workflows/commander-xp-control.yml" || manifest.sourceSha !== process.env.SOURCE_SHA || manifest.sourceTreeSha !== sourceTree || !Number.isSafeInteger(manifest.provisionArtifact.id) || manifest.provisionArtifact.id < 1 || !/^sha256:[0-9a-f]{64}$/.test(manifest.provisionArtifact.digest) || !Number.isSafeInteger(manifest.provisionArtifact.workflowRunID) || manifest.provisionArtifact.workflowRunID < 1 || !Number.isSafeInteger(manifest.provisionArtifact.workflowRunAttempt) || manifest.provisionArtifact.workflowRunAttempt < 1 || manifest.preregistrationFenceGitRef !== expectedFenceRef || !Number.isFinite(Date.parse(manifest.createdAt)) || manifestSha256 !== sha(JSON.stringify(sort(body))) || !Array.isArray(manifest.files) || JSON.stringify(manifest.files.map((entry) => entry.path)) !== JSON.stringify(required)) throw new Error("Commander XP control manifest is invalid");
+          for (const entry of manifest.files) {
+            if (!exact(entry, ["path","sha256"]) || !/^[0-9a-f]{64}$/.test(entry.sha256) || sha(fs.readFileSync(path.join(root, entry.path))) !== entry.sha256) throw new Error(`Commander XP control file mismatch: ${entry.path}`);
+          }
+          const prereg = JSON.parse(fs.readFileSync(path.join(root, "commander-xp-preregistration-v2.json"), "utf8"));
+          const openapi = JSON.parse(fs.readFileSync(path.join(root, "xp-openapi-contract-v2.json"), "utf8"));
+          const {receiptSha256, ...openapiBody} = openapi;
+          const runtime = JSON.parse(fs.readFileSync(path.join(root, "coworld-runtime-inventory-v1.json"), "utf8"));
+          const {receiptSha256:runtimeReceiptSha256, ...runtimeBody} = runtime;
+          if (manifest.experimentID !== prereg.experimentID || prereg.experimentID !== process.env.EXPERIMENT_ID || prereg.identities?.adapterSourceSha !== process.env.SOURCE_SHA || prereg.identities?.adapterSourceTreeSha !== sourceTree || openapi.schemaVersion !== 2 || openapi.authority !== "softmax-public-openapi-exact-bytes-v1" || openapi.url !== "https://softmax.com/api/observatory/openapi.json" || openapi.rawSha256 !== prereg.identities.xpOpenApiSha256 || openapi.createRequestSchema?.sha256 !== prereg.identities.xpCreateRequestSchemaSha256 || openapi.rosterSchemas?.sha256 !== prereg.identities.xpRosterSchemasSha256 || receiptSha256 !== sha(JSON.stringify(sort(openapiBody))) || !exact(runtime, ["schemaVersion","authority","sourceSha","sourceTreeSha","coworldClientVersion","uvVersion","pythonVersion","platform","requirementsInputSha256","requirementsLockSha256","inventorySha256","packageCount","receiptSha256"]) || runtime.schemaVersion !== 1 || runtime.authority !== "hash-locked-coworld-runtime-inventory-v1" || runtime.sourceSha !== process.env.SOURCE_SHA || runtime.sourceTreeSha !== sourceTree || runtime.coworldClientVersion !== "0.1.42" || runtime.uvVersion !== "0.8.12" || runtime.pythonVersion !== "3.12" || runtime.platform !== "linux/amd64" || runtime.requirementsInputSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.in")) || runtime.requirementsLockSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.lock.txt")) || runtime.inventorySha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-inventory.lock.txt")) || runtime.packageCount !== 50 || runtimeReceiptSha256 !== sha(JSON.stringify(sort(runtimeBody)))) throw new Error("Commander XP control source identity mismatch");
+          NODE
+          LINEAGE="$CONTROL_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          LINEAGE_EVAL_VERSION=$(jq -r .evalVersion "$LINEAGE")
+          LINEAGE_NAME_PREFIX=$(jq -r .namePrefix "$LINEAGE")
+          LINEAGE_FENCE_REF=$(jq -r .fenceRef "$LINEAGE")
+          node .github/scripts/commander-xp-provision-lineage.mjs validate \
+            "$LINEAGE" "$CONTROL_ROOT/commander-xp-provision-recovery-v3.json" \
+            "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})" "$LINEAGE_EVAL_VERSION" \
+            "$LINEAGE_NAME_PREFIX" "$LINEAGE_FENCE_REF" \
+            > "$RUNNER_TEMP/control-provision-recovery-lineage-validation.json"
+          test "$LINEAGE_EVAL_VERSION" = "$(jq -r .coworldVersion "$CONTROL_ROOT/eval-coworld-identity-v2.json")"
+          PREREGISTRATION_FENCE_GIT_REF=$(jq -r .preregistrationFenceGitRef "$MANIFEST")
+          PROVISION_ARTIFACT_ID=$(jq -r .provisionArtifact.id "$MANIFEST")
+          PROVISION_ARTIFACT_DIGEST=$(jq -r .provisionArtifact.digest "$MANIFEST")
+          PROVISION_RUN_ID=$(jq -r .provisionArtifact.workflowRunID "$MANIFEST")
+          PROVISION_RUN_ATTEMPT=$(jq -r .provisionArtifact.workflowRunAttempt "$MANIFEST")
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROVISION_ARTIFACT_ID" > "$RUNNER_TEMP/control-provision-artifact.json"
+          test "$(jq -r .expired "$RUNNER_TEMP/control-provision-artifact.json")" = "false"
+          test "$(jq -r .digest "$RUNNER_TEMP/control-provision-artifact.json")" = "$PROVISION_ARTIFACT_DIGEST"
+          test "$(jq -r .workflow_run.id "$RUNNER_TEMP/control-provision-artifact.json")" = "$PROVISION_RUN_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROVISION_RUN_ID" > "$RUNNER_TEMP/control-provision-run.json"
+          test "$(jq -r .run_attempt "$RUNNER_TEMP/control-provision-run.json")" = "$PROVISION_RUN_ATTEMPT"
+          EXPECTED_FENCE_MESSAGE=$(jq -cS -n \
+            --arg experimentID "$(jq -r .experimentID "$MANIFEST")" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$(git rev-parse HEAD^{tree})" \
+            --argjson provisionArtifactID "$PROVISION_ARTIFACT_ID" \
+            --arg provisionArtifactDigest "$PROVISION_ARTIFACT_DIGEST" \
+            --argjson provisionRunID "$PROVISION_RUN_ID" \
+            --argjson provisionRunAttempt "$PROVISION_RUN_ATTEMPT" \
+            --arg preRegistrationSha256 "$(jq -r .preRegistrationSha256 "$CONTROL_ROOT/commander-xp-preregistration-v2.json")" \
+            --arg controlManifestSha256 "$(jq -r .manifestSha256 "$MANIFEST")" \
+            '{schemaVersion:1,authority:"github-annotated-preregistration-fence-v1",experimentID:$experimentID,sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,provisionArtifact:{id:$provisionArtifactID,digest:$provisionArtifactDigest,workflowRunID:$provisionRunID,workflowRunAttempt:$provisionRunAttempt},preRegistrationSha256:$preRegistrationSha256,controlManifestSha256:$controlManifestSha256}')
+          FENCE_TAG_OBJECT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/${PREREGISTRATION_FENCE_GIT_REF#refs/}" --jq .object.sha)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$FENCE_TAG_OBJECT_SHA" > "$RUNNER_TEMP/control-preregistration-fence-tag.json"
+          test "$(jq -r .tag "$RUNNER_TEMP/control-preregistration-fence-tag.json")" = "${PREREGISTRATION_FENCE_GIT_REF#refs/tags/}"
+          test "$(jq -r .message "$RUNNER_TEMP/control-preregistration-fence-tag.json")" = "$EXPECTED_FENCE_MESSAGE"
+          test "$(jq -r .object.type "$RUNNER_TEMP/control-preregistration-fence-tag.json")" = "commit"
+          test "$(jq -r .object.sha "$RUNNER_TEMP/control-preregistration-fence-tag.json")" = "$SOURCE_SHA"
+          echo "CONTROL_ROOT=$CONTROL_ROOT" >> "$GITHUB_ENV"
+          jq -e 'type == "array" and length > 0 and (sort == .) and (unique == .)' \
+            .github/scripts/commander-xp-source-allowlist-v2.json >/dev/null
+
+      - name: Setup exact Node and Coworld 0.1.42 runtimes
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Setup exact uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+
+      - name: Install exact dependencies and Coworld client
+        run: |
+          set -euo pipefail
+          node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+          node .github/scripts/npm-ci-with-retry.mjs --prefix coworld-adapter --ignore-scripts
+          uv venv "$RUNNER_TEMP/coworld-venv" --python 3.12
+          test "$(uv --version)" = "uv 0.8.12"
+          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            --require-hashes \
+            -r .github/scripts/commander-xp-coworld-requirements.lock.txt
+          test "$($RUNNER_TEMP/coworld-venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("coworld"))')" = "0.1.42"
+          uv pip freeze --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            | LC_ALL=C sort > "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          cmp .github/scripts/commander-xp-coworld-inventory.lock.txt \
+            "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          COWORLD_RUNTIME_INVENTORY_SHA256=$(sha256sum "$RUNNER_TEMP/coworld-runtime-inventory.txt" | cut -d' ' -f1)
+          test "$COWORLD_RUNTIME_INVENTORY_SHA256" = "$(jq -r .inventorySha256 "$CONTROL_ROOT/coworld-runtime-inventory-v1.json")"
+          echo "COWORLD_RUNTIME_INVENTORY_SHA256=$COWORLD_RUNTIME_INVENTORY_SHA256" >> "$GITHUB_ENV"
+          echo "COWORLD_PYTHON=$RUNNER_TEMP/coworld-venv/bin/python" >> "$GITHUB_ENV"
+          echo "COWORLD_BIN=$RUNNER_TEMP/coworld-venv/bin/coworld" >> "$GITHUB_ENV"
+
+      - name: Run exact local contract gates
+        run: |
+          set -euo pipefail
+          npm exec -- tsc --noEmit --pretty false
+          npm run --prefix coworld-adapter typecheck
+          node --import tsx -e "import('./coworld-adapter/src/commander-xp-collect.ts')"
+          npm exec -- vitest \
+            coworld-adapter/src/commander-xp-dispatch.test.ts \
+            coworld-adapter/src/commander-xp-collect.test.ts \
+            tests/server/CommanderXpVerifier.test.ts \
+            --run --silent --reporter=dot --maxWorkers=1
+          node --test \
+            .github/scripts/commander-xp-control-workflow.test.mjs \
+            .github/scripts/commander-xp-evidence-workflow.test.mjs \
+            .github/scripts/coworld-authenticated-command.test.mjs \
+            .github/scripts/commander-xp-external-seal.test.mjs
+
+      - name: Resolve and verify retained phase authorities before mutation
+        if: inputs.phase != 'preregistration'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREREGISTRATION_BINDING_ID: ${{ inputs.preregistration_binding_artifact_id }}
+          PROVIDER_PREFLIGHT_BINDING_ID: ${{ inputs.provider_preflight_binding_artifact_id }}
+          CANARY_BINDING_ID: ${{ inputs.canary_binding_artifact_id }}
+        run: |
+          set -euo pipefail
+          PRIOR_ROOT="$RUNNER_TEMP/commander-xp-prior"
+          mkdir -m 700 "$PRIOR_ROOT"
+          printf 'PREREG_BINDING_PATH=\nPROVIDER_BINDING_PATH=\nCANARY_BINDING_PATH=\nPREREG_LEDGER_PATH=\nPROVIDER_LEDGER_PATH=\nCANARY_LEDGER_PATH=\n' >> "$GITHUB_ENV"
+          case "$PHASE" in
+            provider-preflight)
+              REQUIRED=("preregistration:$PREREGISTRATION_BINDING_ID")
+              ;;
+            canary)
+              REQUIRED=(
+                "preregistration:$PREREGISTRATION_BINDING_ID"
+                "provider-preflight:$PROVIDER_PREFLIGHT_BINDING_ID"
+              )
+              ;;
+            confirmatory)
+              REQUIRED=(
+                "preregistration:$PREREGISTRATION_BINDING_ID"
+                "provider-preflight:$PROVIDER_PREFLIGHT_BINDING_ID"
+                "canary:$CANARY_BINDING_ID"
+              )
+              ;;
+            *) exit 1 ;;
+          esac
+          for ENTRY in "${REQUIRED[@]}"; do
+            PRIOR_PHASE=${ENTRY%%:*}
+            BINDING_ARTIFACT_ID=${ENTRY#*:}
+            PHASE_ROOT="$PRIOR_ROOT/$PRIOR_PHASE"
+            mkdir -m 700 "$PHASE_ROOT"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINDING_ARTIFACT_ID" > "$PHASE_ROOT/binding-artifact.json"
+            test "$(jq -r .id "$PHASE_ROOT/binding-artifact.json")" = "$BINDING_ARTIFACT_ID"
+            test "$(jq -r .expired "$PHASE_ROOT/binding-artifact.json")" = "false"
+            BINDING_RUN_ID=$(jq -r .workflow_run.id "$PHASE_ROOT/binding-artifact.json")
+            gh api -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINDING_ARTIFACT_ID/zip" \
+              > "$PHASE_ROOT/binding.zip"
+            mkdir -m 700 "$PHASE_ROOT/binding"
+            python - "$PHASE_ROOT/binding.zip" "$PHASE_ROOT/binding" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe retained artifact member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special retained artifact member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"retained artifact path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+            BINDING="$PHASE_ROOT/binding/commander-xp-phase-receipt-binding-v2.json"
+            test -f "$BINDING"
+            test "$(find "$PHASE_ROOT/binding" -type f | wc -l | tr -d ' ')" = "1"
+            node .github/scripts/commander-xp-external-seal.mjs verify-phase-binding \
+              --binding="$BINDING" --phase="$PRIOR_PHASE" >/dev/null
+            test "$(jq -r .runId "$BINDING")" = "$BINDING_RUN_ID"
+            test "$(jq -r .headSha "$BINDING")" = "$SOURCE_SHA"
+            PRIOR_SIGNER_SOURCE_SHA=$(jq -r .signerSourceSha "$BINDING")
+            [[ "$PRIOR_SIGNER_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$(jq -r .experimentID "$BINDING")" = "$(jq -r .experimentID "$CONTROL_ROOT/commander-xp-preregistration-v2.json")"
+            test "$(jq -r .name "$PHASE_ROOT/binding-artifact.json")" = "commander-xp-phase-binding-$PRIOR_PHASE-$SOURCE_SHA-$BINDING_RUN_ID-$(jq -r .attempt "$BINDING")"
+            gh attestation verify "$BINDING" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+              --source-ref "refs/heads/main" \
+              --source-digest "$PRIOR_SIGNER_SOURCE_SHA" \
+              --signer-digest "$PRIOR_SIGNER_SOURCE_SHA" \
+              --deny-self-hosted-runners
+            PRIOR_ATTEMPT=$(jq -r .attempt "$BINDING")
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID/attempts/$PRIOR_ATTEMPT" > "$PHASE_ROOT/run.json"
+            jq -e --arg signer "$PRIOR_SIGNER_SOURCE_SHA" --argjson attempt "$PRIOR_ATTEMPT" '
+              .status == "completed" and .conclusion == "success" and
+              .run_attempt == $attempt and .head_sha == $signer and
+              .head_branch == "main" and .path == ".github/workflows/commander-xp-external-seal.yml" and
+              .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+              .head_repository.full_name == "0xNad/ProxyWar" and
+              .event == "workflow_run"
+            ' "$PHASE_ROOT/run.json" >/dev/null
+            for KIND in evidence receipt ledger authority terminal; do
+              ARTIFACT_ID=$(jq -r ".${KIND}Artifact.id" "$BINDING")
+              EXPECTED_DIGEST=$(jq -r ".${KIND}Artifact.digest" "$BINDING")
+              METADATA="$PHASE_ROOT/$KIND-artifact.json"
+              gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$METADATA"
+              test "$(jq -r .expired "$METADATA")" = "false"
+              test "$(jq -r .workflow_run.id "$METADATA")" = "$BINDING_RUN_ID"
+              ACTUAL_DIGEST=$(jq -r .digest "$METADATA")
+              test "${ACTUAL_DIGEST#sha256:}" = "${EXPECTED_DIGEST#sha256:}"
+              if test "$KIND" = ledger || test "$KIND" = authority || test "$KIND" = terminal; then
+                test "$(jq -r .name "$METADATA")" = "$(jq -r ".${KIND}Artifact.name" "$BINDING")"
+                gh api -H "Accept: application/vnd.github+json" \
+                  "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+                  > "$PHASE_ROOT/$KIND.zip"
+                mkdir -m 700 "$PHASE_ROOT/$KIND"
+                python - "$PHASE_ROOT/$KIND.zip" "$PHASE_ROOT/$KIND" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe retained artifact member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special retained artifact member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"retained artifact path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+              fi
+            done
+            LEDGER="$PHASE_ROOT/ledger/commander-xp-external-phase-ledger-v2.json"
+            AUTHORITY="$PHASE_ROOT/authority/commander-xp-external-authority-receipt-v1.json"
+            TERMINAL="$PHASE_ROOT/terminal/commander-xp-terminal-authority-envelope-v2.json"
+            test -f "$LEDGER"
+            test -f "$AUTHORITY"
+            test -f "$TERMINAL"
+            test "$(find "$PHASE_ROOT/ledger" -type f | wc -l | tr -d ' ')" = "1"
+            test "$(find "$PHASE_ROOT/terminal" -type f | wc -l | tr -d ' ')" = "1"
+            (cd "$PHASE_ROOT/authority" && sha256sum --check SHA256SUMS)
+            for SUBJECT in "$LEDGER" "$AUTHORITY" "$TERMINAL"; do
+              gh attestation verify "$SUBJECT" \
+                --repo "$GITHUB_REPOSITORY" \
+                --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+                --source-ref "refs/heads/main" \
+                --source-digest "$PRIOR_SIGNER_SOURCE_SHA" \
+                --signer-digest "$PRIOR_SIGNER_SOURCE_SHA" \
+                --deny-self-hosted-runners
+            done
+            node .github/scripts/commander-xp-external-seal.mjs verify-prior-authority \
+              --ledger="$LEDGER" \
+              --authority-receipt="$AUTHORITY" \
+              --terminal-envelope="$TERMINAL" \
+              --binding="$BINDING" \
+              --phase="$PRIOR_PHASE" >/dev/null
+            CANONICAL_LEDGER="$PRIOR_ROOT/$(jq -r .path "$BINDING")"
+            cp "$LEDGER" "$CANONICAL_LEDGER"
+            case "$PRIOR_PHASE" in
+              preregistration)
+                echo "PREREG_BINDING_PATH=$BINDING" >> "$GITHUB_ENV"
+                echo "PREREG_LEDGER_PATH=$CANONICAL_LEDGER" >> "$GITHUB_ENV"
+                ;;
+              provider-preflight)
+                echo "PROVIDER_BINDING_PATH=$BINDING" >> "$GITHUB_ENV"
+                echo "PROVIDER_LEDGER_PATH=$CANONICAL_LEDGER" >> "$GITHUB_ENV"
+                ;;
+              canary)
+                echo "CANARY_BINDING_PATH=$BINDING" >> "$GITHUB_ENV"
+                echo "CANARY_LEDGER_PATH=$CANONICAL_LEDGER" >> "$GITHUB_ENV"
+                ;;
+            esac
+          done
+          case "$PHASE" in
+            provider-preflight)
+              echo "PRIOR_LEDGER_PATH=$PRIOR_ROOT/commander-xp-prereg-ledger-v2.json" >> "$GITHUB_ENV"
+              ;;
+            canary)
+              echo "PRIOR_LEDGER_PATH=$PRIOR_ROOT/commander-xp-provider-preflight-ledger-v2.json" >> "$GITHUB_ENV"
+              ;;
+            confirmatory)
+              echo "PRIOR_LEDGER_PATH=$PRIOR_ROOT/commander-xp-canary-ledger-v2.json" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      - name: Build confirmatory activation from the verified canary authority
+        if: inputs.phase == 'confirmatory'
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const hash = (value) => createHash("sha256").update(JSON.stringify(sort(value))).digest("hex");
+          const prereg = JSON.parse(fs.readFileSync(`${process.env.CONTROL_ROOT}/commander-xp-preregistration-v2.json`, "utf8"));
+          const canary = JSON.parse(fs.readFileSync(process.env.CANARY_LEDGER_PATH, "utf8"));
+          const body = {
+            schemaVersion: 2,
+            experimentID: prereg.experimentID,
+            phase: "confirmatory",
+            createdAt: new Date().toISOString(),
+            preRegistrationSha256: prereg.preRegistrationSha256,
+            priorCanaryLedgerSha256: canary.ledgerSha256,
+            priorCanaryRunId: canary.runId,
+            priorCanaryAttempt: canary.attempt,
+            priorCanaryEvidenceArtifact: canary.evidenceArtifact,
+            priorCanaryReceiptArtifact: canary.receiptArtifact,
+            priorCanaryLocalSealSha256: canary.evidenceArtifact.localSealSha256,
+            confirmatoryRequestPlanSha256: hash(prereg.requests.filter((request) => request.phase === "confirmatory")),
+          };
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/commander-xp-confirmatory-activation-v2.json`, `${JSON.stringify({...body, activationSha256: hash(body)}, null, 2)}\n`, {flag:"wx"});
+          NODE
+          echo "ACTIVATION_PATH=$RUNNER_TEMP/commander-xp-confirmatory-activation-v2.json" >> "$GITHUB_ENV"
+
+      - name: Authenticate and inspect the exact eval Coworld before fencing
+        if: inputs.phase != 'preregistration'
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          EVAL_COWORLD_ID=$(jq -r .coworldID "$CONTROL_ROOT/eval-coworld-identity-v2.json")
+          EXPECTED_MANIFEST_SHA=$(jq -r .hostedManifestSha256 "$CONTROL_ROOT/eval-coworld-identity-v2.json")
+          [[ "$EVAL_COWORLD_ID" =~ ^cow_[A-Za-z0-9-]+$ ]]
+          [[ "$EXPECTED_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" \
+            status "$EVAL_COWORLD_ID" --json > "$RUNNER_TEMP/eval-coworld-preflight.json"
+          test "$(jq -r .coworld.id "$RUNNER_TEMP/eval-coworld-preflight.json")" = "$EVAL_COWORLD_ID"
+          ACTUAL_MANIFEST_SHA=$(jq -r .coworld.manifest_hash "$RUNNER_TEMP/eval-coworld-preflight.json")
+          ACTUAL_MANIFEST_SHA=${ACTUAL_MANIFEST_SHA#sha256:}
+          test "${ACTUAL_MANIFEST_SHA#sha256:}" = "$EXPECTED_MANIFEST_SHA"
+          test "$(jq -r .coworld.canonical "$RUNNER_TEMP/eval-coworld-preflight.json")" = "false"
+          rm -f "$RUNNER_TEMP/eval-coworld-preflight.json"
+
+      - name: Resolve one exact retained dispatch boundary for recovery
+        if: inputs.phase != 'preregistration' && inputs.recovery_dispatch_artifact_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RECOVERY_ROOT="$RUNNER_TEMP/commander-xp-recovery"
+          mkdir -m 700 "$RECOVERY_ROOT"
+          METADATA="$RUNNER_TEMP/recovery-artifact.json"
+          ARCHIVE="$RUNNER_TEMP/recovery-artifact.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_DISPATCH_ARTIFACT_ID" > "$METADATA"
+          test "$(jq -r .id "$METADATA")" = "$RECOVERY_DISPATCH_ARTIFACT_ID"
+          test "$(jq -r .expired "$METADATA")" = "false"
+          RECOVERY_RUN_ID=$(jq -r .workflow_run.id "$METADATA")
+          [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/recovery-run.json"
+          RECOVERY_RUN_ATTEMPT=$(jq -r .run_attempt "$RUNNER_TEMP/recovery-run.json")
+          EXPECTED_NAME="commander-xp-dispatch-boundary-$EXPERIMENT_ID-$PHASE-$SOURCE_SHA-$RECOVERY_RUN_ID-$RECOVERY_RUN_ATTEMPT"
+          EXPECTED_FINAL_NAME="commander-xp-dispatch-boundary-final-$EXPERIMENT_ID-$PHASE-$SOURCE_SHA-$RECOVERY_RUN_ID-$RECOVERY_RUN_ATTEMPT"
+          ACTUAL_NAME=$(jq -r .name "$METADATA")
+          test "$ACTUAL_NAME" = "$EXPECTED_NAME" || test "$ACTUAL_NAME" = "$EXPECTED_FINAL_NAME"
+          RECOVERY_ARTIFACT_DIGEST=$(jq -r .digest "$METADATA")
+          [[ "$RECOVERY_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -e --arg source "$SOURCE_SHA" '
+            .status == "completed" and .conclusion != "success" and
+            .head_sha == $source and .head_branch == "main" and
+            .path == ".github/workflows/commander-xp-evidence.yml" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .repository.full_name == "0xNad/ProxyWar" and
+            .event == "workflow_dispatch"
+          ' "$RUNNER_TEMP/recovery-run.json" >/dev/null
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_DISPATCH_ARTIFACT_ID/zip" \
+            > "$ARCHIVE"
+          python - "$ARCHIVE" "$RECOVERY_ROOT" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe recovery artifact member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special recovery artifact member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"recovery artifact path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+          test "$(find "$RECOVERY_ROOT" -type l | wc -l | tr -d ' ')" = "0"
+          while IFS= read -r RELATIVE; do
+            case "$RELATIVE" in
+              commander-xp-dispatch-authorization-v2.json|\
+              commander-xp-dispatch-recovery-link-v1.json|\
+              commander-xp-dispatch/xp-openapi-contract-v2.json|\
+              commander-xp-dispatch/xp-openapi-revalidation-v2.json|\
+              commander-xp-dispatch/commander-xp-dispatch-progress-v2.json|\
+              commander-xp-dispatch/commander-xp-dispatch-receipt-v2.json|\
+              commander-xp-dispatch/runs/$PHASE/r[0-9][0-9]/[ABC]/submitted-request.json|\
+              commander-xp-dispatch/runs/$PHASE/r[0-9][0-9]/[ABC]/create-response.json|\
+              commander-xp-dispatch/runs/$PHASE/r[0-9][0-9]/[ABC]/create-failure.json|\
+              commander-xp-dispatch/runs/$PHASE/r[0-9][0-9]/[ABC]/first-wave-terminal.json|\
+              commander-xp-dispatch-final/commander-xp-dispatch-progress-v2.json|\
+              commander-xp-dispatch-final/xp-openapi-contract-v2.json|\
+              commander-xp-dispatch-final/xp-openapi-revalidation-v2.json|\
+              commander-xp-dispatch-final/commander-xp-dispatch-receipt-v2.json|\
+              commander-xp-dispatch-final/runs/$PHASE/r[0-9][0-9]/[ABC]/submitted-request.json|\
+              commander-xp-dispatch-final/runs/$PHASE/r[0-9][0-9]/[ABC]/create-response.json|\
+              commander-xp-dispatch-final/runs/$PHASE/r[0-9][0-9]/[ABC]/create-failure.json|\
+              commander-xp-dispatch-final/runs/$PHASE/r[0-9][0-9]/[ABC]/first-wave-terminal.json) ;;
+              *) echo "unexpected recovery artifact member: $RELATIVE" >&2; exit 1 ;;
+            esac
+          done < <(cd "$RECOVERY_ROOT" && find . -type f -print | sed 's#^./##' | LC_ALL=C sort)
+          RECOVERY_AUTH_PATH="$RECOVERY_ROOT/commander-xp-dispatch-authorization-v2.json"
+          test -f "$RECOVERY_AUTH_PATH"
+          mapfile -t RECOVERY_PROGRESS_FILES < <(find "$RECOVERY_ROOT" -type f -name commander-xp-dispatch-progress-v2.json)
+          test "${#RECOVERY_PROGRESS_FILES[@]}" = "1"
+          RECOVERY_DIRECTORY=$(dirname "${RECOVERY_PROGRESS_FILES[0]}")
+          node --input-type=module - "$RECOVERY_AUTH_PATH" "$CONTROL_ROOT/commander-xp-preregistration-v2.json" "$PRIOR_LEDGER_PATH" "${ACTIVATION_PATH:-}" <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          const [authorizationPath, preregPath, priorPath, activationPath] = process.argv.slice(2);
+          const authorization = JSON.parse(fs.readFileSync(authorizationPath, "utf8"));
+          const prereg = JSON.parse(fs.readFileSync(preregPath, "utf8"));
+          const prior = JSON.parse(fs.readFileSync(priorPath, "utf8"));
+          const activation = activationPath ? JSON.parse(fs.readFileSync(activationPath, "utf8")) : null;
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const hash = (value) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(sort(value))).digest("hex");
+          const { dispatchAuthorizationSha256, ...body } = authorization;
+          const expectedFenceRef = `refs/tags/commander-xp-dispatch-fence-v2/${hash(`${prereg.experimentID}\n${process.env.PHASE}\n${process.env.SOURCE_SHA}\n`)}`;
+          const exactKeys = (value, keys) => JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+          if (!exactKeys(authorization, ["schemaVersion","authority","experimentID","phase","preRegistrationSha256","workflowSourceSha","workflowSourceTreeSha","authorizedAt","priorLedgerSha256","activationSha256","fenceArtifact","fenceGitRef","createdAt","dispatchAuthorizationSha256"]) ||
+              !exactKeys(authorization.fenceArtifact, ["id","name","digest","workflowRunID","workflowRunAttempt"]) ||
+              authorization.schemaVersion !== 2 || authorization.authority !== "github-actions-pre-dispatch-fence-v1" ||
+              authorization.experimentID !== prereg.experimentID || authorization.phase !== process.env.PHASE ||
+              authorization.preRegistrationSha256 !== prereg.preRegistrationSha256 ||
+              authorization.workflowSourceSha !== process.env.SOURCE_SHA ||
+              authorization.workflowSourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+              authorization.priorLedgerSha256 !== prior.ledgerSha256 ||
+              authorization.activationSha256 !== (activation?.activationSha256 ?? null) ||
+              authorization.fenceGitRef !== expectedFenceRef ||
+              dispatchAuthorizationSha256 !== hash(body)) process.exit(1);
+          NODE
+          FENCE_GIT_REF=$(jq -r .fenceGitRef "$RECOVERY_AUTH_PATH")
+          FENCE_ARTIFACT_ID=$(jq -r .fenceArtifact.id "$RECOVERY_AUTH_PATH")
+          FENCE_ARTIFACT_DIGEST=$(jq -r .fenceArtifact.digest "$RECOVERY_AUTH_PATH")
+          FENCE_NAME=$(jq -r .fenceArtifact.name "$RECOVERY_AUTH_PATH")
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/${FENCE_GIT_REF#refs/}" --jq .object.sha)" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$FENCE_ARTIFACT_ID" > "$RUNNER_TEMP/recovery-fence-artifact.json"
+          test "$(jq -r .expired "$RUNNER_TEMP/recovery-fence-artifact.json")" = "false"
+          test "$(jq -r .name "$RUNNER_TEMP/recovery-fence-artifact.json")" = "$FENCE_NAME"
+          test "$(jq -r .digest "$RUNNER_TEMP/recovery-fence-artifact.json")" = "$FENCE_ARTIFACT_DIGEST"
+          FENCE_RUN_ID=$(jq -r .fenceArtifact.workflowRunID "$RECOVERY_AUTH_PATH")
+          FENCE_RUN_ATTEMPT=$(jq -r .fenceArtifact.workflowRunAttempt "$RECOVERY_AUTH_PATH")
+          test "$(jq -r .workflow_run.id "$RUNNER_TEMP/recovery-fence-artifact.json")" = "$FENCE_RUN_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FENCE_RUN_ID" > "$RUNNER_TEMP/recovery-fence-run.json"
+          jq -e --arg source "$SOURCE_SHA" --argjson attempt "$FENCE_RUN_ATTEMPT" '
+            .run_attempt == $attempt and .head_sha == $source and
+            .head_branch == "main" and .path == ".github/workflows/commander-xp-evidence.yml" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .repository.full_name == "0xNad/ProxyWar" and .event == "workflow_dispatch"
+          ' "$RUNNER_TEMP/recovery-fence-run.json" >/dev/null
+          RECOVERY_KEY_SHA=$(printf '%s\n%s\n%s\n%s\n%s\n' "$EXPERIMENT_ID" "$PHASE" "$SOURCE_SHA" "$RECOVERY_DISPATCH_ARTIFACT_ID" "$RECOVERY_ARTIFACT_DIGEST" | sha256sum | cut -d' ' -f1)
+          RECOVERY_GIT_REF="refs/tags/commander-xp-dispatch-recovery-v1/$RECOVERY_KEY_SHA"
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="$RECOVERY_GIT_REF" -f sha="$SOURCE_SHA" \
+            > "$RUNNER_TEMP/recovery-ref.json" 2> "$RUNNER_TEMP/recovery-ref-error.txt"; then
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/${RECOVERY_GIT_REF#refs/}" \
+              > "$RUNNER_TEMP/recovery-ref.json"
+          fi
+          test "$(jq -r .ref "$RUNNER_TEMP/recovery-ref.json")" = "$RECOVERY_GIT_REF"
+          test "$(jq -r .object.sha "$RUNNER_TEMP/recovery-ref.json")" = "$SOURCE_SHA"
+          rm -f "$RUNNER_TEMP/recovery-ref-error.txt"
+          jq -cS -n --argjson artifactID "$RECOVERY_DISPATCH_ARTIFACT_ID" --arg digest "$RECOVERY_ARTIFACT_DIGEST" --argjson runID "$RECOVERY_RUN_ID" --argjson attempt "$RECOVERY_RUN_ATTEMPT" --arg fenceGitRef "$FENCE_GIT_REF" --arg recoveryGitRef "$RECOVERY_GIT_REF" --arg source "$SOURCE_SHA" --arg phase "$PHASE" --arg experimentID "$EXPERIMENT_ID" \
+            '{schemaVersion:1,authority:"github-actions-dispatch-recovery-link-v1",experimentID:$experimentID,phase:$phase,workflowSourceSha:$source,priorBoundaryArtifact:{id:$artifactID,digest:$digest,workflowRunID:$runID,workflowRunAttempt:$attempt},fenceGitRef:$fenceGitRef,recoveryGitRef:$recoveryGitRef}' \
+            > "$RUNNER_TEMP/commander-xp-dispatch-recovery-link-v1.json"
+          echo "RECOVERY_AUTH_PATH=$RECOVERY_AUTH_PATH" >> "$GITHUB_ENV"
+          echo "RECOVERY_DIRECTORY=$RECOVERY_DIRECTORY" >> "$GITHUB_ENV"
+          echo "RECOVERY_GIT_REF=$RECOVERY_GIT_REF" >> "$GITHUB_ENV"
+          echo "FENCE_GIT_REF=$FENCE_GIT_REF" >> "$GITHUB_ENV"
+          echo "FENCE_NAME=$FENCE_NAME" >> "$GITHUB_ENV"
+
+      - name: Revalidate exact XP OpenAPI immediately before the irreversible fence
+        if: inputs.phase != 'preregistration'
+        run: |
+          set -euo pipefail
+          RAW="$RUNNER_TEMP/xp-openapi-pre-dispatch.json"
+          RECEIPT="$RUNNER_TEMP/xp-openapi-pre-dispatch-contract-v2.json"
+          FETCHED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          curl --fail --silent --show-error --location \
+            https://softmax.com/api/observatory/openapi.json \
+            --output "$RAW"
+          node .github/scripts/commander-xp-openapi-contract.mjs \
+            "$RAW" "$RECEIPT" "$FETCHED_AT" \
+            > "$RUNNER_TEMP/xp-openapi-pre-dispatch-result.json"
+          jq -e --slurpfile frozen "$CONTROL_ROOT/xp-openapi-contract-v2.json" '
+            .schemaVersion == 2 and
+            .authority == "softmax-public-openapi-exact-bytes-v1" and
+            .url == $frozen[0].url and
+            .byteLength == $frozen[0].byteLength and
+            .rawSha256 == $frozen[0].rawSha256 and
+            .coworldClientVersion == $frozen[0].coworldClientVersion and
+            .createRequestSchema == $frozen[0].createRequestSchema and
+            .rosterSchemas == $frozen[0].rosterSchemas
+          ' "$RECEIPT" >/dev/null
+          rm -f "$RAW" "$RUNNER_TEMP/xp-openapi-pre-dispatch-result.json"
+          echo "XP_OPENAPI_DISPATCH_CONTRACT_PATH=$RECEIPT" >> "$GITHUB_ENV"
+
+      - name: Create immutable pre-dispatch fence body
+        if: inputs.phase != 'preregistration' && inputs.recovery_dispatch_artifact_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EXPERIMENT_ID=$(jq -r .experimentID "$CONTROL_ROOT/commander-xp-preregistration-v2.json")
+          [[ "$EXPERIMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]]
+          FENCE_NAME="commander-xp-dispatch-fence-$EXPERIMENT_ID-$PHASE-$SOURCE_SHA"
+          FENCE_KEY_SHA=$(printf '%s\n%s\n%s\n' "$EXPERIMENT_ID" "$PHASE" "$SOURCE_SHA" | sha256sum | cut -d' ' -f1)
+          FENCE_GIT_REF="refs/tags/commander-xp-dispatch-fence-v2/$FENCE_KEY_SHA"
+          case "$PHASE" in
+            provider-preflight) ;;
+            canary) ;;
+            confirmatory)
+              test -f "$ACTIVATION_PATH"
+              ;;
+            *) exit 1 ;;
+          esac
+          PRIOR_LEDGER_SHA=$(jq -r .ledgerSha256 "$PRIOR_LEDGER_PATH")
+          ACTIVATION_SHA=null
+          if test "$PHASE" = confirmatory; then
+            ACTIVATION_SHA=$(jq -r .activationSha256 "$ACTIVATION_PATH")
+          fi
+          jq -cS -n \
+            --arg experimentID "$EXPERIMENT_ID" \
+            --arg phase "$PHASE" \
+            --arg prereg "$(jq -r .preRegistrationSha256 "$CONTROL_ROOT/commander-xp-preregistration-v2.json")" \
+            --arg source "$SOURCE_SHA" \
+            --arg prior "$PRIOR_LEDGER_SHA" \
+            --arg activation "$ACTIVATION_SHA" \
+            --arg runID "$GITHUB_RUN_ID" \
+            --argjson attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg fenceGitRef "$FENCE_GIT_REF" \
+            --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            '{schemaVersion:2,authority:"github-actions-pre-dispatch-fence-v1",experimentID:$experimentID,phase:$phase,preRegistrationSha256:$prereg,workflowSourceSha:$source,priorLedgerSha256:$prior,activationSha256:(if $activation == "null" then null else $activation end),workflowRunID:$runID,workflowRunAttempt:$attempt,fenceGitRef:$fenceGitRef,createdAt:$createdAt}' \
+            > "$RUNNER_TEMP/commander-xp-dispatch-fence-v1.json"
+          echo "FENCE_NAME=$FENCE_NAME" >> "$GITHUB_ENV"
+          echo "FENCE_GIT_REF=$FENCE_GIT_REF" >> "$GITHUB_ENV"
+
+      - name: Create durable atomic pre-dispatch Git ref
+        if: inputs.phase != 'preregistration' && inputs.recovery_dispatch_artifact_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/dispatch-fence-main-authorization.json"
+          [[ "$FENCE_GIT_REF" =~ ^refs/tags/commander-xp-dispatch-fence-v2/[0-9a-f]{64}$ ]]
+          FENCE_REF_RECOVERY_MODE=false
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="$FENCE_GIT_REF" \
+            -f sha="$SOURCE_SHA" \
+            > "$RUNNER_TEMP/dispatch-fence-ref.json" 2> "$RUNNER_TEMP/dispatch-fence-ref-error.txt"; then
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/${FENCE_GIT_REF#refs/}" \
+              > "$RUNNER_TEMP/dispatch-fence-ref.json"
+            FENCE_REF_RECOVERY_MODE=true
+          fi
+          test "$(jq -r .ref "$RUNNER_TEMP/dispatch-fence-ref.json")" = "$FENCE_GIT_REF"
+          test "$(jq -r .object.sha "$RUNNER_TEMP/dispatch-fence-ref.json")" = "$SOURCE_SHA"
+          rm -f "$RUNNER_TEMP/dispatch-fence-ref-error.txt"
+          echo "FENCE_REF_RECOVERY_MODE=$FENCE_REF_RECOVERY_MODE" >> "$GITHUB_ENV"
+
+      - name: Upload immutable pre-dispatch fence
+        if: inputs.phase != 'preregistration' && inputs.recovery_dispatch_artifact_id == ''
+        id: fence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.FENCE_NAME }}
+          path: ${{ runner.temp }}/commander-xp-dispatch-fence-v1.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Build exact dispatch authorization and submit once
+        if: inputs.phase != 'preregistration'
+        id: dispatch
+        continue-on-error: true
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          FENCE_ARTIFACT_ID: ${{ steps.fence.outputs.artifact-id }}
+          FENCE_ARTIFACT_DIGEST: ${{ steps.fence.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/dispatch-main-authorization.json"
+          if test -n "$RECOVERY_DISPATCH_ARTIFACT_ID"; then
+            test -f "$RECOVERY_AUTH_PATH"
+            cp "$RECOVERY_AUTH_PATH" "$RUNNER_TEMP/commander-xp-dispatch-authorization-v2.json"
+          else
+            [[ "$FENCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+            if [[ "$FENCE_ARTIFACT_DIGEST" != sha256:* ]]; then
+              FENCE_ARTIFACT_DIGEST="sha256:$FENCE_ARTIFACT_DIGEST"
+            fi
+            export FENCE_ARTIFACT_DIGEST
+            [[ "$FENCE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          const control = process.env.CONTROL_ROOT;
+          const phase = process.env.PHASE;
+          const prereg = JSON.parse(fs.readFileSync(`${control}/commander-xp-preregistration-v2.json`, "utf8"));
+          const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_LEDGER_PATH, "utf8"));
+          const activation = phase === "confirmatory" ? JSON.parse(fs.readFileSync(process.env.ACTIVATION_PATH, "utf8")) : null;
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const hash = (value) => createHash("sha256").update(JSON.stringify(sort(value))).digest("hex");
+          const body = {
+            schemaVersion: 2,
+            authority: "github-actions-pre-dispatch-fence-v1",
+            experimentID: prereg.experimentID,
+            phase,
+            preRegistrationSha256: prereg.preRegistrationSha256,
+            workflowSourceSha: prereg.identities.adapterSourceSha,
+            workflowSourceTreeSha: prereg.identities.adapterSourceTreeSha,
+            authorizedAt: activation?.createdAt ?? prior.completedAt,
+            priorLedgerSha256: prior.ledgerSha256,
+            activationSha256: activation?.activationSha256 ?? null,
+            fenceArtifact: {
+              id: Number(process.env.FENCE_ARTIFACT_ID),
+              name: process.env.FENCE_NAME,
+              digest: process.env.FENCE_ARTIFACT_DIGEST,
+              workflowRunID: Number(process.env.GITHUB_RUN_ID),
+              workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            },
+            fenceGitRef: process.env.FENCE_GIT_REF,
+            createdAt: new Date().toISOString(),
+          };
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/commander-xp-dispatch-authorization-v2.json`, `${JSON.stringify({...body, dispatchAuthorizationSha256: hash(body)}, null, 2)}\n`, {flag:"wx"});
+          NODE
+          fi
+          jq -n \
+            --arg phase "$PHASE" \
+            --arg prereg "$CONTROL_ROOT/commander-xp-preregistration-v2.json" \
+            --arg xpOpenApiContract "$XP_OPENAPI_DISPATCH_CONTRACT_PATH" \
+            --arg preregReceipt "$PREREG_LEDGER_PATH" \
+            --arg providerReceipt "$PROVIDER_LEDGER_PATH" \
+            --arg canaryReceipt "$CANARY_LEDGER_PATH" \
+            --arg activation "${ACTIVATION_PATH:-}" \
+            --arg authorization "$RUNNER_TEMP/commander-xp-dispatch-authorization-v2.json" \
+            --arg command "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" \
+            --arg output "$RUNNER_TEMP/commander-xp-dispatch" \
+            --arg recovery "${RECOVERY_DIRECTORY:-}" \
+            --arg fenceRecovery "${FENCE_REF_RECOVERY_MODE:-false}" \
+            '{schemaVersion:2,phase:$phase,preRegistrationPath:$prereg,xpOpenApiContractPath:$xpOpenApiContract,preregistrationReceiptPath:$preregReceipt,dispatchAuthorizationPath:$authorization,coworldCommandPath:$command,outputDirectory:$output}
+             + (if $phase == "canary" or $phase == "confirmatory" then {providerPreflightReceiptPath:$providerReceipt} else {} end)
+             + (if $phase == "confirmatory" then {canaryReceiptPath:$canaryReceipt,confirmatoryActivationPath:$activation} else {} end)
+             + (if $recovery != "" then {recoveryDirectory:$recovery} else {} end)
+             + (if $recovery == "" and $fenceRecovery == "true" then {fenceRecoveryMode:"adopt-or-create-unseen"} else {} end)
+             + (if $phase == "confirmatory" then {confirmatoryDispatchMode:"first-wave-only"} else {} end)' \
+            > "$RUNNER_TEMP/commander-xp-dispatch-input-v2.json"
+          npm run --silent agent:commander:xp:dispatch -- "$RUNNER_TEMP/commander-xp-dispatch-input-v2.json" \
+            > "$RUNNER_TEMP/commander-xp-dispatch-result.json"
+
+      - name: Retain immutable sanitized dispatch boundary evidence
+        if: always() && inputs.phase != 'preregistration'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-dispatch-boundary-${{ inputs.experiment_id }}-${{ inputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/commander-xp-dispatch-authorization-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-recovery-link-v1.json
+            ${{ runner.temp }}/commander-xp-dispatch/commander-xp-dispatch-progress-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch/commander-xp-dispatch-receipt-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch/xp-openapi-contract-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch/xp-openapi-revalidation-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch/runs/**/submitted-request.json
+            ${{ runner.temp }}/commander-xp-dispatch/runs/**/create-response.json
+            ${{ runner.temp }}/commander-xp-dispatch/runs/**/create-failure.json
+            ${{ runner.temp }}/commander-xp-dispatch/runs/**/first-wave-terminal.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Resume from retained wave one and submit confirmatory wave two
+        if: inputs.phase == 'confirmatory' && steps.dispatch.outcome == 'success'
+        id: confirmatory_dispatch
+        continue-on-error: true
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/confirmatory-wave-two-main-authorization.json"
+          FIRST_WAVE_ROOT=$(realpath "$RUNNER_TEMP/commander-xp-dispatch")
+          jq --arg recovery "$FIRST_WAVE_ROOT" --arg output "$RUNNER_TEMP/commander-xp-dispatch-final" \
+            'del(.confirmatoryDispatchMode) | .recoveryDirectory=$recovery | .outputDirectory=$output' \
+            "$RUNNER_TEMP/commander-xp-dispatch-input-v2.json" \
+            > "$RUNNER_TEMP/commander-xp-dispatch-final-input-v2.json"
+          npm run --silent agent:commander:xp:dispatch -- "$RUNNER_TEMP/commander-xp-dispatch-final-input-v2.json" \
+            > "$RUNNER_TEMP/commander-xp-dispatch-final-result.json"
+
+      - name: Retain immutable confirmatory wave-two boundary evidence
+        if: always() && inputs.phase == 'confirmatory' && steps.dispatch.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-dispatch-boundary-final-${{ inputs.experiment_id }}-${{ inputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/commander-xp-dispatch-authorization-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-recovery-link-v1.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/commander-xp-dispatch-progress-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/commander-xp-dispatch-receipt-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/xp-openapi-contract-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/xp-openapi-revalidation-v2.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/runs/**/submitted-request.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/runs/**/create-response.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/runs/**/create-failure.json
+            ${{ runner.temp }}/commander-xp-dispatch-final/runs/**/first-wave-terminal.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Fail closed after retaining a partial dispatch
+        if: inputs.phase != 'preregistration' && (steps.dispatch.outcome != 'success' || (inputs.phase == 'confirmatory' && steps.confirmatory_dispatch.outcome != 'success'))
+        run: exit 1
+
+      - name: Wait for every dispatched XP request to finish
+        if: inputs.phase != 'preregistration'
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          DISPATCH_ROOT="$RUNNER_TEMP/commander-xp-dispatch"
+          if test "$PHASE" = confirmatory; then
+            DISPATCH_ROOT="$RUNNER_TEMP/commander-xp-dispatch-final"
+          fi
+          DEADLINE=$(( $(date +%s) + 21600 ))
+          mapfile -t REQUESTS < <(jq -r '.requests[].xpRequestID' "$DISPATCH_ROOT/commander-xp-dispatch-receipt-v2.json")
+          test "${#REQUESTS[@]}" = "$(jq -r .requestCount "$DISPATCH_ROOT/commander-xp-dispatch-receipt-v2.json")"
+          while true; do
+            PENDING=0
+            for XREQ in "${REQUESTS[@]}"; do
+              "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" xp-request get "$XREQ" --json > "$RUNNER_TEMP/xp-status.json"
+              test "$(jq -r .id "$RUNNER_TEMP/xp-status.json")" = "$XREQ"
+              test "$(jq -r '.episodes | length' "$RUNNER_TEMP/xp-status.json")" = "1"
+              STATUS=$(jq -r '.episodes[0].status' "$RUNNER_TEMP/xp-status.json")
+              case "$STATUS" in
+                completed) ;;
+                failed)
+                  jq -c '{id,episodes:[.episodes[0] | {id,status,error,error_type}]}' "$RUNNER_TEMP/xp-status.json" >&2
+                  exit 1
+                  ;;
+                submitted|pending|running) PENDING=$((PENDING + 1)) ;;
+                *) exit 1 ;;
+              esac
+            done
+            test "$PENDING" -ne 0 || break
+            test "$(date +%s)" -lt "$DEADLINE"
+            sleep 30
+          done
+          rm -f "$RUNNER_TEMP/xp-status.json"
+
+      - name: Collect only privacy-safe projections and create the local seal
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if test "$PHASE" = preregistration; then
+            printf '{"requests":[]}' > "$RUNNER_TEMP/dispatch-requests.json"
+          else
+            DISPATCH_ROOT="$RUNNER_TEMP/commander-xp-dispatch"
+            if test "$PHASE" = confirmatory; then
+              DISPATCH_ROOT="$RUNNER_TEMP/commander-xp-dispatch-final"
+            fi
+            jq '{requests}' "$DISPATCH_ROOT/commander-xp-dispatch-receipt-v2.json" > "$RUNNER_TEMP/dispatch-requests.json"
+          fi
+          XP_OPENAPI_EVIDENCE_CONTRACT="$CONTROL_ROOT/xp-openapi-contract-v2.json"
+          if test "$PHASE" != preregistration; then
+            XP_OPENAPI_EVIDENCE_CONTRACT="$XP_OPENAPI_DISPATCH_CONTRACT_PATH"
+          fi
+          jq -n \
+            --slurpfile dispatched "$RUNNER_TEMP/dispatch-requests.json" \
+            --arg phase "$PHASE" \
+            --arg prereg "$CONTROL_ROOT/commander-xp-preregistration-v2.json" \
+            --arg xpOpenApiContract "$XP_OPENAPI_EVIDENCE_CONTRACT" \
+            --arg sourceProvenance "$CONTROL_ROOT/commander-xp-source-provenance-v2.json" \
+            --arg sourceTreeDiff "$CONTROL_ROOT/commander-xp-source-tree-diff-v1.json" \
+            --arg coworldRuntimeInventory "$CONTROL_ROOT/coworld-runtime-inventory-v1.json" \
+            --arg policies "$CONTROL_ROOT/policy-identities-v2.json" \
+            --arg inspectA "$CONTROL_ROOT/policy-inspect/A.json" \
+            --arg inspectB "$CONTROL_ROOT/policy-inspect/B.json" \
+            --arg inspectC "$CONTROL_ROOT/policy-inspect/C.json" \
+            --arg evalIdentity "$CONTROL_ROOT/eval-coworld-identity-v2.json" \
+            --arg evalInspect "$CONTROL_ROOT/eval-coworld-inspect.json" \
+            --arg evalManifest "$CONTROL_ROOT/eval-coworld-manifest-v2.json" \
+            --arg evalTerminalProof "$CONTROL_ROOT/eval-coworld-terminal-proof-v2.json" \
+            --arg command "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" \
+            --arg output "$RUNNER_TEMP/commander-xp-envelope" \
+            --arg preregLedger "${PREREG_LEDGER_PATH:-}" \
+            --arg providerLedger "${PROVIDER_LEDGER_PATH:-}" \
+            --arg canaryLedger "${CANARY_LEDGER_PATH:-}" \
+            --arg activation "${ACTIVATION_PATH:-}" \
+            '{schemaVersion:2,phase:$phase,preRegistrationPath:$prereg,xpOpenApiContractPath:$xpOpenApiContract,sourceProvenancePath:$sourceProvenance,sourceTreeDiffPath:$sourceTreeDiff,coworldRuntimeInventoryPath:$coworldRuntimeInventory,policyIdentitiesPath:$policies,policyInspectPaths:{A:$inspectA,B:$inspectB,C:$inspectC},evalCoworldIdentityPath:$evalIdentity,evalCoworldInspectPath:$evalInspect,evalCoworldManifestPath:$evalManifest,evalCoworldTerminalProofPath:$evalTerminalProof,coworldCommandPath:$command,outputDirectory:$output,canaryLocalSealSha256:null,requests:$dispatched[0].requests}
+             + (if $phase == "provider-preflight" or $phase == "canary" or $phase == "confirmatory" then {preregistrationLedgerPath:$preregLedger} else {} end)
+             + (if $phase == "canary" or $phase == "confirmatory" then {providerPreflightLedgerPath:$providerLedger} else {} end)
+             + (if $phase == "confirmatory" then {canaryLedgerPath:$canaryLedger,confirmatoryActivationPath:$activation} else {} end)' \
+            > "$RUNNER_TEMP/commander-xp-collector-input-v2.json"
+          if test "$PHASE" = confirmatory; then
+            CANARY_LOCAL_SEAL=$(jq -r .priorCanaryLocalSealSha256 "$ACTIVATION_PATH")
+            jq --arg value "$CANARY_LOCAL_SEAL" '.canaryLocalSealSha256=$value' "$RUNNER_TEMP/commander-xp-collector-input-v2.json" > "$RUNNER_TEMP/collector-input.tmp"
+            mv "$RUNNER_TEMP/collector-input.tmp" "$RUNNER_TEMP/commander-xp-collector-input-v2.json"
+          fi
+          npm run --silent agent:commander:xp:collect -- "$RUNNER_TEMP/commander-xp-collector-input-v2.json" \
+            > "$RUNNER_TEMP/commander-xp-collector-result.json"
+          jq -e '.integrityVerified == true and .experimentUsable == false' "$RUNNER_TEMP/commander-xp-collector-result.json" >/dev/null
+
+      - name: Derive immutable evidence artifact identity
+        id: identity
+        run: |
+          set -euo pipefail
+          EXPERIMENT_ID=$(jq -r .experimentID "$CONTROL_ROOT/commander-xp-preregistration-v2.json")
+          ARTIFACT_NAME="commander-xp-evidence-$PHASE-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "experiment_id=$EXPERIMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable sanitized evidence first
+        id: evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: ${{ runner.temp }}/commander-xp-envelope/evidence/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Build the post-upload non-circular authority request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          EVIDENCE_ARTIFACT_NAME: ${{ steps.identity.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          [[ "$EVIDENCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          if [[ "$EVIDENCE_ARTIFACT_DIGEST" != sha256:* ]]; then
+            EVIDENCE_ARTIFACT_DIGEST="sha256:$EVIDENCE_ARTIFACT_DIGEST"
+          fi
+          export EVIDENCE_ARTIFACT_DIGEST
+          [[ "$EVIDENCE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$EVIDENCE_ARTIFACT_ID" > "$RUNNER_TEMP/evidence-artifact.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/collector-run.json"
+          test "$(jq -r .name "$RUNNER_TEMP/evidence-artifact.json")" = "$EVIDENCE_ARTIFACT_NAME"
+          test "$(jq -r .workflow_run.id "$RUNNER_TEMP/evidence-artifact.json")" = "$GITHUB_RUN_ID"
+          test "$(jq -r .digest "$RUNNER_TEMP/evidence-artifact.json")" = "$EVIDENCE_ARTIFACT_DIGEST"
+          WORKFLOW_ID=$(jq -r .workflow_id "$RUNNER_TEMP/collector-run.json")
+          printf 'null\n' > "$RUNNER_TEMP/prereg-receipt.json"
+          printf 'null\n' > "$RUNNER_TEMP/provider-receipt.json"
+          printf 'null\n' > "$RUNNER_TEMP/canary-receipt.json"
+          if test "$PHASE" != preregistration; then
+            cp "$PREREG_BINDING_PATH" "$RUNNER_TEMP/prereg-receipt.json"
+          fi
+          if test "$PHASE" = canary || test "$PHASE" = confirmatory; then
+            cp "$PROVIDER_BINDING_PATH" "$RUNNER_TEMP/provider-receipt.json"
+          fi
+          if test "$PHASE" = confirmatory; then
+            cp "$CANARY_BINDING_PATH" "$RUNNER_TEMP/canary-receipt.json"
+          fi
+          jq -n \
+            --slurpfile ci "$RUNNER_TEMP/source-ci.json" \
+            --arg phase "$PHASE" \
+            --argjson artifactID "$EVIDENCE_ARTIFACT_ID" \
+            --arg artifactName "$EVIDENCE_ARTIFACT_NAME" \
+            --arg artifactDigest "$EVIDENCE_ARTIFACT_DIGEST" \
+            --argjson workflowRunID "$GITHUB_RUN_ID" \
+            --argjson workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson workflowID "$WORKFLOW_ID" \
+            --slurpfile allowlist .github/scripts/commander-xp-source-allowlist-v2.json \
+            --slurpfile preregReceipt "$RUNNER_TEMP/prereg-receipt.json" \
+            --slurpfile providerReceipt "$RUNNER_TEMP/provider-receipt.json" \
+            --slurpfile canaryReceipt "$RUNNER_TEMP/canary-receipt.json" \
+            '{schemaVersion:1,phase:$phase,sourceCI:{workflowID:$ci[0].workflow_id,workflowPath:$ci[0].path,runID:$ci[0].id,runAttempt:$ci[0].run_attempt,headSha:$ci[0].head_sha,actor:$ci[0].actor.login,triggeringActor:$ci[0].triggering_actor.login,headRepository:$ci[0].head_repository.full_name,event:$ci[0].event,ref:("refs/heads/"+$ci[0].head_branch)},sourceArtifact:{artifactID:$artifactID,artifactName:$artifactName,artifactDigest:$artifactDigest,workflowRunID:$workflowRunID,workflowRunAttempt:$workflowRunAttempt,workflowID:$workflowID,workflowPath:".github/workflows/commander-xp-evidence.yml",workflowName:"Commander XP protected experiment evidence",actor:"0xNad",triggeringActor:"0xNad",headRepository:"0xNad/ProxyWar",event:"workflow_dispatch",ref:"refs/heads/main",headSha:$ci[0].head_sha},sourceAllowlist:$allowlist[0],preregistrationReceipt:$preregReceipt[0],providerPreflightReceipt:$providerReceipt[0],priorPhaseReceipt:(if $phase == "canary" then $providerReceipt[0] elif $phase == "confirmatory" then $canaryReceipt[0] else null end),canaryReceipt:(if $phase == "confirmatory" then $canaryReceipt[0] else null end)}' \
+            > "$RUNNER_TEMP/commander-xp-authority-input-v1.json"
+          npm run --silent agent:commander:xp:authority-request -- \
+            "$RUNNER_TEMP/commander-xp-authority-input-v1.json" \
+            "$RUNNER_TEMP/commander-xp-envelope/evidence" \
+            "$RUNNER_TEMP/commander-xp-envelope/authority" \
+            > "$RUNNER_TEMP/commander-xp-authority-result.json"
+
+      - name: Upload immutable authority request second
+        id: authority
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-authority-request-${{ inputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-envelope/authority/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Build immutable completion-trigger handoff
+        env:
+          EVIDENCE_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          EVIDENCE_ARTIFACT_NAME: ${{ steps.identity.outputs.artifact_name }}
+          AUTHORITY_ARTIFACT_ID: ${{ steps.authority.outputs.artifact-id }}
+          AUTHORITY_ARTIFACT_DIGEST: ${{ steps.authority.outputs.artifact-digest }}
+          AUTHORITY_ARTIFACT_NAME: commander-xp-authority-request-${{ inputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$AUTHORITY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          if [[ "$AUTHORITY_ARTIFACT_DIGEST" != sha256:* ]]; then
+            AUTHORITY_ARTIFACT_DIGEST="sha256:$AUTHORITY_ARTIFACT_DIGEST"
+          fi
+          if [[ "$EVIDENCE_ARTIFACT_DIGEST" != sha256:* ]]; then
+            EVIDENCE_ARTIFACT_DIGEST="sha256:$EVIDENCE_ARTIFACT_DIGEST"
+          fi
+          [[ "$AUTHORITY_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          REQUEST="$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json"
+          REQUEST_SHA256=$(sha256sum "$REQUEST" | cut -d' ' -f1)
+          jq -cS -n \
+            --arg experimentID '${{ steps.identity.outputs.experiment_id }}' \
+            --arg phase "$PHASE" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --argjson sourceCIRunID "$SOURCE_CI_RUN_ID" \
+            --argjson sourceCIRunAttempt "$SOURCE_CI_RUN_ATTEMPT" \
+            --argjson collectorRunID "$GITHUB_RUN_ID" \
+            --argjson collectorRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg evidenceArtifactID "$EVIDENCE_ARTIFACT_ID" \
+            --arg evidenceArtifactName "$EVIDENCE_ARTIFACT_NAME" \
+            --arg evidenceArtifactDigest "$EVIDENCE_ARTIFACT_DIGEST" \
+            --arg authorityArtifactID "$AUTHORITY_ARTIFACT_ID" \
+            --arg authorityArtifactName "$AUTHORITY_ARTIFACT_NAME" \
+            --arg authorityArtifactDigest "$AUTHORITY_ARTIFACT_DIGEST" \
+            --arg sealRequestSha256 "$REQUEST_SHA256" \
+            '{schemaVersion:1,authority:"github-actions-completed-collector-handoff-v1",experimentID:$experimentID,phase:$phase,sourceSha:$sourceSha,sourceCIRunID:$sourceCIRunID,sourceCIRunAttempt:$sourceCIRunAttempt,collectorRunID:$collectorRunID,collectorRunAttempt:$collectorRunAttempt,evidenceArtifact:{id:$evidenceArtifactID,name:$evidenceArtifactName,digest:$evidenceArtifactDigest},authorityRequestArtifact:{id:$authorityArtifactID,name:$authorityArtifactName,digest:$authorityArtifactDigest},sealRequestSha256:$sealRequestSha256}' \
+            > "$RUNNER_TEMP/commander-xp-external-seal-handoff-v1.body.json"
+          HANDOFF_SHA256=$(sha256sum "$RUNNER_TEMP/commander-xp-external-seal-handoff-v1.body.json" | cut -d' ' -f1)
+          jq -cS --arg handoffSha256 "$HANDOFF_SHA256" '. + {handoffSha256:$handoffSha256}' \
+            "$RUNNER_TEMP/commander-xp-external-seal-handoff-v1.body.json" \
+            > "$RUNNER_TEMP/commander-xp-external-seal-handoff-v1.json"
+
+      - name: Upload immutable completion-trigger handoff
+        id: handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-external-seal-handoff-${{ inputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-external-seal-handoff-v1.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Publish completion-trigger handoff summary
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.handoff.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.handoff.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          jq -n \
+            --arg phase "$PHASE" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg collectorRunID "$GITHUB_RUN_ID" \
+            --arg handoffArtifactID '${{ steps.handoff.outputs.artifact-id }}' \
+            --arg handoffArtifactDigest 'sha256:${{ steps.handoff.outputs.artifact-digest }}' \
+            '{phase:$phase,sourceSha:$sourceSha,collectorRunID:$collectorRunID,handoffArtifactID:$handoffArtifactID,handoffArtifactDigest:$handoffArtifactDigest,externalSealTrigger:"workflow_run:completed"}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
