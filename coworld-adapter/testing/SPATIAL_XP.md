@@ -56,7 +56,7 @@ uncontrolled client.
 
 The rendered manifest's image string and any locally written
 `coworld-image-inspect-v1` document are caller-controlled diagnostics. Neither
-is a sealed or authentic Coworld statement. Do not upload either generated arm
+is a sealed or authentic Coworld statement. Do not upload any generated arm
 until an independent authority-side fetch returns an immutable Coworld receipt
 that binds the exact image digest to the candidate source SHA.
 
