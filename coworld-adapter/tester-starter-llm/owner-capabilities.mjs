@@ -1100,6 +1100,7 @@ function boundedSpatialOwnShape(
   ownShape,
   requireL4 = false,
   maxMapTiles = undefined,
+  requireExactRegions = true,
 ) {
   const quadrants = new Set([
     "northwest",
@@ -1116,7 +1117,8 @@ function boundedSpatialOwnShape(
     !isRecord(ownShape) ||
     !quadrants.has(ownShape.quadrant) ||
     !(
-      (ownShape.regionAnalysis === "complete" &&
+      (requireExactRegions &&
+        ownShape.regionAnalysis === "complete" &&
         ownShape.centroidBasis === "largest_region_border" &&
         ["compact", "stretched", "fragmented"].includes(ownShape.compactness) &&
         Number.isSafeInteger(ownShape.regionCount) &&
@@ -1125,11 +1127,25 @@ function boundedSpatialOwnShape(
         ownShape.regionCount > 1 === (ownShape.compactness === "fragmented") &&
         (ownShape.regionCount !== 1 || ownShape.largestRegionShare === 100) &&
         boundedPercent(ownShape.largestRegionShare) !== null) ||
-      (ownShape.regionAnalysis === "omitted_budget" &&
+      (requireExactRegions &&
+        ownShape.regionAnalysis === "omitted_budget" &&
         ownShape.centroidBasis === "all_border_budget_fallback" &&
         ownShape.compactness === undefined &&
         ownShape.regionCount === undefined &&
-        ownShape.largestRegionShare === undefined)
+        ownShape.largestRegionShare === undefined) ||
+      (!requireExactRegions &&
+        ["complete", "omitted_budget"].includes(ownShape.regionAnalysis) &&
+        ["largest_region_border", "all_border_budget_fallback"].includes(
+          ownShape.centroidBasis,
+        ) &&
+        (ownShape.compactness === undefined ||
+          ["compact", "stretched", "fragmented"].includes(
+            ownShape.compactness,
+          )) &&
+        (ownShape.regionCount === undefined ||
+          boundedNonnegativeInteger(ownShape.regionCount) !== null) &&
+        (ownShape.largestRegionShare === undefined ||
+          boundedPercent(ownShape.largestRegionShare) !== null))
     ) ||
     boundedPercent(ownShape.coastShare) === null ||
     (requireL4 &&
@@ -1438,7 +1454,12 @@ function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
  */
 export function boundedSpatialV1(observation) {
   const spatial = observation?.spatial;
-  const ownShape = boundedSpatialOwnShape(spatial?.ownShape);
+  const ownShape = boundedSpatialOwnShape(
+    spatial?.ownShape,
+    false,
+    undefined,
+    false,
+  );
   if (
     spatial?.schemaVersion !== 1 ||
     spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL ||

@@ -360,11 +360,9 @@ function spatialChecks(events, required, files) {
   if (rich && !spatial.every((event) => event.present === true)) {
     fail("rich spatial evidence included an absent policy observation");
   }
-  if (rich) {
-    for (const file of files) {
-      if (!spatial.some((event) => event.sourceFile === file)) {
-        fail(`${file}: rich spatial evidence record is missing`);
-      }
+  for (const file of files) {
+    if (!spatial.some((event) => event.sourceFile === file)) {
+      fail(`${file}: spatial evidence record is missing`);
     }
   }
   if (
@@ -377,6 +375,14 @@ function spatialChecks(events, required, files) {
   }
   if (richV5 && !spatial.every((event) => event.schemaVersion === 5)) {
     fail("rich spatial evidence included a non-v5 observation");
+  }
+  if (
+    required === "rich-v3" &&
+    !spatial.every((event) => event.minimapPresent === false)
+  ) {
+    fail(
+      "a rich v3 base-only policy observation unexpectedly included a minimap",
+    );
   }
   if (
     required === "rich-v5" &&

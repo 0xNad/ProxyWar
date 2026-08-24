@@ -186,6 +186,7 @@ response-contract nesting below are exact and internally consistent:
           "isFriendly": true,
           "relation": 0,
           "canAttack": true,
+          "incomingAttack": false,
           "bearing": "east",
           "distanceClass": "adjacent",
           "borderWithYou": {

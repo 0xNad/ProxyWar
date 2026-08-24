@@ -186,8 +186,8 @@ describe("AgentRunner", () => {
         mountain: 3,
         shore: 2,
       },
-      defensePostsCovering: 1,
-      defensePostFrontCoverage: { covered: 6, uncovered: 4 },
+      defensePostsCovering: 0,
+      defensePostFrontCoverage: { covered: 0, uncovered: 10 },
       underAttackHere: false,
     };
     const observation = {
@@ -212,6 +212,9 @@ describe("AgentRunner", () => {
         visibilityModel: "global-lockstep-public-map-v1",
         ownShape: {
           quadrant: "west",
+          compactness: "compact",
+          regionCount: 1,
+          largestRegionShare: 100,
           regionAnalysis: "complete",
           centroidBasis: "largest_region_border",
           coastShare: 25,

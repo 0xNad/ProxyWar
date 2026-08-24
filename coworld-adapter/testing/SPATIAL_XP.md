@@ -24,7 +24,7 @@ fresh, uniquely named, noncanonical Coworld packages:
 Release-contract amendment: the 2026-08-16 design draft proposed unflagged L1
 `mapInfo`, but this train's newer default-OFF/Commander-isolation requirement
 controls. L1 remains behind the parent spatial flag so the OFF arm stays
-byte-identical. In the ON arm every game-backed request, including spawn/no-land,
+byte-identical. In both enabled arms every game-backed request, including spawn/no-land,
 must carry `mapInfo`; L2-L5 geometry begins only after land exists.
 
 Generate each local-only, upload-blocked candidate manifest without editing the
@@ -176,11 +176,12 @@ node owner-evidence-check.mjs --deals=optional --messages=optional \
   --spatial=rich-v5-minimap owner-evidence/spatial-on.log
 ```
 
-Each supplied policy log must contain a spatial record, and every supplied
-spatial record must be present, schema `5`, carry the exact visibility model,
-stay within 16 KiB, report minimap schema `2`, and record that its primary
-selected legal action was offered. One good record cannot mask an absent,
-missing, or downgraded record from another supplied policy log. This is
-policy-authored evidence, not an external Coworld seal; retain the independently
-joined request, episode, game, replay, package, image, source, and policy
-identities separately.
+Each supplied policy log must contain a spatial record. OFF records must all be
+absent. Structured records must all be present schema `5`, remain within the
+16 KiB base ceiling, and report no minimap. ON records must additionally report
+minimap schema `2` within 4 KiB. Every enabled record must carry the exact
+visibility model and record that its primary selected legal action was offered.
+One good record cannot mask an absent, missing, or downgraded record from
+another supplied policy log. This is policy-authored evidence, not an external
+Coworld seal; retain the independently joined request, episode, game, replay,
+package, image, source, and policy identities separately.

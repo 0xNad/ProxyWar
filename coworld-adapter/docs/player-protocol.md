@@ -275,6 +275,7 @@ complete coordinate, terrain, public-asset, exposure, and minimap layers:
     {
       "playerID": "P_RIVAL",
       "sharesBorder": true,
+      "incomingAttack": false,
       "bearing": "east",
       "distanceClass": "adjacent",
       "borderWithYou": {

@@ -216,6 +216,41 @@ test("owner evidence checker requires rich spatial evidence in every supplied fi
   assert.match(alias.stderr, /resolve to a unique file/u);
 });
 
+test("owner evidence checker requires absent evidence in every supplied file", () => {
+  const missing = runCheckerFiles([validEvents(), []], "absent");
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /record is missing/u);
+});
+
+test("owner evidence checker distinguishes the rich v3 base-only mode", () => {
+  const events = validEvents();
+  for (const event of events.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    Object.assign(event, {
+      present: true,
+      schemaVersion: 3,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: false,
+      baseSerializedUTF8Bytes: 8_192,
+    });
+  }
+  const accepted = runChecker(events, "rich-v3");
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  const withMinimap = structuredClone(events);
+  for (const event of withMinimap.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    event.minimapPresent = true;
+    event.minimapSchemaVersion = 1;
+    event.minimapSerializedUTF8Bytes = 1_024;
+  }
+  const rejected = runChecker(withMinimap, "rich-v3");
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /base-only.*minimap/u);
+});
+
 test("owner evidence checker distinguishes complete rich v5 minimap evidence", () => {
   const events = validEvents();
   for (const event of events.filter(

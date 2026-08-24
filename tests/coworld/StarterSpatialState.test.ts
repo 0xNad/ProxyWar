@@ -299,6 +299,9 @@ describe("tester-starter-llm spatial state renderer", () => {
         visibilityModel: "global-lockstep-public-map-v1",
         ownShape: {
           quadrant: "west",
+          compactness: "compact",
+          regionCount: 1,
+          largestRegionShare: 100,
           regionAnalysis: "complete",
           centroidBasis: "largest_region_border",
           coastShare: 20,
@@ -416,6 +419,9 @@ describe("tester-starter-llm spatial state renderer", () => {
         visibilityModel: "global-lockstep-public-map-v1",
         ownShape: {
           quadrant: "west",
+          compactness: "compact",
+          regionCount: 1,
+          largestRegionShare: 100,
           regionAnalysis: "complete",
           centroidBasis: "largest_region_border",
           coastShare: 20,
