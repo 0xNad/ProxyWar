@@ -42,10 +42,9 @@ ENV PROXYWAR_REPO=/app/proxywar \
 
 WORKDIR /app/proxywar
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY tsconfig.json ./
 COPY src ./src
-COPY resources ./resources
 COPY coworld-adapter/src/keystone-player.ts ./coworld-adapter/src/keystone-player.ts
 
 WORKDIR /app/proxywar/coworld-adapter
