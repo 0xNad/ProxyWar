@@ -225,7 +225,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     unpackRunDirs: true,
     starterUrl:
       process.env.PROXYWAR_LEAGUE_STARTER_URL ??
-      "https://github.com/0xNad/proxywar-coworld-starter",
+      "https://github.com/0xNad/proxywar-commander-starter",
     recoverPinnedArtifacts: false,
     watch: false,
     intervalSeconds: 300,

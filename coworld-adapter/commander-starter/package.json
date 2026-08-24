@@ -1,0 +1,11 @@
+{
+  "name": "proxywar-commander-starter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Pinned deployable starter for ProxyWar's LLM Strategic Commander",
+  "scripts": {
+    "test": "node --test starter-contract.node.mjs"
+  }
+}
