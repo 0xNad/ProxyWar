@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analyzeSpatialProbeEvents } from "./analyze-spatial-probes.mjs";
 
-function probe({ arm, index, requirement, correct = true }) {
+function probe({
+  arm,
+  index,
+  requirement,
+  correct = true,
+  questionClass = requirement,
+}) {
   return {
     schemaVersion: 1,
     event: "probe",
@@ -23,6 +29,7 @@ function probe({ arm, index, requirement, correct = true }) {
     latencyMs: 1000,
     gate1: {
       scenarioID: `scenario-${index}`,
+      questionClass,
       visibilityRequirement: requirement,
       correct,
     },
@@ -49,6 +56,39 @@ test("Gate 1 analyzer enforces the exact 160/40 cardinality", () => {
   assert.equal(report.gate1.structuredPass, true);
   assert.equal(report.gate1.minimapPass, true);
   assert.equal(report.gate1.arms.full.inputTokens, 20_000);
+  assert.deepEqual(report.gate1.arms.full.accuracyByQuestionClass, {
+    minimap: { cases: 40, correct: 40, accuracy: 1 },
+    structured: { cases: 160, correct: 160, accuracy: 1 },
+  });
+});
+
+test("Gate 1 analyzer exposes post-hoc accuracy by question class", () => {
+  const events = [
+    probe({
+      arm: "full",
+      index: 0,
+      requirement: "minimap",
+      questionClass: "minimap_terrain_cell",
+    }),
+    probe({
+      arm: "full",
+      index: 1,
+      requirement: "minimap",
+      questionClass: "minimap_terrain_cell",
+      correct: false,
+    }),
+    probe({
+      arm: "full",
+      index: 2,
+      requirement: "minimap",
+      questionClass: "minimap_owner_cell",
+    }),
+  ];
+  const report = analyzeSpatialProbeEvents(events);
+  assert.deepEqual(report.gate1.arms.full.accuracyByQuestionClass, {
+    minimap_owner_cell: { cases: 1, correct: 1, accuracy: 1 },
+    minimap_terrain_cell: { cases: 2, correct: 1, accuracy: 0.5 },
+  });
 });
 
 test("Gate 1 analyzer does not promote a partial fixture", () => {

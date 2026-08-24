@@ -85,6 +85,10 @@ function gate1ArmReport(events, arm) {
     (event) => event.gate1.visibilityRequirement === "minimap",
   );
   const correct = (rows) => rows.filter((event) => event.gate1.correct).length;
+  const questionClasses = Map.groupBy(
+    unique.events,
+    (event) => event.gate1.questionClass ?? "unknown",
+  );
   return {
     rawEvents: selected.length,
     uniqueScenarios: unique.events.length,
@@ -109,6 +113,18 @@ function gate1ArmReport(events, arm) {
     structuredAccuracy: rounded(ratio(correct(shared), shared.length)),
     minimapCases: minimap.length,
     minimapAccuracy: rounded(ratio(correct(minimap), minimap.length)),
+    accuracyByQuestionClass: Object.fromEntries(
+      [...questionClasses.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([questionClass, rows]) => [
+          questionClass,
+          {
+            cases: rows.length,
+            correct: correct(rows),
+            accuracy: rounded(ratio(correct(rows), rows.length)),
+          },
+        ]),
+    ),
     inputTokens: unique.events.reduce(
       (sum, event) => sum + (Number(event.inputTokens) || 0),
       0,
