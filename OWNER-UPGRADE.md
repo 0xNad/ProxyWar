@@ -86,9 +86,10 @@ Required implementation files after applying the machine patch:
 - `owner-player-frame.test.mjs`: local stub-WebSocket frame tests for both
   players, absent features, all three slots, and malformed optional fields.
 - `owner-evidence-check.mjs`: bounded, exact-schema verifier for downloaded
-  policy self-reports. It joins sender and recipient policy observations by
-  server-owned event ID and checks the body digest without retaining the raw
-  body; it is not game-owned delivery authority.
+  policy self-reports. It requires a unique server-owned event ID on each
+  recipient observation and joins sender selection to recipient observation by
+  identities plus body digest and byte counts, without retaining the raw body;
+  it is not game-owned delivery authority.
 - `owner-evidence-check.test.mjs`: pass/tamper/privacy tests for that verifier.
 - `package.json`: exposes the exact `npm test` command.
 - `Dockerfile`: copies `owner-capabilities.mjs` into the uploaded image; without
