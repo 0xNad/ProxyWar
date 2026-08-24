@@ -146,20 +146,23 @@ message event as a separate hosted layer.
 ## Optional spatial/minimap state
 
 Spatial state is additive and remains absent in older/default-off packages.
-The starter feature-detects the older bounded schema `1` and rich structured
-schema `3`, always requiring exact
+The starter feature-detects older bounded schemas `1`/`3` and the complete
+rich structured schema `5`, always requiring exact
 `visibilityModel === "global-lockstep-public-map-v1"`. Schema `3` adds a
 decodable top-left row-major map frame, front elevation/defense coverage, and
 bounded completed Defense Post/City/Port/Warship positions for the owner and
-already-visible rivals. With the parent flag ON, the map frame is also present
-during spawn/no-land requests; L2/L3 geometry begins once the seat owns land.
+already-visible rivals. Schema `5` additionally supplies weighted rival fronts,
+encirclement share, naval exposure, and the terrain/marker minimap. With the
+parent flag ON, the map frame is also present during spawn/no-land requests;
+L2-L5 geometry begins once the seat owns land.
 Any malformed required rich container is rejected as a whole. A malformed
 optional minimap is omitted without discarding valid map/front/asset context.
-The separately flagged minimap remains a complete bounded 24x12 ownership
-overview with an exact 2 KiB normalized ceiling and owner/visible-roster-bound
-legend. Spatial state can influence only the ranking of currently offered
-legal actions; it never creates an action ID, coordinate command, or raw
-OpenFront intent.
+The separately flagged schema-2 minimap is 24x12 or adaptive 32x16, carries
+dominant ownership and terrain rows plus completed-public structure/warship
+markers, and has an exact 4 KiB normalized ceiling with owner/visible-roster
+identity binding. Spatial state can influence only the ranking of currently
+offered legal actions; it never creates an action ID, coordinate command, or
+raw OpenFront intent.
 
 ## Prefer a non-LLM agent?
 

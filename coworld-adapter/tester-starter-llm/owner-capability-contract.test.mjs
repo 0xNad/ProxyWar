@@ -10,6 +10,7 @@ import {
   boundedSpatialObservation,
   boundedSpatialV1,
   boundedSpatialV3,
+  boundedSpatialV5,
   createOwnerCapabilityEvidenceLogger,
   dealResponseFields,
   isWithinOwnerSpatialSerializationCeiling,
@@ -641,6 +642,33 @@ function richSpatialObservation() {
   };
 }
 
+function richSpatialObservationV5() {
+  const observation = richSpatialObservation();
+  observation.spatial.schemaVersion = 5;
+  observation.spatial.ownShape.largestNeighborBorderShare = 25;
+  observation.visiblePlayers[0].bordersWith = [];
+  observation.visiblePlayers[0].navalExposure = {
+    transportReachableOwnShoreTiles: 12,
+    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
+  };
+  observation.spatial.minimap = {
+    schemaVersion: 2,
+    width: 24,
+    height: 12,
+    ownershipRows: Array.from({ length: 12 }, () => "A".repeat(24)),
+    terrainRows: Array.from({ length: 12 }, () => ".".repeat(24)),
+    legend: [
+      { glyph: "A", playerID: "P_SELF", isYou: true },
+      { glyph: "B", playerID: "P_A", isYou: false },
+    ],
+    markers: [{ type: "P", ownerPlayerID: "P_A", x: 10, y: 5 }],
+    markersTotal: 1,
+    markersReturned: 1,
+    markersTruncated: false,
+  };
+  return observation;
+}
+
 test("spatial v1 can only reorder offered action objects", () => {
   const first = {
     id: "attack:P_A",
@@ -804,7 +832,9 @@ test("minimap is accepted whole or omitted whole without repair", () => {
   const oversizedMinimapObservation = spatialObservation();
   oversizedMinimapObservation.visiblePlayers = Array.from(
     { length: 63 },
-    (_, index) => ({ playerID: `P_${index}` }),
+    (_, index) => ({
+      playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(190)}`,
+    }),
   );
   oversizedMinimapObservation.spatial.minimap = {
     ...valid,
@@ -812,7 +842,10 @@ test("minimap is accepted whole or omitted whole without repair", () => {
       glyph: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#"[
         index
       ],
-      playerID: index === 0 ? "P_SELF" : `P_${index - 1}`,
+      playerID:
+        index === 0
+          ? "P_SELF"
+          : `P_${String(index - 1).padStart(2, "0")}_${"x".repeat(190)}`,
       isYou: index === 0,
     })),
   };
@@ -971,6 +1004,100 @@ test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
   assert.equal("minimap" in boundedSpatialV3(malformedMinimap), false);
 });
 
+test("rich spatial L5 admits weighted exposure and a complete terrain marker minimap", () => {
+  const valid = richSpatialObservationV5();
+  const bounded = boundedSpatialV5(valid);
+  assert.ok(bounded);
+  assert.equal(bounded.schemaVersion, 5);
+  assert.equal(bounded.ownShape.largestNeighborBorderShare, 25);
+  assert.deepEqual(bounded.rivals[0].navalExposure, {
+    transportReachableOwnShoreTiles: 12,
+    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
+  });
+  assert.equal(bounded.minimap.schemaVersion, 2);
+  assert.deepEqual(bounded.minimap.markers, [
+    { type: "P", ownerPlayerID: "P_A", x: 10, y: 5 },
+  ]);
+  assert.deepEqual(boundedSpatialObservation(valid), bounded);
+
+  const validWeightedGraph = structuredClone(valid);
+  validWeightedGraph.visiblePlayers.push({
+    ...structuredClone(valid.visiblePlayers[0]),
+    playerID: "P_B",
+    bordersWith: [],
+    navalExposure: { transportReachableOwnShoreTiles: 0 },
+  });
+  validWeightedGraph.visiblePlayers[0].bordersWith = [
+    { playerID: "P_B", sizeClass: "minor", tiles: 3 },
+  ];
+  assert.ok(boundedSpatialV5(validWeightedGraph));
+
+  const mutations = [
+    (value) => {
+      value.spatial.ownShape.largestNeighborBorderShare = 101;
+    },
+    (value) => {
+      value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
+        -1;
+    },
+    (value) => {
+      value.visiblePlayers[0].bordersWith = [
+        { playerID: "P_A", sizeClass: "minor", tiles: 0 },
+      ];
+    },
+    (value) => {
+      value.visiblePlayers[0].bordersWith = [
+        { playerID: "P_SELF", sizeClass: "minor", tiles: 1 },
+      ];
+    },
+    (value) => {
+      value.visiblePlayers[0].bordersWith = [
+        { playerID: "P_A", sizeClass: "minor", tiles: 1 },
+      ];
+    },
+  ];
+  for (const mutate of mutations) {
+    const malformed = structuredClone(valid);
+    mutate(malformed);
+    assert.equal(boundedSpatialV5(malformed), null);
+  }
+
+  const duplicateEdge = structuredClone(validWeightedGraph);
+  duplicateEdge.visiblePlayers[0].bordersWith.push({
+    ...duplicateEdge.visiblePlayers[0].bordersWith[0],
+  });
+  assert.equal(boundedSpatialV5(duplicateEdge), null);
+
+  const legacyMinimap = structuredClone(valid);
+  legacyMinimap.spatial.minimap = {
+    schemaVersion: 1,
+    width: 24,
+    height: 12,
+    rows: Array.from({ length: 12 }, () => "A".repeat(24)),
+    legend: [{ glyph: "A", playerID: "P_SELF", isYou: true }],
+  };
+  assert.ok(boundedSpatialV5(legacyMinimap));
+  assert.equal("minimap" in boundedSpatialV5(legacyMinimap), false);
+
+  for (const mutateMinimap of [
+    (value) => {
+      value.spatial.minimap.terrainRows[0] = `X${value.spatial.minimap.terrainRows[0].slice(1)}`;
+    },
+    (value) => {
+      value.spatial.minimap.markers[0].ownerPlayerID = "P_HIDDEN";
+    },
+    (value) => {
+      value.spatial.minimap.markersReturned = 0;
+    },
+  ]) {
+    const malformed = structuredClone(valid);
+    mutateMinimap(malformed);
+    const stillRich = boundedSpatialV5(malformed);
+    assert.ok(stillRich);
+    assert.equal("minimap" in stillRich, false);
+  }
+});
+
 test("rich spatial facts can only rerank exact offered legal action ids", () => {
   const observation = richSpatialObservation();
   observation.visiblePlayers.push({
@@ -1009,6 +1136,38 @@ test("rich spatial facts can only rerank exact offered legal action ids", () => 
     rankOfferedActionsWithSpatial(actions, observation).every((action) =>
       actions.includes(action),
     ),
+  );
+});
+
+test("rich L4 naval exposure changes only the ranking of offered actions", () => {
+  const observation = richSpatialObservationV5();
+  observation.visiblePlayers.push({
+    ...structuredClone(observation.visiblePlayers[0]),
+    playerID: "P_B",
+    bordersWith: [],
+    navalExposure: { transportReachableOwnShoreTiles: 0 },
+  });
+  observation.spatial.positionedAssets = {
+    analysis: "complete",
+    structures: [],
+    structuresTotal: 0,
+    structuresReturned: 0,
+    structuresTruncated: false,
+    warships: [],
+    warshipsTotal: 0,
+    warshipsReturned: 0,
+    warshipsTruncated: false,
+  };
+  const actions = [
+    { id: "attack:P_B", kind: "attack", metadata: { targetID: "P_B" } },
+    { id: "attack:P_A", kind: "attack", metadata: { targetID: "P_A" } },
+  ];
+  const ranked = rankOfferedActionsWithSpatial(actions, observation);
+  assert.equal(ranked[0], actions[1]);
+  assert.deepEqual(new Set(ranked), new Set(actions));
+  assert.equal(
+    ranked.some((action) => "intent" in action),
+    false,
   );
 });
 

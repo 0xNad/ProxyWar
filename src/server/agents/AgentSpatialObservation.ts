@@ -15,6 +15,7 @@ import {
   AgentSpatialBearing,
   AgentSpatialMapInfo,
   AgentSpatialMinimap,
+  AgentSpatialMinimapMarkerType,
   AgentSpatialObservation,
   AgentSpatialPositionedAsset,
   AgentSpatialPositionedAssets,
@@ -26,8 +27,12 @@ export const SPATIAL_REGION_TILE_BUDGET = 100_000;
 export const SPATIAL_REGION_RUN_BUDGET = 25_000;
 export const SPATIAL_MINIMAP_WIDTH = 24 as const;
 export const SPATIAL_MINIMAP_HEIGHT = 12 as const;
+export const SPATIAL_MINIMAP_LARGE_WIDTH = 32 as const;
+export const SPATIAL_MINIMAP_LARGE_HEIGHT = 16 as const;
+export const SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD = 256 * 1024;
+export const SPATIAL_MINIMAP_MARKER_LIMIT = 24;
 export const SPATIAL_NOTE_PREFIX = "Spatial ";
-export const SPATIAL_SCHEMA_VERSION = 3 as const;
+export const SPATIAL_SCHEMA_VERSION = 5 as const;
 export const SPATIAL_STRUCTURE_LIMIT = 48;
 export const SPATIAL_NAVAL_UNIT_LIMIT = 48;
 export const SPATIAL_STRUCTURES_PER_PLAYER_LIMIT = 8;
@@ -62,7 +67,7 @@ export const SPATIAL_SNAPSHOT_P95_MAX_MS = 25;
 export const SPATIAL_SNAPSHOT_TRANSIENT_MAX_BYTES = 32 * 1024 * 1024;
 export const SPATIAL_SNAPSHOT_RETAINED_MAX_BYTES = 1024 * 1024;
 export const SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES = 16 * 1024;
-export const SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES = 2 * 1024;
+export const SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES = 4 * 1024;
 export const SPATIAL_PROMPT_INCREMENT_MAX_BYTES = 24 * 1024;
 export const SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS = 8 * 1024;
 export const SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS = 0.1;
@@ -102,11 +107,21 @@ interface SpatialPlayerGeometry {
 }
 
 interface SpatialMinimapBase {
-  rows: string[];
+  width: 24 | 32;
+  height: 12 | 16;
+  ownershipRows: string[];
+  terrainRows: string[];
   legend: Array<{
     glyph: string;
     playerID: string;
   }>;
+  markers: Array<{
+    type: AgentSpatialMinimapMarkerType;
+    ownerPlayerID: string;
+    x: number;
+    y: number;
+  }>;
+  markersTotal: number;
 }
 
 interface CompleteRegionAnalysis {
@@ -222,6 +237,13 @@ export function createAgentSpatialSnapshot(
       coastalBorderTiles.size,
       regionAnalysisByPlayerID.get(player.id()),
     );
+    shape.ownShape.largestNeighborBorderShare = percentage(
+      Math.max(
+        0,
+        ...[...sharedBorderTiles.values()].map((tiles) => tiles.size),
+      ),
+      playerContactTiles.size,
+    );
     geometryByPlayerID.set(player.id(), {
       player,
       borderTiles,
@@ -319,6 +341,12 @@ export function buildSpatialObservationExtension(
       };
     }
 
+    visible.navalExposure = navalExposure(
+      input.gameState,
+      ownGeometry,
+      otherGeometry,
+    );
+
     visible.bordersWith = [...otherGeometry.sharedBorderTiles.entries()]
       .filter(
         ([playerID, tiles]) =>
@@ -330,6 +358,7 @@ export function buildSpatialObservationExtension(
         const neighbor = snapshot.geometryByPlayerID.get(playerID)!;
         return {
           playerID,
+          tiles: tiles.size,
           sizeClass:
             4 * tiles.size >
             Math.min(
@@ -345,7 +374,11 @@ export function buildSpatialObservationExtension(
         (a, b) =>
           a.smallID - b.smallID || compareCodeUnits(a.playerID, b.playerID),
       )
-      .map(({ playerID, sizeClass }) => ({ playerID, sizeClass }));
+      .map(({ playerID, sizeClass, tiles }) => ({
+        playerID,
+        sizeClass,
+        tiles,
+      }));
   }
 
   const mapInfo = buildSpatialMapInfo(input.gameState);
@@ -361,14 +394,20 @@ export function buildSpatialObservationExtension(
     ...(includeMinimap && snapshot.minimap !== undefined
       ? {
           minimap: {
-            schemaVersion: 1,
-            width: SPATIAL_MINIMAP_WIDTH,
-            height: SPATIAL_MINIMAP_HEIGHT,
-            rows: [...snapshot.minimap.rows],
+            schemaVersion: 2,
+            width: snapshot.minimap.width,
+            height: snapshot.minimap.height,
+            ownershipRows: [...snapshot.minimap.ownershipRows],
+            terrainRows: [...snapshot.minimap.terrainRows],
             legend: snapshot.minimap.legend.map((entry) => ({
               ...entry,
               isYou: entry.playerID === input.player.id(),
             })),
+            markers: snapshot.minimap.markers.map((marker) => ({ ...marker })),
+            markersTotal: snapshot.minimap.markersTotal,
+            markersReturned: snapshot.minimap.markers.length,
+            markersTruncated:
+              snapshot.minimap.markers.length < snapshot.minimap.markersTotal,
           } satisfies AgentSpatialMinimap,
         }
       : {}),
@@ -699,6 +738,64 @@ function relationBetweenCentroids(
 }
 
 /**
+ * Public naval reach in current OpenFront has no fixed distance cutoff: a
+ * transport can traverse any connected water component. Summarize that exact
+ * rule by counting observer shore tiles whose water component is also exposed
+ * to the rival's coast. Ports are already public units; the closest completed
+ * rival port adds a compact directional cue without inventing pathfinding.
+ */
+function navalExposure(
+  gameState: Game,
+  ownGeometry: SpatialPlayerGeometry,
+  rivalGeometry: SpatialPlayerGeometry,
+): NonNullable<AgentVisiblePlayer["navalExposure"]> {
+  const rivalWaterComponents = new Set<number>();
+  for (const tile of rivalGeometry.coastalBorderTiles) {
+    const component = gameState.getWaterComponent(tile);
+    if (component !== null) rivalWaterComponents.add(component);
+  }
+  let transportReachableOwnShoreTiles = 0;
+  for (const tile of ownGeometry.coastalBorderTiles) {
+    const component = gameState.getWaterComponent(tile);
+    if (component !== null && rivalWaterComponents.has(component)) {
+      transportReachableOwnShoreTiles += 1;
+    }
+  }
+
+  const nearestPort = rivalGeometry.player
+    .units(UnitType.Port)
+    .filter(isCompletedPublicAsset)
+    .map((port) => {
+      const tile = port.tile();
+      const point = { x: gameState.x(tile), y: gameState.y(tile) };
+      const dx = point.x - ownGeometry.centroid.x;
+      const dy = point.y - ownGeometry.centroid.y;
+      return { point, distanceSquared: dx * dx + dy * dy, unitID: port.id() };
+    })
+    .sort(
+      (a, b) => a.distanceSquared - b.distanceSquared || a.unitID - b.unitID,
+    )[0];
+  if (nearestPort === undefined) return { transportReachableOwnShoreTiles };
+  const relation = relationBetweenCentroids(
+    gameState,
+    ownGeometry.centroid,
+    nearestPort.point,
+    false,
+  );
+  return {
+    transportReachableOwnShoreTiles,
+    ...(relation.bearing !== undefined
+      ? {
+          nearestEnemyPort: {
+            bearing: relation.bearing,
+            distanceClass: relation.distanceClass === "far" ? "far" : "near",
+          },
+        }
+      : {}),
+  };
+}
+
+/**
  * Count posts within range of at least one shared-border tile. Iterates the
  * tile set directly and hoists the post tile: the previous form rebuilt an
  * array copy of the whole shared border once per post, which is the term that
@@ -981,10 +1078,21 @@ function buildMinimap(
   metrics: AgentSpatialSnapshotMetrics,
 ): SpatialMinimapBase | undefined {
   if (players.length > MINIMAP_GLYPHS.length) return undefined;
+  const large =
+    gameState.width() * gameState.height() >=
+    SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD;
+  const minimapWidth = large
+    ? SPATIAL_MINIMAP_LARGE_WIDTH
+    : SPATIAL_MINIMAP_WIDTH;
+  const minimapHeight = large
+    ? SPATIAL_MINIMAP_LARGE_HEIGHT
+    : SPATIAL_MINIMAP_HEIGHT;
   const categoryBySmallID = new Map<number, number>();
+  const glyphByPlayerID = new Map<string, string>();
   const legend = players.map((player, index) => {
     const glyph = MINIMAP_GLYPHS[index];
     categoryBySmallID.set(player.smallID(), index);
+    glyphByPlayerID.set(player.id(), glyph);
     return {
       glyph,
       playerID: player.id(),
@@ -995,27 +1103,41 @@ function buildMinimap(
   const neutralCategory = players.length;
   const waterCategory = players.length + 1;
   const categoryCounts = new Uint32Array(players.length + 2);
+  const terrainCounts = new Uint32Array(4);
   const mapWidth = gameState.width();
   const mapHeight = gameState.height();
-  const rows: string[] = [];
-  for (let cy = 0; cy < SPATIAL_MINIMAP_HEIGHT; cy++) {
-    const yStart = Math.floor((cy * mapHeight) / SPATIAL_MINIMAP_HEIGHT);
-    const yEnd = Math.floor(((cy + 1) * mapHeight) / SPATIAL_MINIMAP_HEIGHT);
-    let row = "";
-    for (let cx = 0; cx < SPATIAL_MINIMAP_WIDTH; cx++) {
-      const xStart = Math.floor((cx * mapWidth) / SPATIAL_MINIMAP_WIDTH);
-      const xEnd = Math.floor(((cx + 1) * mapWidth) / SPATIAL_MINIMAP_WIDTH);
+  const ownershipRows: string[] = [];
+  const terrainRows: string[] = [];
+  const terrainGlyphs = [".", ":", "^", "~"] as const;
+  for (let cy = 0; cy < minimapHeight; cy++) {
+    const yStart = Math.floor((cy * mapHeight) / minimapHeight);
+    const yEnd = Math.floor(((cy + 1) * mapHeight) / minimapHeight);
+    let ownershipRow = "";
+    let terrainRow = "";
+    for (let cx = 0; cx < minimapWidth; cx++) {
+      const xStart = Math.floor((cx * mapWidth) / minimapWidth);
+      const xEnd = Math.floor(((cx + 1) * mapWidth) / minimapWidth);
       categoryCounts.fill(0);
+      terrainCounts.fill(0);
       for (let y = yStart; y < yEnd; y++) {
         const rowOffset = y * mapWidth;
         for (let x = xStart; x < xEnd; x++) {
           metrics.minimapTilesVisited += 1;
           const tile = rowOffset + x;
-          const category = gameState.isWater(tile)
+          const water = gameState.isWater(tile);
+          const category = water
             ? waterCategory
             : (categoryBySmallID.get(gameState.ownerID(tile)) ??
               neutralCategory);
           categoryCounts[category] += 1;
+          const terrainCategory = water
+            ? 3
+            : gameState.terrainType(tile) === TerrainType.Mountain
+              ? 2
+              : gameState.terrainType(tile) === TerrainType.Highland
+                ? 1
+                : 0;
+          terrainCounts[terrainCategory] += 1;
         }
       }
       let dominantCategory = 0;
@@ -1024,16 +1146,100 @@ function buildMinimap(
           dominantCategory = category;
         }
       }
-      row +=
+      let dominantTerrain = 0;
+      for (let category = 1; category < terrainCounts.length; category++) {
+        if (terrainCounts[category] > terrainCounts[dominantTerrain]) {
+          dominantTerrain = category;
+        }
+      }
+      ownershipRow +=
         dominantCategory < players.length
           ? MINIMAP_GLYPHS[dominantCategory]
           : dominantCategory === neutralCategory
             ? "."
             : "~";
+      terrainRow += terrainGlyphs[dominantTerrain];
     }
-    rows.push(row);
+    ownershipRows.push(ownershipRow);
+    terrainRows.push(terrainRow);
   }
-  return { rows, legend };
+
+  const markerCandidates = players.map((player) =>
+    player
+      .units(...POSITIONED_STRUCTURE_TYPES, ...POSITIONED_WARSHIP_TYPES)
+      .filter(isCompletedPublicAsset)
+      .map((unit) => ({
+        type: minimapMarkerType(unit.type()),
+        ownerPlayerID: player.id(),
+        tile: unit.tile(),
+        unitID: unit.id(),
+      }))
+      .filter(
+        (
+          entry,
+        ): entry is typeof entry & { type: AgentSpatialMinimapMarkerType } =>
+          entry.type !== undefined && glyphByPlayerID.has(entry.ownerPlayerID),
+      )
+      .sort(
+        (a, b) =>
+          a.tile - b.tile ||
+          compareCodeUnits(a.type, b.type) ||
+          a.unitID - b.unitID,
+      ),
+  );
+  const markersTotal = markerCandidates.reduce(
+    (total, entries) => total + entries.length,
+    0,
+  );
+  const markers: SpatialMinimapBase["markers"] = [];
+  for (let rank = 0; markers.length < SPATIAL_MINIMAP_MARKER_LIMIT; rank++) {
+    let added = false;
+    for (const entries of markerCandidates) {
+      const entry = entries[rank];
+      if (entry === undefined) continue;
+      markers.push({
+        type: entry.type,
+        ownerPlayerID: entry.ownerPlayerID,
+        x: Math.min(
+          minimapWidth - 1,
+          Math.floor((gameState.x(entry.tile) * minimapWidth) / mapWidth),
+        ),
+        y: Math.min(
+          minimapHeight - 1,
+          Math.floor((gameState.y(entry.tile) * minimapHeight) / mapHeight),
+        ),
+      });
+      added = true;
+      if (markers.length === SPATIAL_MINIMAP_MARKER_LIMIT) break;
+    }
+    if (!added) break;
+  }
+  return {
+    width: minimapWidth,
+    height: minimapHeight,
+    ownershipRows,
+    terrainRows,
+    legend,
+    markers,
+    markersTotal,
+  };
+}
+
+function minimapMarkerType(
+  type: UnitType,
+): AgentSpatialMinimapMarkerType | undefined {
+  switch (type) {
+    case UnitType.DefensePost:
+      return "D";
+    case UnitType.City:
+      return "C";
+    case UnitType.Port:
+      return "P";
+    case UnitType.Warship:
+      return "W";
+    default:
+      return undefined;
+  }
 }
 
 function percentage(numerator: number, denominator: number): number {

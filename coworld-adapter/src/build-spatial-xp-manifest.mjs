@@ -32,8 +32,10 @@ export const SPATIAL_XP_PROTOCOL_APPENDIX =
   "when observation.spatial is present in the on arm, " +
   `visibilityModel is exactly ${SPATIAL_XP_VISIBILITY_MODEL}; facts are derived ` +
   "only from the global-lockstep, no-fog map state visible to every human " +
-  "client. The optional minimap is a deterministic 24x12 summary. Spatial " +
-  "legend entries preserve exact glyph, playerID, and isYou fields; redundant " +
+  "client. Schema 5 adds weighted rival/naval exposure. Its child minimap is " +
+  "a deterministic 24x12 or adaptive 32x16 ownership/terrain summary with " +
+  "bounded public structure and warship markers. Legend entries preserve " +
+  "exact glyph, playerID, and isYou fields; redundant " +
   "display names remain available through username/visiblePlayers and are " +
   "omitted from the minimap rather than truncated. Spatial facts never add an " +
   "action or bypass LegalAction.id validation.";

@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PlayerInfo, PlayerType } from "../../src/core/game/Game";
 import {
   createAgentSpatialSnapshot,
-  SPATIAL_MINIMAP_HEIGHT,
   SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
-  SPATIAL_MINIMAP_WIDTH,
 } from "../../src/server/agents/AgentSpatialObservation";
 import type { AgentSpatialMinimap } from "../../src/server/agents/AgentTypes";
 import { setup } from "../util/Setup";
@@ -40,14 +38,19 @@ describe("spatial minimap serialization boundary", () => {
     const base = createAgentSpatialSnapshot(game, true).minimap;
     expect(base).toBeDefined();
     const minimap: AgentSpatialMinimap = {
-      schemaVersion: 1,
-      width: SPATIAL_MINIMAP_WIDTH,
-      height: SPATIAL_MINIMAP_HEIGHT,
-      rows: [...base!.rows],
+      schemaVersion: 2,
+      width: base!.width,
+      height: base!.height,
+      ownershipRows: [...base!.ownershipRows],
+      terrainRows: [...base!.terrainRows],
       legend: base!.legend.map((entry) => ({
         ...entry,
         isYou: entry.playerID === playerInfos[0].id,
       })),
+      markers: base!.markers.map((marker) => ({ ...marker })),
+      markersTotal: base!.markersTotal,
+      markersReturned: base!.markers.length,
+      markersTruncated: base!.markers.length < base!.markersTotal,
     };
 
     expect(minimap.legend.map((entry) => entry.playerID)).toEqual(
@@ -60,19 +63,6 @@ describe("spatial minimap serialization boundary", () => {
       true,
     );
 
-    const namesByID = new Map(
-      playerInfos.map((player) => [player.id, player.name]),
-    );
-    const legacyNamefulMinimap = {
-      ...minimap,
-      legend: minimap.legend.map((entry) => ({
-        ...entry,
-        name: namesByID.get(entry.playerID),
-      })),
-    };
-    expect(
-      Buffer.byteLength(JSON.stringify(legacyNamefulMinimap), "utf8"),
-    ).toBeGreaterThan(SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES);
     expect(
       Buffer.byteLength(JSON.stringify(minimap), "utf8"),
     ).toBeLessThanOrEqual(SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES);

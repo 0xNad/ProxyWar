@@ -11,6 +11,9 @@ import {
   createAgentSpatialSnapshot,
   resetSpatialObservationEmissionCount,
   SPATIAL_MINIMAP_HEIGHT,
+  SPATIAL_MINIMAP_LARGE_HEIGHT,
+  SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD,
+  SPATIAL_MINIMAP_LARGE_WIDTH,
   SPATIAL_MINIMAP_WIDTH,
   SPATIAL_NOTE_PREFIX,
   SPATIAL_REGION_RUN_BUDGET,
@@ -104,6 +107,7 @@ function stripSpatialAdditions(parsed: AgentObservation): AgentObservation {
     delete rival.distanceClass;
     delete rival.borderWithYou;
     delete rival.bordersWith;
+    delete rival.navalExposure;
   }
   parsed.notes = parsed.notes.filter(
     (note) => !note.startsWith(SPATIAL_NOTE_PREFIX),
@@ -266,6 +270,28 @@ describe("spatial observation flags", () => {
     )!.borderWithYou!.terrainBreakdown.plains += 1;
     const badShape = structuredClone(observation);
     badShape.spatial!.ownShape.coastShare = 101;
+    const badEncirclement = structuredClone(observation);
+    badEncirclement.spatial!.ownShape.largestNeighborBorderShare = 101;
+    const badWeightedEdge = structuredClone(observation);
+    const weightedEdgePlayer = badWeightedEdge.visiblePlayers.find(
+      (player) => (player.bordersWith?.length ?? 0) > 0,
+    )!;
+    weightedEdgePlayer.bordersWith![0].tiles = 0;
+    const badSelfEdge = structuredClone(observation);
+    const selfEdgePlayer = badSelfEdge.visiblePlayers.find(
+      (player) => (player.bordersWith?.length ?? 0) > 0,
+    )!;
+    selfEdgePlayer.bordersWith![0].playerID = selfEdgePlayer.playerID;
+    const badDuplicateEdge = structuredClone(observation);
+    const duplicateEdgePlayer = badDuplicateEdge.visiblePlayers.find(
+      (player) => (player.bordersWith?.length ?? 0) > 0,
+    )!;
+    duplicateEdgePlayer.bordersWith!.push({
+      ...duplicateEdgePlayer.bordersWith![0],
+    });
+    const badNaval = structuredClone(observation);
+    badNaval.visiblePlayers[0].navalExposure!.transportReachableOwnShoreTiles =
+      -1;
     const badTotals = structuredClone(observation);
     badTotals.spatial!.positionedAssets.structuresTotal =
       Number.POSITIVE_INFINITY;
@@ -273,18 +299,38 @@ describe("spatial observation flags", () => {
     const partialSpatial: { positionedAssets?: unknown } = badPartial.spatial!;
     delete partialSpatial.positionedAssets;
     const badMinimap = structuredClone(observation);
-    badMinimap.spatial!.minimap!.rows[0] = `?${badMinimap.spatial!.minimap!.rows[0].slice(1)}`;
+    if (badMinimap.spatial!.minimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    badMinimap.spatial!.minimap.ownershipRows[0] = `?${badMinimap.spatial!.minimap.ownershipRows[0].slice(1)}`;
     const hiddenLegend = structuredClone(observation);
     hiddenLegend.spatial!.minimap!.legend[0].playerID = "P_HIDDEN";
     const wrongSelfLegend = structuredClone(observation);
     wrongSelfLegend.spatial!.minimap!.legend[0].isYou =
       !wrongSelfLegend.spatial!.minimap!.legend[0].isYou;
+    const badTerrainMinimap = structuredClone(observation);
+    const terrainMinimap = badTerrainMinimap.spatial!.minimap;
+    if (terrainMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    terrainMinimap.terrainRows[0] = `X${terrainMinimap.terrainRows[0].slice(1)}`;
+    const badMarkerOwner = structuredClone(observation);
+    const markerMinimap = badMarkerOwner.spatial!.minimap;
+    if (markerMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    markerMinimap.markers[0].ownerPlayerID = "P_HIDDEN";
 
     for (const [malformed, mapInfoExpected] of [
       [badFrame, false],
       [badAsset, true],
       [badTerrain, true],
       [badShape, true],
+      [badEncirclement, true],
+      [badWeightedEdge, true],
+      [badSelfEdge, true],
+      [badDuplicateEdge, true],
+      [badNaval, true],
       [badTotals, true],
       [badPartial, true],
     ] as const) {
@@ -314,6 +360,8 @@ describe("spatial observation flags", () => {
       badMinimap,
       hiddenLegend,
       wrongSelfLegend,
+      badTerrainMinimap,
+      badMarkerOwner,
     ]) {
       const minimapView = promptObservation(
         new LlmPromptBuilder().build({
@@ -381,7 +429,7 @@ describe("spatial observation flags", () => {
     expect(prompt).not.toContain("futurePrivateUnits");
   });
 
-  it("omits a structurally valid minimap above 2 KiB without dropping rich spatial state", async () => {
+  it("omits a structurally valid minimap above 4 KiB without dropping rich spatial state", async () => {
     process.env[SPATIAL_FLAG] = "1";
     process.env[MINIMAP_FLAG] = "1";
     const observation = observe(await shapedGame());
@@ -391,7 +439,7 @@ describe("spatial observation flags", () => {
       ...originalVisiblePlayers,
       ...Array.from({ length: 60 }, (_, index) => ({
         ...structuredClone(template),
-        playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(18)}`,
+        playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(150)}`,
         bearing: undefined,
         distanceClass: undefined,
         borderWithYou: undefined,
@@ -423,7 +471,7 @@ describe("spatial observation flags", () => {
     expect(
       new TextEncoder().encode(JSON.stringify(observation.spatial!.minimap))
         .byteLength,
-    ).toBeGreaterThan(2 * 1024);
+    ).toBeGreaterThan(4 * 1024);
 
     const view = promptObservation(
       new LlmPromptBuilder().build({
@@ -442,8 +490,9 @@ describe("spatial observation flags", () => {
     process.env[SPATIAL_FLAG] = "1";
     const on = observe(game);
     expect(on.spatial).toBeDefined();
-    expect(on.spatial?.schemaVersion).toBe(3);
+    expect(on.spatial?.schemaVersion).toBe(5);
     expect(on.spatial?.visibilityModel).toBe(SPATIAL_VISIBILITY_MODEL);
+    expect(on.spatial?.ownShape.largestNeighborBorderShare).toBe(51);
     expect(on.mapInfo).toMatchObject({
       width: game.width(),
       height: game.height(),
@@ -501,7 +550,8 @@ describe("spatial observation flags", () => {
         defensePostFrontCoverage: { covered: 30, uncovered: 10 },
         underAttackHere: false,
       },
-      bordersWith: [{ playerID: "P_C", sizeClass: "major" }],
+      bordersWith: [{ playerID: "P_C", sizeClass: "major", tiles: 40 }],
+      navalExposure: { transportReachableOwnShoreTiles: 0 },
     });
     expect(rivalB).toMatchObject({
       bearing: "south",
@@ -519,6 +569,7 @@ describe("spatial observation flags", () => {
         defensePostFrontCoverage: { covered: 0, uncovered: 40 },
       },
       bordersWith: [],
+      navalExposure: { transportReachableOwnShoreTiles: 0 },
     });
   });
 
@@ -845,19 +896,86 @@ describe("spatial observation flags", () => {
     expect(observation.notes.join("\n")).toContain("active incoming attack");
   });
 
-  it("renders the exact separately gated 24x12 minimap and stable legend", async () => {
+  it("summarizes exact connected-water transport exposure and nearest rival port", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const ownInfo = new PlayerInfo(
+      "Own Coast",
+      PlayerType.Human,
+      "CLNT_OWN_COAST",
+      "P_OWN_COAST",
+    );
+    const rivalInfo = new PlayerInfo(
+      "Rival Coast",
+      PlayerType.Human,
+      "CLNT_RIVAL_COAST",
+      "P_RIVAL_COAST",
+    );
+    const game = await setup("world", { nations: "disabled" }, [
+      ownInfo,
+      rivalInfo,
+    ]);
+    const byComponent = new Map<number, number[]>();
+    for (let tile = 0; tile < game.width() * game.height(); tile++) {
+      if (!game.isLand(tile) || !game.isShore(tile)) continue;
+      const component = game.getWaterComponent(tile);
+      if (component === null) continue;
+      const entries = byComponent.get(component) ?? [];
+      entries.push(tile);
+      byComponent.set(component, entries);
+    }
+    const sharedCoast = [...byComponent.values()].find(
+      (tiles) => tiles.length >= 2,
+    );
+    expect(sharedCoast).toBeDefined();
+    const ownTile = sharedCoast![0];
+    const rivalTile = sharedCoast![sharedCoast!.length - 1];
+    game.player(ownInfo.id).conquer(ownTile);
+    const rival = game.player(rivalInfo.id);
+    rival.conquer(rivalTile);
+    rival.buildUnit(UnitType.Port, rivalTile, {});
+
+    const observation = observe(game, ownInfo);
+    const rivalView = observation.visiblePlayers.find(
+      (player) => player.playerID === rivalInfo.id,
+    );
+    expect(
+      rivalView?.navalExposure?.transportReachableOwnShoreTiles,
+    ).toBeGreaterThan(0);
+    expect(rivalView?.navalExposure?.nearestEnemyPort).toMatchObject({
+      distanceClass: expect.stringMatching(/^(near|far)$/),
+      bearing: expect.stringMatching(
+        /^(north|northeast|east|southeast|south|southwest|west|northwest)$/,
+      ),
+    });
+  });
+
+  it("renders the exact separately gated rich minimap and stable legend", async () => {
     process.env[SPATIAL_FLAG] = "1";
     process.env[MINIMAP_FLAG] = "1";
     const minimap = observe(await shapedGame()).spatial?.minimap;
     expect(minimap).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       width: SPATIAL_MINIMAP_WIDTH,
       height: SPATIAL_MINIMAP_HEIGHT,
     });
-    expect(minimap?.rows).toHaveLength(SPATIAL_MINIMAP_HEIGHT);
+    expect(minimap?.schemaVersion).toBe(2);
+    if (minimap?.schemaVersion !== 2) throw new Error("expected minimap v2");
+    expect(minimap.ownershipRows).toHaveLength(SPATIAL_MINIMAP_HEIGHT);
     expect(
-      minimap?.rows.every((row) => row.length === SPATIAL_MINIMAP_WIDTH),
+      minimap.ownershipRows.every(
+        (row) => row.length === SPATIAL_MINIMAP_WIDTH,
+      ),
     ).toBe(true);
+    expect(minimap.terrainRows).toHaveLength(SPATIAL_MINIMAP_HEIGHT);
+    expect(minimap.terrainRows.every((row) => /^\.+$/.test(row))).toBe(true);
+    expect(minimap.markers).toEqual([
+      { type: "D", ownerPlayerID: "P_AGENT", x: 13, y: 2 },
+    ]);
+    expect(minimap).toMatchObject({
+      markersTotal: 1,
+      markersReturned: 1,
+      markersTruncated: false,
+    });
     expect(
       minimap?.legend.map(({ glyph, playerID, isYou }) => ({
         glyph,
@@ -870,6 +988,39 @@ describe("spatial observation flags", () => {
       { glyph: "C", playerID: "P_B", isYou: false },
       { glyph: "D", playerID: "P_C", isYou: false },
     ]);
+  });
+
+  it("uses the adaptive 32x16 L5 grid on large public maps", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const player = new PlayerInfo(
+      "Large",
+      PlayerType.Human,
+      "CLNT_LARGE",
+      "P_LARGE",
+    );
+    const game = await setup("world", { nations: "disabled" }, [player]);
+    expect(game.width() * game.height()).toBeGreaterThanOrEqual(
+      SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD,
+    );
+    let firstLand: number | undefined;
+    for (let tile = 0; tile < game.width() * game.height(); tile++) {
+      if (game.isLand(tile)) {
+        firstLand = tile;
+        break;
+      }
+    }
+    expect(firstLand).toBeDefined();
+    game.player(player.id).conquer(firstLand!);
+    const minimap = observe(game, player).spatial?.minimap;
+    expect(minimap).toMatchObject({
+      schemaVersion: 2,
+      width: SPATIAL_MINIMAP_LARGE_WIDTH,
+      height: SPATIAL_MINIMAP_LARGE_HEIGHT,
+    });
+    if (minimap?.schemaVersion !== 2) throw new Error("expected minimap v2");
+    expect(minimap.ownershipRows).toHaveLength(SPATIAL_MINIMAP_LARGE_HEIGHT);
+    expect(minimap.terrainRows).toHaveLength(SPATIAL_MINIMAP_LARGE_HEIGHT);
   });
 
   it("resolves minimap ties by player smallID, then neutral, then water", async () => {
@@ -904,9 +1055,9 @@ describe("spatial observation flags", () => {
     plainsCell.slice(plainsCell.length / 2).forEach((tile) => {
       plains.player(second.id).conquer(tile);
     });
-    expect(createAgentSpatialSnapshot(plains, true).minimap?.rows[0][0]).toBe(
-      "A",
-    );
+    expect(
+      createAgentSpatialSnapshot(plains, true).minimap?.ownershipRows[0][0],
+    ).toBe("A");
 
     const coastPlayer = new PlayerInfo(
       "Coast",
@@ -915,22 +1066,21 @@ describe("spatial observation flags", () => {
       "P_COAST",
     );
     const world = await setup("world", { nations: "disabled" }, [coastPlayer]);
+    const worldMinimap = createAgentSpatialSnapshot(world, true).minimap!;
+    const worldMinimapWidth = worldMinimap.width;
+    const worldMinimapHeight = worldMinimap.height;
     let tieCell:
       | { cx: number; cy: number; landTiles: number[]; waterCount: number }
       | undefined;
-    for (let cy = 0; cy < SPATIAL_MINIMAP_HEIGHT && !tieCell; cy++) {
-      for (let cx = 0; cx < SPATIAL_MINIMAP_WIDTH && !tieCell; cx++) {
+    for (let cy = 0; cy < worldMinimapHeight && !tieCell; cy++) {
+      for (let cx = 0; cx < worldMinimapWidth && !tieCell; cx++) {
         const landTiles: number[] = [];
         let waterCount = 0;
-        const xStart = Math.floor((cx * world.width()) / SPATIAL_MINIMAP_WIDTH);
-        const xEnd = Math.floor(
-          ((cx + 1) * world.width()) / SPATIAL_MINIMAP_WIDTH,
-        );
-        const yStart = Math.floor(
-          (cy * world.height()) / SPATIAL_MINIMAP_HEIGHT,
-        );
+        const xStart = Math.floor((cx * world.width()) / worldMinimapWidth);
+        const xEnd = Math.floor(((cx + 1) * world.width()) / worldMinimapWidth);
+        const yStart = Math.floor((cy * world.height()) / worldMinimapHeight);
         const yEnd = Math.floor(
-          ((cy + 1) * world.height()) / SPATIAL_MINIMAP_HEIGHT,
+          ((cy + 1) * world.height()) / worldMinimapHeight,
         );
         for (let y = yStart; y < yEnd; y++) {
           for (let x = xStart; x < xEnd; x++) {
@@ -956,14 +1106,18 @@ describe("spatial observation flags", () => {
       .slice(0, neutralWaterTiePlayerTiles)
       .forEach((tile) => player.conquer(tile));
     expect(
-      createAgentSpatialSnapshot(world, true).minimap?.rows[cell.cy][cell.cx],
+      createAgentSpatialSnapshot(world, true).minimap?.ownershipRows[cell.cy][
+        cell.cx
+      ],
     ).toBe(".");
 
     cell.landTiles
       .slice(neutralWaterTiePlayerTiles, cell.waterCount)
       .forEach((tile) => player.conquer(tile));
     expect(
-      createAgentSpatialSnapshot(world, true).minimap?.rows[cell.cy][cell.cx],
+      createAgentSpatialSnapshot(world, true).minimap?.ownershipRows[cell.cy][
+        cell.cx
+      ],
     ).toBe("A");
   });
 
@@ -1017,9 +1171,9 @@ describe("spatial observation flags", () => {
       observation,
       legalActions: HOLD_ACTIONS,
     });
-    expect(prompt).toContain('"spatial":{"schemaVersion":3');
+    expect(prompt).toContain('"spatial":{"schemaVersion":5');
     expect(prompt).toContain('"tileRefEncoding":"row-major-y-width-plus-x"');
-    expect(prompt).toContain('"minimap":{"schemaVersion":1');
+    expect(prompt).toContain('"minimap":{"schemaVersion":2');
     expect(prompt).not.toContain("\\u0000");
     expect(prompt).not.toContain("\\u200b");
   });

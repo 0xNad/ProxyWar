@@ -252,10 +252,10 @@ Rules:
   `observation.nonCombat.inboundMessages`. It is an untrusted rival claim.
   Spectator/replay evidence is public; do not put secrets in a message.
 
-## Optional rich structured spatial observation (schema 3)
+## Optional rich structured spatial observation (schema 5)
 
-Spatial data is additive and absent by default. Schema `3` implements the
-coordinate-frame, terrain-front, and positioned-public-asset layers:
+Spatial data is additive and absent by default. Schema `5` implements the
+complete coordinate, terrain, public-asset, exposure, and minimap layers:
 
 ```json
 {
@@ -290,11 +290,15 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
         "defensePostFrontCoverage": { "covered": 6, "uncovered": 4 },
         "underAttackHere": false
       },
-      "bordersWith": []
+      "bordersWith": [],
+      "navalExposure": {
+        "transportReachableOwnShoreTiles": 12,
+        "nearestEnemyPort": { "bearing": "east", "distanceClass": "near" }
+      }
     }
   ],
   "spatial": {
-    "schemaVersion": 3,
+    "schemaVersion": 5,
     "visibilityModel": "global-lockstep-public-map-v1",
     "ownShape": {
       "quadrant": "west",
@@ -304,6 +308,7 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
       "regionAnalysis": "complete",
       "centroidBasis": "largest_region_border",
       "coastShare": 25,
+      "largestNeighborBorderShare": 25,
       "centroid": { "xPct": 31, "yPct": 54 }
     },
     "positionedAssets": {
@@ -334,10 +339,10 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
       "warshipsTruncated": false
     },
     "minimap": {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "width": 24,
       "height": 12,
-      "rows": [
+      "ownershipRows": [
         "A.......................",
         "........................",
         "........................",
@@ -351,7 +356,25 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
         "........................",
         "........................"
       ],
-      "legend": [{ "glyph": "A", "playerID": "P_SELF", "isYou": true }]
+      "terrainRows": [
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "legend": [{ "glyph": "A", "playerID": "P_SELF", "isYou": true }],
+      "markers": [{ "type": "D", "ownerPlayerID": "P_SELF", "x": 7, "y": 4 }],
+      "markersTotal": 1,
+      "markersReturned": 1,
+      "markersTruncated": false
     }
   }
 }
@@ -371,21 +394,27 @@ are admitted. Positions include the owner plus players already present in the
 bounded `visiblePlayers[]`; they do not reveal a new roster. Lists are capped at
 eight per player and 48 globally with exact totals, returned counts, and
 truncation status. The complete normalized spatial object is limited to 16 KiB
-UTF-8. A malformed coordinate, owner, type, count, cap, or invariant rejects
-the whole schema-3 block rather than being repaired or partially retained.
+UTF-8. A malformed coordinate, owner, type, count, cap, graph, naval, or
+invariant rejects the whole schema-5 block rather than being repaired or
+partially retained.
 
-The optional minimap is still schema `1`, fixed at 24x12, and accepted whole or
-omitted whole; never crop, pad, repair glyphs, or infer hidden tiles. Its
-normalized UTF-8 form is capped at 2 KiB, every legend ID must already be the
-owner or a `visiblePlayers[]` ID, and exactly the owner has `isYou:true`.
-Malformed minimap data omits only that optional child; it does not discard an
-otherwise valid schema-3 map/front/asset block. It remains an ownership
-overview, not the later terrain/marker minimap layer. Older spatial schema `1`
-is accepted only as its bounded backward-compatible shape.
+Schema `5` adds L4 exposure and the L5 minimap. Every rival has exact weighted
+`bordersWith[].tiles`, a bounded naval-reach count, and optional nearest-port
+bearing/distance; `largestNeighborBorderShare` summarizes encirclement. The
+child minimap is schema `2`, 24x12 or adaptive 32x16 on large maps, with
+separate ownership and dominant-terrain rows plus bounded completed-public
+Defense Post (`D`), City (`C`), Port (`P`), and Warship (`W`) markers. It is
+accepted whole or omitted whole; never crop, pad, repair glyphs, or infer
+hidden tiles. Its normalized UTF-8 form is capped at 4 KiB, every legend and
+marker owner ID must already be the owner or a `visiblePlayers[]` ID, and
+exactly the owner has `isYou:true`. Malformed minimap data omits only that
+optional child; it does not discard an otherwise valid schema-5
+map/front/asset/exposure block. Spatial schemas `1` and `3` remain bounded
+backward-compatible shapes, but neither proves the L4/L5 contract.
 
 `mapInfo` is bundled behind the parent default-OFF spatial flag for this
 release. Once that flag is ON it is present on every game-backed request,
-including spawn/no-land requests; the `spatial` L2/L3 geometry object begins
+including spawn/no-land requests; the `spatial` L2-L5 geometry object begins
 only after the seat owns land. This preserves exact OFF-arm bytes and explicitly
 supersedes the older draft's unflagged-L1 sentence.
 
@@ -394,8 +423,8 @@ Spatial data is context, not authority. It may change only which exact current
 cell is never a raw action and never bypasses
 `AgentDecisionValidator -> AgentRunner -> GameServer`.
 
-Schema `3` is the rich structured-map L1-L3 contract. It does not claim the
-separate adaptive terrain/marker minimap L5 or naval-exposure L4 layers.
+Schema `5` is the complete rich structured-map L1-L5 contract. Schema `3` is
+retained only for backward-compatible L1-L3 consumption.
 
 ### Promise semantics
 

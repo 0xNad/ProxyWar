@@ -94,7 +94,7 @@ const BASE_OBSERVATION = {
 };
 
 describe("tester-starter-llm spatial state renderer", () => {
-  it("keeps both published schema-3 JSON examples directly admissible", async () => {
+  it("keeps both published schema-5 JSON examples directly admissible and usable", async () => {
     const ownerEnvelope = await jsonFenceContaining(
       OWNER_PACKET_FILE,
       '"type": "decision_request"',
@@ -118,8 +118,28 @@ describe("tester-starter-llm spatial state renderer", () => {
       ],
     });
     expect(boundedSpatialObservation(ownerRequest.observation)).toMatchObject({
-      schemaVersion: 3,
-      minimap: { legend: [{ playerID: "P_A", isYou: true }] },
+      schemaVersion: 5,
+      ownShape: { largestNeighborBorderShare: 45 },
+      minimap: {
+        schemaVersion: 2,
+        legend: [{ playerID: "P_A", isYou: true }],
+        markers: [{ type: "D", ownerPlayerID: "P_A", x: 7, y: 4 }],
+      },
+    });
+    const ownerState = (await loadBuildState())(ownerRequest.observation, []);
+    expect(ownerState.spatial).toMatchObject({
+      schemaVersion: 5,
+      ownShape: { largestNeighborBorderShare: 45 },
+      minimap: { schemaVersion: 2 },
+    });
+    expect(
+      (ownerState.rivals as Array<Record<string, unknown>>)[0],
+    ).toMatchObject({
+      borderWithYou: { tiles: 18 },
+      navalExposure: {
+        transportReachableOwnShoreTiles: 12,
+        nearestEnemyPort: { bearing: "east", distanceClass: "near" },
+      },
     });
 
     const protocolObservation = await jsonFenceContaining(
@@ -127,8 +147,11 @@ describe("tester-starter-llm spatial state renderer", () => {
       '"ownerPlayerID": "P_SELF"',
     );
     expect(boundedSpatialObservation(protocolObservation)).toMatchObject({
-      schemaVersion: 3,
-      minimap: { legend: [{ playerID: "P_SELF", isYou: true }] },
+      schemaVersion: 5,
+      minimap: {
+        schemaVersion: 2,
+        legend: [{ playerID: "P_SELF", isYou: true }],
+      },
     });
   });
 

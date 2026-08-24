@@ -21,7 +21,7 @@ Release-contract amendment: the 2026-08-16 design draft proposed unflagged L1
 `mapInfo`, but this train's newer default-OFF/Commander-isolation requirement
 controls. L1 remains behind the parent spatial flag so the OFF arm stays
 byte-identical. In the ON arm every game-backed request, including spawn/no-land,
-must carry `mapInfo`; L2/L3 geometry begins only after land exists.
+must carry `mapInfo`; L2-L5 geometry begins only after land exists.
 
 Generate each local-only, upload-blocked candidate manifest without editing the
 canonical template:
@@ -84,21 +84,20 @@ summarize only that common state:
 - active, completed, nondeleted Defense Posts, Cities, Ports, and Warships for
   the owner plus players already in `visiblePlayers`, capped at eight per
   player and 48 per asset class with explicit totals/truncation;
-- the same public ownership/terrain grid reduced deterministically to a 24 by
-  12 minimap.
+- exact rival-rival border weights, the observer's largest-neighbor border
+  share, rival transport-reachable observer shore count, and nearest completed
+  rival-port bearing/distance;
+- the same public ownership/terrain grid reduced deterministically to 24x12 or
+  adaptive 32x16, plus at most 24 completed-public structure/warship markers.
 
 The minimap legend contains exact `glyph`, `playerID`, and `isYou` fields only.
 It deliberately omits redundant display names: the observing name remains in
 `username`, and every rival name remains in `visiblePlayers` under the same
-exact player ID. IDs and glyphs are never truncated or rewritten. This keeps a
-25-seat boundary fixture with eight-character IDs below the 2 KiB minimap cap
-without losing identity linkage.
-
-This candidate is a rich **structured map** plus the existing ownership
-minimap. It does not implement the separately designed terrain/structure-marker
-minimap L5. An unqualified rich-minimap claim remains blocked until that child
-schema has its own serialization cap, 25-seat boundary, prompt/memory gate, and
-hosted matched-use proof.
+exact player ID. IDs and glyphs are never truncated or rewritten. Schema `5`
+uses minimap schema `2`: separate ownership and terrain rows plus exact-roster
+bound `D`, `C`, `P`, and `W` markers. The normalized child has a 4 KiB ceiling;
+the 25-seat fixture retains every exact eight-character player ID and glyph
+without display-name duplication.
 
 It must not expose seeds, command queues, private agent memory or prompts,
 future intents, hidden server state, or any field from a future fog/private
@@ -121,7 +120,7 @@ The checked-in benchmark and prompt matrix enforce these exact ceilings:
 | Snapshot retained heap           |        1 MiB |
 | Minimap-ON retained heap         |        1 MiB |
 | Serialized stage-one observation |       16 KiB |
-| Serialized minimap               |        2 KiB |
+| Serialized minimap               |        4 KiB |
 | Spatial prompt increment         |       24 KiB |
 | Estimated prompt-token increment | 8,192 tokens |
 | 16-seat all-on prompt growth     |          10% |
@@ -129,9 +128,9 @@ The checked-in benchmark and prompt matrix enforce these exact ceilings:
 The off arm must remain byte-identical to pre-spatial observation and starter
 telemetry. The on arm must be deterministic for the same state, bounded under
 the table above, and accepted by the public-source-of-truth starter only when
-schema `3` and the exact visibility model are present. The starter also retains
-strict schema-`1` backward compatibility, but only schema `3` carries the rich
-map frame, terrain fronts, and positioned assets.
+schema `5` and the exact visibility model are present. The starter also retains
+strict schemas `1`/`3` backward compatibility, but only schema `5` carries
+weighted/naval L4 and terrain/marker minimap L5.
 
 ## Hosted matched proof gate
 
@@ -139,9 +138,10 @@ Use identical map, seed, player roster, frozen policy versions, episode index,
 and balanced seats in both arms. Before claiming a useful behavioral effect,
 retain evidence that:
 
-1. the off arm reports no spatial state, while the on arm reports schema `3`,
+1. the off arm reports no spatial state, while the on arm reports schema `5`,
    the exact visibility model, coordinate frame, terrain/coverage, completed
-   public positioned assets, and the ownership minimap;
+   public positioned assets, weighted rival/naval exposure, and the adaptive
+   ownership/terrain/marker minimap;
 2. both arms receive the same offered legal-action IDs at each matched state;
 3. any changed choice is still an exact offered ID and is accepted through the
    canonical validator/runner path;
@@ -159,12 +159,12 @@ backward-compatible schema `1` and is not sufficient for this release:
 
 ```sh
 node owner-evidence-check.mjs --deals=optional --messages=optional \
-  --spatial=rich-v3-minimap owner-evidence/spatial-owner.log
+  --spatial=rich-v5-minimap owner-evidence/spatial-owner.log
 ```
 
 Each supplied policy log must contain a spatial record, and every supplied
-spatial record must be present, schema `3`, carry the exact visibility model,
-stay within 16 KiB, report the bounded minimap, and record that its primary
+spatial record must be present, schema `5`, carry the exact visibility model,
+stay within 16 KiB, report minimap schema `2`, and record that its primary
 selected legal action was offered. One good record cannot mask an absent,
 missing, or downgraded record from another supplied policy log. This is
 policy-authored evidence, not an external Coworld seal; retain the independently

@@ -301,6 +301,20 @@ function benchmarkGame(
         (y + 1 < HEIGHT && grid.water[tile + WIDTH] === 1)
       );
     },
+    // The acceptance fixture models one connected public ocean. Land tiles
+    // adjacent to that ocean deliberately share its component, matching the
+    // permissive shore lookup exposed by the real WaterManager API.
+    getWaterComponent: (tile: number) => {
+      if (grid.water[tile] === 1) return 0;
+      const x = tile % WIDTH;
+      const y = Math.floor(tile / WIDTH);
+      return (x > 0 && grid.water[tile - 1] === 1) ||
+        (x + 1 < WIDTH && grid.water[tile + 1] === 1) ||
+        (y > 0 && grid.water[tile - WIDTH] === 1) ||
+        (y + 1 < HEIGHT && grid.water[tile + WIDTH] === 1)
+        ? 0
+        : null;
+    },
     terrainType: (tile: number) =>
       tile % 19 === 0
         ? TerrainType.Mountain
@@ -505,14 +519,20 @@ function minimapSerializationBoundary() {
     throw new Error("25-seat serialization fixture did not build a minimap");
   }
   const minimap = {
-    schemaVersion: 1,
-    width: 24,
-    height: 12,
-    rows: [...snapshot.minimap.rows],
+    schemaVersion: 2,
+    width: snapshot.minimap.width,
+    height: snapshot.minimap.height,
+    ownershipRows: [...snapshot.minimap.ownershipRows],
+    terrainRows: [...snapshot.minimap.terrainRows],
     legend: snapshot.minimap.legend.map((entry) => ({
       ...entry,
       isYou: entry.playerID === players[0].id(),
     })),
+    markers: snapshot.minimap.markers.map((marker) => ({ ...marker })),
+    markersTotal: snapshot.minimap.markersTotal,
+    markersReturned: snapshot.minimap.markers.length,
+    markersTruncated:
+      snapshot.minimap.markers.length < snapshot.minimap.markersTotal,
   };
   const serializedBytes = Buffer.byteLength(JSON.stringify(minimap), "utf8");
   const legacyNamefulMinimap = {
@@ -545,11 +565,11 @@ function minimapSerializationBoundary() {
     ],
     serializedBytes,
     legacyNamefulSerializedBytes,
+    legacyNamefulWithinCurrentCap:
+      legacyNamefulSerializedBytes <= TARGET_MINIMAP_BYTES,
     namesOmitted,
     idsAndGlyphsExact,
     checks: {
-      reproducedLegacyOverflow:
-        legacyNamefulSerializedBytes > TARGET_MINIMAP_BYTES,
       payload: serializedBytes <= TARGET_MINIMAP_BYTES,
       namesOmitted,
       idsAndGlyphsExact,
@@ -774,9 +794,15 @@ const report = {
     Object.values(serializationBoundary.checks).every(Boolean),
 };
 console.log(JSON.stringify(report, null, 2));
+const outputArgument = process.argv.find((argument) =>
+  argument.startsWith("--out="),
+);
+const outputPath = outputArgument?.slice("--out=".length);
 const artifactPath = path.resolve(
   process.cwd(),
-  "artifacts/ai-league-benchmarks/spatial-observation-benchmark.json",
+  outputPath !== undefined && outputPath.length > 0
+    ? outputPath
+    : "artifacts/ai-league-benchmarks/spatial-observation-benchmark.json",
 );
 await fs.mkdir(path.dirname(artifactPath), { recursive: true });
 await fs.writeFile(artifactPath, `${JSON.stringify(report, null, 2)}\n`);

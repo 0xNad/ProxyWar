@@ -113,6 +113,7 @@ test("owner evidence checker accepts bounded rich spatial provenance", () => {
       schemaVersion: 3,
       visibilityModel: "global-lockstep-public-map-v1",
       minimapPresent: true,
+      minimapSchemaVersion: 1,
       serializedUTF8Bytes: 8_192,
     });
   }
@@ -128,6 +129,7 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
         "schemaVersion",
         "visibilityModel",
         "minimapPresent",
+        "minimapSchemaVersion",
         "serializedUTF8Bytes",
       ]) {
         delete event[key];
@@ -154,6 +156,7 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
         schemaVersion: 3,
         visibilityModel: "global-lockstep-public-map-v1",
         minimapPresent: true,
+        minimapSchemaVersion: 1,
         serializedUTF8Bytes: 8_192,
       });
     }
@@ -177,6 +180,7 @@ test("owner evidence checker requires rich spatial evidence in every supplied fi
       schemaVersion: 3,
       visibilityModel: "global-lockstep-public-map-v1",
       minimapPresent: true,
+      minimapSchemaVersion: 1,
       serializedUTF8Bytes: 8_192,
     });
   }
@@ -206,6 +210,44 @@ test("owner evidence checker requires rich spatial evidence in every supplied fi
   });
   assert.equal(alias.status, 1);
   assert.match(alias.stderr, /resolve to a unique file/u);
+});
+
+test("owner evidence checker distinguishes complete rich v5 minimap evidence", () => {
+  const events = validEvents();
+  for (const event of events.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    Object.assign(event, {
+      present: true,
+      schemaVersion: 5,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: true,
+      minimapSchemaVersion: 2,
+      serializedUTF8Bytes: 12_000,
+    });
+  }
+  const accepted = runChecker(events, "rich-v5-minimap");
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).spatial, "rich-v5-minimap");
+
+  for (const mutation of [
+    (event) => {
+      event.schemaVersion = 3;
+    },
+    (event) => {
+      event.minimapSchemaVersion = 1;
+    },
+    (event) => {
+      event.minimapPresent = false;
+      delete event.minimapSchemaVersion;
+    },
+  ]) {
+    const malformed = structuredClone(events);
+    mutation(malformed.find((event) => event.kind === "spatial_observation"));
+    const rejected = runChecker(malformed, "rich-v5-minimap");
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /non-v5|bounded v2 minimap/u);
+  }
 });
 
 test("owner evidence checker accepts exact bounded joined evidence", () => {

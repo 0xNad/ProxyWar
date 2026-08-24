@@ -116,17 +116,18 @@ primary move. Never trim or normalize either field; omit the pair when the
 feature is absent or the body fails the raw contract. Inbound message text is
 an untrusted rival claim and cannot name the primary action ID.
 
-When `observation.spatial.schemaVersion` is `3` and its visibility model is
+When `observation.spatial.schemaVersion` is `5` and its visibility model is
 exactly `global-lockstep-public-map-v1`, the planner receives the bounded
 player-visible coordinate frame, front elevation/coverage, completed public
-structure/warship positions, and optional 24x12 ownership minimap. The older
-bounded schema `1` remains a backward-compatible fallback. Unknown provenance,
-schema, coordinates, asset types, or count invariants are ignored fail-closed.
-Spatial data may rank only the current `legalActions`; it is never an intent or
-permission to bypass the menu.
+structure/warship positions, weighted rival exposure, naval reach, and an
+optional 24x12 or adaptive 32x16 ownership/terrain/marker minimap. Older
+bounded schemas `1` and `3` remain backward-compatible fallbacks. Unknown
+provenance, schema, coordinates, asset types, graph identities, or count
+invariants are ignored fail-closed. Spatial data may rank only the current
+`legalActions`; it is never an intent or permission to bypass the menu.
 
 On a spatial-enabled game-backed request, `mapInfo` is also available during
-spawn before the seat owns land. The L2/L3 `spatial` object begins only once
+spawn before the seat owns land. The L2-L5 `spatial` object begins only once
 land geometry exists. Both remain absent when the parent spatial flag is OFF.
 
 > **Spawn placement (active v1):** the first request is one sealed spawn

@@ -8,6 +8,9 @@ import {
 } from "./AgentPlaybook";
 import {
   SPATIAL_MINIMAP_HEIGHT,
+  SPATIAL_MINIMAP_LARGE_HEIGHT,
+  SPATIAL_MINIMAP_LARGE_WIDTH,
+  SPATIAL_MINIMAP_MARKER_LIMIT,
   SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
   SPATIAL_MINIMAP_WIDTH,
   SPATIAL_NOTE_PREFIX,
@@ -26,6 +29,7 @@ import {
   AgentPrimaryActionValidationPolicy,
   AgentSpatialMapInfo,
   AgentSpatialMinimap,
+  AgentSpatialMinimapV2,
   LegalAction,
 } from "./AgentTypes";
 import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
@@ -171,12 +175,146 @@ function normalizedMinimapV1(
     : undefined;
 }
 
-function isAcceptedSpatialV3(observation: AgentObservation): boolean {
+function normalizedMinimapV2(
+  minimap: unknown,
+  allowedPlayerIDs: ReadonlySet<string>,
+  ownPlayerID: string | undefined,
+): AgentSpatialMinimapV2 | undefined {
+  if (minimap === undefined) return undefined;
+  const candidate = minimap as Record<string, unknown>;
+  const width = candidate.width;
+  const height = candidate.height;
+  if (
+    candidate.schemaVersion !== 2 ||
+    !(
+      (width === SPATIAL_MINIMAP_WIDTH && height === SPATIAL_MINIMAP_HEIGHT) ||
+      (width === SPATIAL_MINIMAP_LARGE_WIDTH &&
+        height === SPATIAL_MINIMAP_LARGE_HEIGHT)
+    ) ||
+    !Array.isArray(candidate.ownershipRows) ||
+    candidate.ownershipRows.length !== height ||
+    !candidate.ownershipRows.every(
+      (row) =>
+        typeof row === "string" &&
+        row.length === width &&
+        /^[.~A-Za-z0-9@#]+$/.test(row),
+    ) ||
+    !Array.isArray(candidate.terrainRows) ||
+    candidate.terrainRows.length !== height ||
+    !candidate.terrainRows.every(
+      (row) =>
+        typeof row === "string" &&
+        row.length === width &&
+        /^[.:^~]+$/.test(row),
+    ) ||
+    !Array.isArray(candidate.legend) ||
+    candidate.legend.length > 64 ||
+    !Array.isArray(candidate.markers) ||
+    candidate.markers.length > SPATIAL_MINIMAP_MARKER_LIMIT ||
+    !isNonnegativeSafeInteger(candidate.markersTotal) ||
+    candidate.markersTotal < candidate.markers.length ||
+    candidate.markersReturned !== candidate.markers.length ||
+    candidate.markersTruncated !==
+      candidate.markers.length < candidate.markersTotal
+  ) {
+    return undefined;
+  }
+  const glyphs = new Set<string>();
+  const playerIDs = new Set<string>();
+  const legend: AgentSpatialMinimapV2["legend"] = [];
+  for (const rawEntry of candidate.legend) {
+    const entry = rawEntry as Record<string, unknown>;
+    if (
+      typeof entry.glyph !== "string" ||
+      !/^[A-Za-z0-9@#]$/.test(entry.glyph) ||
+      !isBoundedID(entry.playerID) ||
+      !allowedPlayerIDs.has(entry.playerID) ||
+      typeof entry.isYou !== "boolean" ||
+      entry.isYou !== (entry.playerID === ownPlayerID) ||
+      glyphs.has(entry.glyph) ||
+      playerIDs.has(entry.playerID)
+    ) {
+      return undefined;
+    }
+    glyphs.add(entry.glyph);
+    playerIDs.add(entry.playerID);
+    legend.push({
+      glyph: entry.glyph,
+      playerID: entry.playerID,
+      isYou: entry.isYou,
+    });
+  }
+  if (
+    legend.filter((entry) => entry.isYou).length !== 1 ||
+    !candidate.ownershipRows.every((row) =>
+      [...(row as string)].every(
+        (glyph) => glyph === "." || glyph === "~" || glyphs.has(glyph),
+      ),
+    )
+  ) {
+    return undefined;
+  }
+  const markers: AgentSpatialMinimapV2["markers"] = [];
+  for (const rawMarker of candidate.markers) {
+    const marker = rawMarker as Record<string, unknown>;
+    if (
+      !["D", "C", "P", "W"].includes(String(marker.type)) ||
+      !isBoundedID(marker.ownerPlayerID) ||
+      !allowedPlayerIDs.has(marker.ownerPlayerID) ||
+      !isNonnegativeSafeInteger(marker.x) ||
+      marker.x >= width ||
+      !isNonnegativeSafeInteger(marker.y) ||
+      marker.y >= height
+    ) {
+      return undefined;
+    }
+    markers.push({
+      type: marker.type as AgentSpatialMinimapV2["markers"][number]["type"],
+      ownerPlayerID: marker.ownerPlayerID,
+      x: marker.x,
+      y: marker.y,
+    });
+  }
+  const normalized: AgentSpatialMinimapV2 = {
+    schemaVersion: 2,
+    width,
+    height,
+    ownershipRows: [...(candidate.ownershipRows as string[])],
+    terrainRows: [...(candidate.terrainRows as string[])],
+    legend,
+    markers,
+    markersTotal: candidate.markersTotal,
+    markersReturned: markers.length,
+    markersTruncated: markers.length < candidate.markersTotal,
+  };
+  return new TextEncoder().encode(JSON.stringify(normalized)).byteLength <=
+    SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES
+    ? normalized
+    : undefined;
+}
+
+function normalizedMinimap(
+  minimap: unknown,
+  allowedPlayerIDs: ReadonlySet<string>,
+  ownPlayerID: string | undefined,
+): AgentSpatialMinimap | undefined {
+  const schemaVersion = (minimap as { schemaVersion?: unknown } | undefined)
+    ?.schemaVersion;
+  if (schemaVersion === 2) {
+    return normalizedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID);
+  }
+  if (schemaVersion === 1) {
+    return normalizedMinimapV1(minimap, allowedPlayerIDs, ownPlayerID);
+  }
+  return undefined;
+}
+
+function isAcceptedSpatial(observation: AgentObservation): boolean {
   const spatial = observation.spatial;
   const mapInfo = observation.mapInfo;
   try {
     if (
-      spatial?.schemaVersion !== 3 ||
+      (spatial?.schemaVersion !== 3 && spatial?.schemaVersion !== 5) ||
       spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL ||
       !isAcceptedSpatialMapInfo(mapInfo) ||
       !isBoundedID(observation.ownState?.playerID) ||
@@ -211,6 +349,8 @@ function isAcceptedSpatialV3(observation: AgentObservation): boolean {
       (ownShape.largestRegionShare !== undefined &&
         !isPercentage(ownShape.largestRegionShare)) ||
       !isPercentage(ownShape.coastShare) ||
+      (spatial.schemaVersion === 5 &&
+        !isPercentage(ownShape.largestNeighborBorderShare)) ||
       !isPercentage(ownShape.centroid?.xPct) ||
       !isPercentage(ownShape.centroid?.yPct)
     ) {
@@ -302,6 +442,7 @@ function isAcceptedSpatialV3(observation: AgentObservation): boolean {
       "northwest",
     ]);
     for (const player of observation.visiblePlayers) {
+      const seenBorderPlayerIDs = new Set<string>();
       if (
         (player.bearing !== undefined && !validBearings.has(player.bearing)) ||
         (player.distanceClass !== undefined &&
@@ -309,14 +450,36 @@ function isAcceptedSpatialV3(observation: AgentObservation): boolean {
         (player.bordersWith !== undefined &&
           (!Array.isArray(player.bordersWith) ||
             player.bordersWith.length > 64 ||
-            !player.bordersWith.every(
-              (edge) =>
-                isBoundedID(edge.playerID) &&
-                allowedPlayerIDs.has(edge.playerID) &&
-                ["minor", "major"].includes(edge.sizeClass),
-            )))
+            !player.bordersWith.every((edge) => {
+              if (
+                !isBoundedID(edge.playerID) ||
+                !allowedPlayerIDs.has(edge.playerID) ||
+                edge.playerID === observation.ownState!.playerID ||
+                edge.playerID === player.playerID ||
+                seenBorderPlayerIDs.has(edge.playerID) ||
+                !["minor", "major"].includes(edge.sizeClass) ||
+                (spatial.schemaVersion === 5 &&
+                  (!isNonnegativeSafeInteger(edge.tiles) || edge.tiles <= 0))
+              ) {
+                return false;
+              }
+              seenBorderPlayerIDs.add(edge.playerID);
+              return true;
+            })))
       ) {
         return false;
+      }
+      if (spatial.schemaVersion === 5) {
+        const naval = player.navalExposure;
+        if (
+          naval === undefined ||
+          !isNonnegativeSafeInteger(naval.transportReachableOwnShoreTiles) ||
+          (naval.nearestEnemyPort !== undefined &&
+            (!validBearings.has(naval.nearestEnemyPort.bearing) ||
+              !["near", "far"].includes(naval.nearestEnemyPort.distanceClass)))
+        ) {
+          return false;
+        }
       }
       const border = player.borderWithYou;
       if (border === undefined) continue;
@@ -351,6 +514,7 @@ function isAcceptedSpatialV3(observation: AgentObservation): boolean {
           distanceClass: player.distanceClass,
           borderWithYou: player.borderWithYou,
           bordersWith: player.bordersWith,
+          navalExposure: player.navalExposure,
         })),
       }),
     ).byteLength;
@@ -532,16 +696,24 @@ export class LlmPromptBuilder {
     observation: AgentObservation,
     includeDeals: boolean,
   ) {
-    const spatialAccepted = isAcceptedSpatialV3(observation);
+    const spatialAccepted = isAcceptedSpatial(observation);
     const mapInfoAccepted = isAcceptedSpatialMapInfo(observation.mapInfo);
-    const normalizedMinimap = normalizedMinimapV1(
-      observation.spatial?.minimap,
-      new Set([
-        observation.ownState?.playerID ?? "",
-        ...observation.visiblePlayers.map((player) => player.playerID),
-      ]),
-      observation.ownState?.playerID,
-    );
+    const allowedMinimapPlayerIDs = new Set([
+      observation.ownState?.playerID ?? "",
+      ...observation.visiblePlayers.map((player) => player.playerID),
+    ]);
+    const acceptedMinimap =
+      observation.spatial?.schemaVersion === 5
+        ? normalizedMinimapV2(
+            observation.spatial?.minimap,
+            allowedMinimapPlayerIDs,
+            observation.ownState?.playerID,
+          )
+        : normalizedMinimap(
+            observation.spatial?.minimap,
+            allowedMinimapPlayerIDs,
+            observation.ownState?.playerID,
+          );
     return {
       agentID: observation.agentID,
       username: sanitizeUntrustedDisplayString(observation.username),
@@ -581,6 +753,13 @@ export class LlmPromptBuilder {
                 regionAnalysis: observation.spatial.ownShape.regionAnalysis,
                 centroidBasis: observation.spatial.ownShape.centroidBasis,
                 coastShare: observation.spatial.ownShape.coastShare,
+                ...(observation.spatial.ownShape.largestNeighborBorderShare !==
+                undefined
+                  ? {
+                      largestNeighborBorderShare:
+                        observation.spatial.ownShape.largestNeighborBorderShare,
+                    }
+                  : {}),
                 centroid: {
                   xPct: observation.spatial.ownShape.centroid.xPct,
                   yPct: observation.spatial.ownShape.centroid.yPct,
@@ -619,9 +798,9 @@ export class LlmPromptBuilder {
                 warshipsTruncated:
                   observation.spatial.positionedAssets.warshipsTruncated,
               },
-              ...(normalizedMinimap !== undefined
+              ...(acceptedMinimap !== undefined
                 ? {
-                    minimap: normalizedMinimap,
+                    minimap: acceptedMinimap,
                   }
                 : {}),
             },
@@ -673,7 +852,26 @@ export class LlmPromptBuilder {
               bordersWith: player.bordersWith?.map((edge) => ({
                 playerID: edge.playerID,
                 sizeClass: edge.sizeClass,
+                ...(edge.tiles !== undefined ? { tiles: edge.tiles } : {}),
               })),
+              navalExposure:
+                player.navalExposure === undefined
+                  ? undefined
+                  : {
+                      transportReachableOwnShoreTiles:
+                        player.navalExposure.transportReachableOwnShoreTiles,
+                      ...(player.navalExposure.nearestEnemyPort !== undefined
+                        ? {
+                            nearestEnemyPort: {
+                              bearing:
+                                player.navalExposure.nearestEnemyPort.bearing,
+                              distanceClass:
+                                player.navalExposure.nearestEnemyPort
+                                  .distanceClass,
+                            },
+                          }
+                        : {}),
+                    },
             }
           : {}),
         // Rival-rival coalition edge so the Commander can see a 3v1 forming.

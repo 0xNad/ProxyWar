@@ -66,6 +66,9 @@ export function boundedSpatialV1(
 export function boundedSpatialV3(
   observation: unknown,
 ): Record<string, unknown> | null;
+export function boundedSpatialV5(
+  observation: unknown,
+): Record<string, unknown> | null;
 export function boundedSpatialObservation(
   observation: unknown,
 ): Record<string, unknown> | null;

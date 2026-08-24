@@ -854,10 +854,14 @@ function refreshPlanInBackground(state) {
   if (planRefreshInFlight) return;
   planRefreshInFlight = true;
   plannerSpatialSchemaVersion =
-    state?.spatial?.schemaVersion === 1 || state?.spatial?.schemaVersion === 3
+    state?.spatial?.schemaVersion === 1 ||
+    state?.spatial?.schemaVersion === 3 ||
+    state?.spatial?.schemaVersion === 5
       ? state.spatial.schemaVersion
       : 0;
-  plannerSpatialMinimap = state?.spatial?.minimap?.schemaVersion === 1;
+  plannerSpatialMinimap =
+    state?.spatial?.minimap?.schemaVersion === 1 ||
+    state?.spatial?.minimap?.schemaVersion === 2;
   plannerSpatialVisibilityModel =
     state?.spatial?.visibilityModel === "global-lockstep-public-map-v1"
       ? "global-lockstep-public-map-v1"
