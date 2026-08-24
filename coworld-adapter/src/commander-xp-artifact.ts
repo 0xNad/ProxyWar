@@ -89,7 +89,7 @@ export interface CommanderXpRuntimeManifest {
     SPATIAL_OBSERVATION: "0";
     SPATIAL_MINIMAP: "0";
     KEYSTONE_PROFILE: "aggressive";
-    LLM_TIMEOUT_MS: "20000";
+    LLM_TIMEOUT_MS: "13500";
   };
   providerPreflight: {
     required: true;
@@ -353,7 +353,7 @@ function assertRuntimeManifest(manifest: CommanderXpRuntimeManifest): void {
     manifest.flags.SPATIAL_OBSERVATION !== "0" ||
     manifest.flags.SPATIAL_MINIMAP !== "0" ||
     manifest.flags.KEYSTONE_PROFILE !== "aggressive" ||
-    manifest.flags.LLM_TIMEOUT_MS !== "20000" ||
+    manifest.flags.LLM_TIMEOUT_MS !== "13500" ||
     (manifest.imageDigest !== null &&
       !/^sha256:[0-9a-f]{64}$/.test(manifest.imageDigest)) ||
     manifest.policyIdentityAuthority !==

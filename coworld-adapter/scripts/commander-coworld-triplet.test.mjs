@@ -60,7 +60,7 @@ test("builds matched direct Coworld requests without a routing override", () => 
         request.body.game_config_overrides.turns_per_decision_step,
         100,
       );
-      assert.equal(request.body.game_config_overrides.max_decision_ms, 25_000);
+      assert.equal(request.body.game_config_overrides.max_decision_ms, 15_000);
     }
   }
 });
@@ -76,7 +76,7 @@ test("the runner invokes Coworld with a request path rather than a removed --fil
   assert.match(source, /"create",\s*requestPath,\s*"--json"/);
 });
 
-test("the hosted selector budget leaves five seconds for Coworld response handling", async () => {
+test("the hosted selector budget stays inside the working Coworld deadline", async () => {
   const { readFile } = await import("node:fs/promises");
   const [runtime, dockerfile] = await Promise.all([
     readFile(
@@ -88,9 +88,10 @@ test("the hosted selector budget leaves five seconds for Coworld response handli
     ),
     readFile(new URL("../Dockerfile.commander-xp", import.meta.url), "utf8"),
   ]);
-  assert.match(runtime, /COMMANDER_COWORLD_MAX_DECISION_MS = 25_000/);
-  assert.match(runtime, /timeoutMs: 20_000/);
-  assert.match(dockerfile, /PROXYWAR_LLM_TIMEOUT_MS=20000/);
+  assert.match(runtime, /COMMANDER_COWORLD_MAX_DECISION_MS = 15_000/);
+  assert.match(runtime, /timeoutMs: 13_500/);
+  assert.match(runtime, /maxTokens: 640/);
+  assert.match(dockerfile, /PROXYWAR_LLM_TIMEOUT_MS=13500/);
 });
 
 test("resumes only an exact created-request manifest without another create", () => {

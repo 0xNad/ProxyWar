@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const COWORLD_VERSION = "0.1.42";
 const VARIANT_ID = "tournament-4p-pangaea";
-const MAX_DECISION_MS = 25_000;
+const MAX_DECISION_MS = 15_000;
 const SAFE_ID = /^[A-Za-z0-9._/-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARM_NAMES = ["A", "B", "C"];
