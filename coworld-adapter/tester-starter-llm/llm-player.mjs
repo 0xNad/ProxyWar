@@ -123,7 +123,8 @@ const SECURITY =
 
 // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
 const history = []; // { actionID, kind } appended after each decision
-// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
+// Inbound messages already answered, keyed by server-owned messageEventID
+// (`${senderID}:${turnNumber}` for legacy observations), plus
 // `reply:${senderID}:${n}` for the lifetime reply budget that actually bounds
 // an exchange.
 // Lifetime replies per counterparty, per match. The per-inbound-message key
@@ -581,6 +582,9 @@ function buildState(obs, actions) {
     ? inbound.slice(-8).map((m) => ({
         fromID: cleanID(m.senderID),
         from: clean(m.senderName),
+        ...(typeof m.messageEventID === "string"
+          ? { eventID: cleanID(m.messageEventID) }
+          : {}),
         turn: m.turnNumber,
         claim: cleanMessage(m.text),
       }))
@@ -1187,7 +1191,10 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   // One reply per inbound TURN. This alone does not bound an exchange -- it
   // only stops us answering the same message twice -- so the lifetime budget
   // below is what actually ends a conversation.
-  const key = `${senderID}:${newest.turnNumber}`;
+  const key =
+    typeof newest.messageEventID === "string"
+      ? newest.messageEventID
+      : `${senderID}:${newest.turnNumber}`;
   if (answered.has(key)) return null;
 
   // Lifetime reply budget for this counterparty: sequential slot keys in the

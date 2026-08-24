@@ -230,6 +230,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
         nonCombat: {
           inboundMessages: [
             inboundMessage({
+              messageEventID: "msg_00000000-0000-4000-8000-000000000001",
               text: "Peace ‮offer on the 北 border",
               turnNumber: 88,
             }),
@@ -240,6 +241,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
     );
     expect(state.messages).toEqual([
       {
+        eventID: "msg_00000000-0000-4000-8000-000000000001",
         fromID: "P_RIVAL",
         from: "Rival",
         turn: 88,

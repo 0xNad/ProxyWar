@@ -36,6 +36,8 @@ const ROSTER = telemetryWith([
   { playerID: "p3", username: "Jordan" },
 ]);
 
+const MESSAGE_EVENT_ID = "msg_00000000-0000-4000-8000-000000000001";
+
 function message(
   overrides: Partial<RecordedAgentMessage> = {},
 ): RecordedAgentMessage {
@@ -79,6 +81,7 @@ describe("recordedAgentMessages — the turn stream is the source", () => {
             clientID: "c1",
             recipient: "p2",
             text: "Pact?",
+            messageEventID: MESSAGE_EVENT_ID,
           },
           { type: "attack", clientID: "c2", troops: 100 },
         ],
@@ -109,6 +112,7 @@ describe("recordedAgentMessages — the turn stream is the source", () => {
     const messages = recordedAgentMessages(record);
     expect(messages).toEqual([
       {
+        messageEventID: MESSAGE_EVENT_ID,
         turn: 900,
         sequence: 0,
         senderName: "Auri",
@@ -144,6 +148,16 @@ describe("message war-room beats", () => {
     // The message IS the agent's words; there is no second-line claim.
     expect(beats[0].publicReason).toBeNull();
     expect(beats[0].tier).toBe(2);
+  });
+
+  it("uses the server-owned event id while preserving the exact legacy fallback", () => {
+    const identified = messageEvents(ROSTER, [
+      message({ messageEventID: MESSAGE_EVENT_ID }),
+    ]);
+    expect(identified[0]?.id).toBe(MESSAGE_EVENT_ID);
+
+    const legacy = messageEvents(ROSTER, [message({ turn: 901, sequence: 7 })]);
+    expect(legacy[0]?.id).toBe("message:901:7");
   });
 
   it("drops a message whose recipient the telemetry roster cannot name", () => {

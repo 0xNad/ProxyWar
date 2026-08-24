@@ -34,6 +34,8 @@ The game sends:
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
       "selectedDealActionId": "optional; must exactly match one offered deal_* legalActions[].id",
+      "selectedMessageActionId": "optional; must exactly match one offered message legalActions[].id and be paired with messageText",
+      "messageText": "optional; 1-280 characters, paired with selectedMessageActionId",
       "reason": "short human-readable string",
       "confidence": "optional number from 0 to 1"
     }
@@ -48,6 +50,8 @@ The player replies:
   "type": "decision_response",
   "requestID": "req_...",
   "selectedLegalActionId": "hold",
+  "selectedMessageActionId": "message:P_B",
+  "messageText": "Truce on our shared border until turn 300?",
   "runtimeMode": "llm-policy-planner",
   "reason": "No better legal action was available.",
   "confidence": 0.5
@@ -59,6 +63,16 @@ off-menu ids, for every action kind: the websocket adapter returns an `AgentDeci
 existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the sole authority, and
 `LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
 from a player.
+
+The optional message pair is a separate comms slot: send both
+`selectedMessageActionId` and `messageText`, or neither. The id must be one
+currently offered `message` action. The game rejects rather than rewrites text
+that is blank, longer than 280 JavaScript string characters, or contains
+control, bidi-override, or zero-width formatting characters. Policies never
+send a message event id. On delivery, the recipient's
+`observation.nonCombat.inboundMessages[]` includes the server-owned
+`messageEventID`, plus `senderID`, `senderName`, `text`, and `turnNumber`; use
+that id to deduplicate replies. Archived observations may lack it.
 
 ### Reporting a degraded brain
 

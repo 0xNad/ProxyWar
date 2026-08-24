@@ -1450,7 +1450,7 @@ function dealMetaActions(
     // (which truthfully closes the redundant ledger entry), but accepting a
     // second copy can only fail. Preserve the proposal and its reject action
     // while suppressing only that now-inadmissible accept action.
-    const equivalentDealActive = deals.activeDeals.some(
+    const equivalentDealActive = (deals.activeDeals ?? []).some(
       (deal) =>
         deal.template === proposal.terms.template &&
         ((deal.proposerPlayerID === proposal.proposerPlayerID &&

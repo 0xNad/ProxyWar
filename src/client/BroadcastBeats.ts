@@ -41,6 +41,7 @@
  * PRE-INTERPOLATED because `defaultText` is returned as-is and never fed
  * through ICU.
  */
+import { AGENT_MESSAGE_EVENT_ID_REGEX } from "../core/Schemas";
 import {
   aiLeagueSpectatorDisplayName,
   aiLeagueSpectatorText,
@@ -338,16 +339,16 @@ function messageBeatsDisplayEnabled(): boolean {
  * One DELIVERED agent message, extracted from the replay record itself.
  *
  * THE TURN STREAM IS THE SOURCE, deliberately. decisions.jsonl also carries
- * the comms slot (`commsSlotText` + `commsSlotAccepted`), but that flag is
- * the RUNNER's claim: a runner armed with PROXYWAR_TUNE_FREETEXT_MESSAGES
- * against a server without it records `accepted: true` for a message the
- * relay silently dropped (known evidence-honesty gap, owned elsewhere). An
- * `agent_message` intent inside a recorded turn is the game server's own
- * relay — if it is in the record, every client simulated it and the
- * recipient's observation carried it. Beats built from intents can never
- * announce a conversation that did not happen.
+ * the comms slot and its server-owned event id, while the GameServer now
+ * reports every synchronous drop back to the runner as accepted:false. The
+ * stamped `agent_message` intent remains the replay authority: if it is in
+ * the record, every client simulated it and the recipient's observation
+ * carried the same id. Beats built from intents cannot announce a
+ * conversation that did not happen.
  */
 export interface RecordedAgentMessage {
+  /** Stable server-owned join; absent on archived pre-ID records. */
+  messageEventID?: string;
   turn: number;
   /** Ordinal in record order — deterministic tiebreak among same-turn beats. */
   sequence: number;
@@ -400,6 +401,7 @@ export function recordedAgentMessages(
         clientID?: unknown;
         recipient?: unknown;
         text?: unknown;
+        messageEventID?: unknown;
       };
       if (
         candidate.type !== "agent_message" ||
@@ -413,6 +415,10 @@ export function recordedAgentMessages(
       const senderName = usernameByClientID.get(candidate.clientID);
       if (senderName === undefined) continue;
       messages.push({
+        ...(typeof candidate.messageEventID === "string" &&
+        AGENT_MESSAGE_EVENT_ID_REGEX.test(candidate.messageEventID)
+          ? { messageEventID: candidate.messageEventID }
+          : {}),
         turn: entry.turnNumber,
         sequence: messages.length,
         senderName,
@@ -506,7 +512,8 @@ function messageWarRoomEvents(
       lastAnnouncedTurnByPair.set(pairKey, message.turn);
     }
     curated.push({
-      id: `message:${message.turn}:${message.sequence}`,
+      id:
+        message.messageEventID ?? `message:${message.turn}:${message.sequence}`,
       kind: "message",
       turn: message.turn,
       sequence: message.sequence,

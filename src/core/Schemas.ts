@@ -26,6 +26,15 @@ import { flattenedEmojiTable } from "./Util";
 export type GameID = string;
 export type ClientID = string;
 
+/**
+ * Server-owned identity for one free-text message event. Policies never author
+ * this value: the trusted in-process AgentRunner creates it immediately before
+ * submission, then every replay/observation evidence surface carries it
+ * unchanged. Optional on the wire only so archived pre-ID replays still parse.
+ */
+export const AGENT_MESSAGE_EVENT_ID_REGEX =
+  /^msg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 export type Intent =
   | SpawnIntent
   | AttackIntent
@@ -459,6 +468,7 @@ export const AgentMessageIntentSchema = z.object({
   type: z.literal("agent_message"),
   recipient: ID,
   text: z.string().min(1).max(280),
+  messageEventID: z.string().regex(AGENT_MESSAGE_EVENT_ID_REGEX).optional(),
 });
 
 export const MarkDisconnectedIntentSchema = z.object({

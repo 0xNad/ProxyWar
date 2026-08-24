@@ -408,6 +408,17 @@ export class GameServer {
             clientID: client.clientID,
             type: clientMsg.type,
           });
+          if (
+            clientMsg.type === "intent" &&
+            clientMsg.intent.type === "agent_message"
+          ) {
+            client.ws.send(
+              JSON.stringify({
+                type: "error",
+                error: "agent-message-rate-limited",
+              } satisfies ServerErrorMessage),
+            );
+          }
           return;
         }
         switch (clientMsg.type) {
@@ -449,6 +460,12 @@ export class GameServer {
                       gameID: this.id,
                     },
                   );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-feature-off",
+                    } satisfies ServerErrorMessage),
+                  );
                   return;
                 }
                 if (!this.agentMessageClients.has(client)) {
@@ -463,6 +480,22 @@ export class GameServer {
                     JSON.stringify({
                       type: "error",
                       error: "agent-message-capability-required",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
+                }
+                if (stampedIntent.messageEventID === undefined) {
+                  this.log.warn(
+                    "agent_message intent refused: missing server-owned event id",
+                    {
+                      clientID: client.clientID,
+                      gameID: this.id,
+                    },
+                  );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-event-id-required",
                     } satisfies ServerErrorMessage),
                   );
                   return;
@@ -488,9 +521,16 @@ export class GameServer {
                 // mirror the `default` arm below — a bare `break` here would
                 // leave the switch WITHOUT submitting, silently swallowing
                 // every message the moment the feature was turned on.
-                if (!this.isPaused) {
-                  this.addIntent(stampedIntent);
+                if (this.isPaused) {
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-game-paused",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
                 }
+                this.addIntent(stampedIntent);
                 break;
               }
 
