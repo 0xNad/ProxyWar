@@ -4,6 +4,7 @@ import {
   GATE1_CASE_COUNT,
   GATE1_MINIMAP_CASE_COUNT,
   GATE1_STRUCTURED_CASE_COUNT,
+  PROBE_MAX_TOKENS,
   armFromObservation,
   buildGate1Cases,
   buildGate2Task,
@@ -91,6 +92,27 @@ test("Gate 1 fixture has exact preregistered cardinality and stable IDs", () => 
     buildGate1Cases().map((entry) => entry.scenarioID),
     cases.map((entry) => entry.scenarioID),
   );
+  for (let start = 0; start < GATE1_CASE_COUNT; start += 50) {
+    assert.equal(
+      cases
+        .slice(start, start + 50)
+        .filter((entry) => entry.visibilityRequirement === "minimap").length,
+      10,
+    );
+  }
+});
+
+test("Gate 1 mountain labels select the actual maximum", () => {
+  for (const entry of buildGate1Cases().filter(
+    (candidate) => candidate.questionClass === "mountain_border",
+  )) {
+    const expected = [...entry.structured.rivals].sort(
+      (a, b) =>
+        b.borderWithYou.terrainBreakdown.mountain -
+        a.borderWithYou.terrainBreakdown.mountain,
+    )[0].playerID;
+    assert.equal(entry.truth, expected);
+  }
 });
 
 test("Gate 1 arm projection exposes only the preregistered layer", () => {
@@ -211,14 +233,22 @@ test("hosted probe answer is evidence-only and the offered carrier is executed",
   }
 
   let calls = 0;
+  let requestBody;
   const bedrock = {
     messages: {
-      create: async () => {
+      create: async (body) => {
         calls += 1;
+        requestBody = body;
         return {
           model: "claude-sonnet-4-6",
           stop_reason: "end_turn",
-          content: [{ text: '{"gate1":"unknown","gate2":null}' }],
+          content: [
+            { type: "thinking", thinking: "private reasoning" },
+            {
+              type: "text",
+              text: '{"gate1":"unknown","gate2":null}',
+            },
+          ],
           usage: { input_tokens: 100, output_tokens: 10 },
         };
       },
@@ -252,6 +282,7 @@ test("hosted probe answer is evidence-only and the offered carrier is executed",
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(calls, 1);
+    assert.equal(requestBody.max_tokens, PROBE_MAX_TOKENS);
     assert.equal(FakeSocket.latest.sent.length, 1);
     assert.equal(FakeSocket.latest.sent[0].selectedLegalActionId, "hold");
     assert.equal(FakeSocket.latest.sent[0].fallbackUsed, false);

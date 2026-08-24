@@ -13,6 +13,7 @@ export const GATE1_STRUCTURED_CASE_COUNT = 160;
 export const GATE1_MINIMAP_CASE_COUNT = 40;
 export const PROBE_MODEL =
   process.env.BEDROCK_MODEL || "us.anthropic.claude-sonnet-4-6";
+export const PROBE_MAX_TOKENS = 1024;
 const REGION =
   process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
 const SIDECAR = (process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME || "").trim();
@@ -231,12 +232,15 @@ export function buildGate1Cases() {
     const random = mulberry32(0x51a71000 + index);
     const base = baseSyntheticContext(index, random);
     const minimap = syntheticMinimap(index, base.ids, random);
-    const shared = index < GATE1_STRUCTURED_CASE_COUNT;
+    // Interleave the minimap-only cases so no single hosted episode carries the
+    // entire minimap treatment. Four out of every five cases remain structured.
+    const shared = index % 5 !== 4;
     let question;
     let truth;
     let questionClass;
     if (shared) {
-      const type = index % 6;
+      const structuredIndex = index - Math.floor(index / 5);
+      const type = structuredIndex % 6;
       if (type === 0) {
         questionClass = "bearing";
         question = "Which rival has bearing east?";
@@ -280,7 +284,7 @@ export function buildGate1Cases() {
         )[0].playerID;
       }
     } else {
-      const type = (index - GATE1_STRUCTURED_CASE_COUNT) % 4;
+      const type = Math.floor(index / 5) % 4;
       if (type === 0 || type === 2) {
         questionClass = type === 0 ? "minimap_owner_cell" : "minimap_owner_row";
         if (type === 0) {
@@ -711,16 +715,24 @@ async function callModel(bedrock, prompt) {
     const response = await bedrock.messages.create(
       {
         model: PROBE_MODEL,
-        max_tokens: 160,
+        max_tokens: PROBE_MAX_TOKENS,
         messages: [{ role: "user", content: prompt }],
       },
       { signal: controller.signal },
     );
+    const responseText = (response?.content ?? [])
+      .filter(
+        (block) => block?.type === "text" && typeof block.text === "string",
+      )
+      .map((block) => block.text)
+      .join("\n");
     return {
       ok: true,
-      parsed: extractResponse(response?.content?.[0]?.text ?? ""),
+      parsed: extractResponse(responseText),
       responseModel: response?.model ?? null,
       stopReason: response?.stop_reason ?? null,
+      responseTextChars: responseText.length,
+      responseTextSHA256: hash(responseText),
       inputTokens: response?.usage?.input_tokens ?? null,
       outputTokens: response?.usage?.output_tokens ?? null,
       latencyMs: Date.now() - started,
@@ -731,6 +743,8 @@ async function callModel(bedrock, prompt) {
       parsed: null,
       responseModel: null,
       stopReason: null,
+      responseTextChars: 0,
+      responseTextSHA256: null,
       inputTokens: null,
       outputTokens: null,
       latencyMs: Date.now() - started,
@@ -795,6 +809,7 @@ export function startSpatialProbe({
         mode,
         gate1Offset,
         model: PROBE_MODEL,
+        maxTokens: PROBE_MAX_TOKENS,
         activeDecisions: activeIndex,
         modelCalls,
         providerFailures,
@@ -870,6 +885,9 @@ export function startSpatialProbe({
       model: PROBE_MODEL,
       responseModel: result.responseModel,
       stopReason: result.stopReason,
+      maxTokens: PROBE_MAX_TOKENS,
+      responseTextChars: result.responseTextChars,
+      responseTextSHA256: result.responseTextSHA256,
       arm,
       gameID: observation?.gameID ?? null,
       turnNumber: observation?.turnNumber ?? null,

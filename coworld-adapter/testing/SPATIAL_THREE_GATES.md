@@ -1,6 +1,6 @@
 # Spatial awareness three-gate evaluation
 
-Status: preregistered before any Gate 1 or Gate 2 provider call.
+Status: thresholds preregistered before any Gate 1 or Gate 2 provider call.
 
 This evaluation answers a narrower question than the existing 12-run hosted
 canary: can the pinned model decode the spatial representations, can it ground
@@ -16,6 +16,18 @@ The frozen source under test is
 
 The canonical league package and league binding are out of scope and must not
 be changed. Every policy and XP created here is eval-only and unrated.
+
+## Retained calibration correction
+
+The first hosted Gate 1 calibration at probe source
+`f9759813c75f7fd5f62569ed08d0e9a08e53c9f2` is retained but invalid for a
+feature verdict. It exposed two evaluator defects: the provider output was
+capped at 160 tokens and every parse failure ended at that cap, while all 40
+minimap cases were concentrated in one episode. The corrected probe uses a
+1,024-token cap, reads every provider text block, validates the existing
+mountain answer key, and interleaves ten minimap questions into each
+50-question episode. None of the cardinalities, thresholds, or advancement
+rules below changed after seeing the calibration data.
 
 ## Shared invariants
 
