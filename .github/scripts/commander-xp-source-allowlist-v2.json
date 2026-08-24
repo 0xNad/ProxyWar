@@ -31,6 +31,7 @@
   ".github/workflows/commander-xp-evidence.yml",
   ".github/workflows/commander-xp-external-seal.yml",
   ".github/workflows/commander-xp-provision.yml",
+  ".github/workflows/coworld-production.yml",
   "OWNER-UPGRADE.md",
   "coworld-adapter/Dockerfile.commander-xp",
   "coworld-adapter/Dockerfile.commander-xp-game",
