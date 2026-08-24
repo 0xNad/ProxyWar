@@ -1049,6 +1049,10 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
       value.spatial.ownShape.largestNeighborBorderShare = 0;
     },
     (value) => {
+      value.spatial.ownShape.largestNeighborBorderShare = 25.5;
+      value.visiblePlayers[0].borderWithYou.shareOfYourBorder = 25.5;
+    },
+    (value) => {
       value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
         -1;
     },

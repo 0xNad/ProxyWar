@@ -819,10 +819,7 @@ export function messageResponseFields({ actions, protocol, messageMove }) {
 }
 
 function boundedPercent(value) {
-  return typeof value === "number" &&
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 100
+  return Number.isSafeInteger(value) && value >= 0 && value <= 100
     ? value
     : null;
 }
