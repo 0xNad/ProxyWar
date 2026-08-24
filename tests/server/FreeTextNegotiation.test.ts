@@ -771,6 +771,41 @@ describe("agent_message intent schema (independent wire bound)", () => {
     ).toBe(true);
   });
 
+  it("accepts a server-owned event id while keeping legacy replay intents compatible", () => {
+    expect(
+      AgentMessageIntentSchema.safeParse({
+        type: "agent_message",
+        recipient: "AB12cd34",
+        text: "deal?",
+        messageEventID: "msg_00000000-0000-4000-8000-000000000001",
+      }).success,
+    ).toBe(true);
+    expect(
+      AgentMessageIntentSchema.safeParse({
+        type: "agent_message",
+        recipient: "AB12cd34",
+        text: "legacy replay",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects malformed or non-server-shaped event ids", () => {
+    for (const messageEventID of [
+      "policy-authored-id",
+      "msg_00000000-0000-1000-8000-000000000001",
+      `msg_${"a".repeat(100)}`,
+    ]) {
+      expect(
+        AgentMessageIntentSchema.safeParse({
+          type: "agent_message",
+          recipient: "AB12cd34",
+          text: "deal?",
+          messageEventID,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it("rejects text past the cap even if an upstream bug let it through", () => {
     expect(
       AgentMessageIntentSchema.safeParse({

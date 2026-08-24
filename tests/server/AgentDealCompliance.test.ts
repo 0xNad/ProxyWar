@@ -5,6 +5,7 @@ import type {
   AgentDecisionRecord,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
+import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { setup } from "../util/Setup";
 import {
   DEALS_FLAG,
@@ -821,17 +822,56 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     const bToA = harness.propose(B, A, "non_aggression_pact");
     harness.beginStep(); // 1 — submission pass order: A answers first.
     expect(harness.respond("deal_accept", A, bToA).accepted).toBe(true);
+
+    // The reverse proposal remains an honest open ledger entry. Rejecting it
+    // is still legal, but accepting it is not while the equivalent pact is
+    // active, so the menu must preserve reject and suppress only accept.
+    const bBaseObservation = stubObservation({
+      seat: B,
+      others: [stubVisiblePlayer(A)],
+      turnNumber: 25,
+    });
+    const bDeals = harness.manager.observationFor({
+      agentID: B.agentID,
+      observation: bBaseObservation,
+    })!;
+    expect(bDeals.incomingProposals.map((deal) => deal.dealID)).toEqual([aToB]);
+    const bMenu = new LegalActionBuilder().build({
+      observation: { ...bBaseObservation, deals: bDeals },
+    });
+    expect(bMenu.map((action) => action.id)).not.toContain(
+      `deal_accept:${aToB}`,
+    );
+    expect(bMenu.map((action) => action.id)).toContain(`deal_reject:${aToB}`);
+    const aBaseObservation = stubObservation({
+      seat: A,
+      others: [stubVisiblePlayer(B)],
+      turnNumber: 25,
+    });
+    const aDeals = harness.manager.observationFor({
+      agentID: A.agentID,
+      observation: aBaseObservation,
+    })!;
+    expect(aDeals.outgoingProposals.map((deal) => deal.dealID)).toEqual([aToB]);
+    const aMenu = new LegalActionBuilder().build({
+      observation: { ...aBaseObservation, deals: aDeals },
+    });
+    expect(aMenu.map((action) => action.id)).toContain(`deal_withdraw:${aToB}`);
+
+    // A hand-crafted stale response still fails loudly at the manager
+    // boundary, preserving the deterministic race invariant.
     const second = harness.respond("deal_accept", B, aToB);
     expect(second.accepted).toBe(false);
     expect(second.reason).toBe(
       "an active non_aggression_pact already exists between these players",
     );
+    expect(harness.respond("deal_reject", B, aToB).accepted).toBe(true);
     const ledger = harness.manager.ledgerSnapshot();
     expect(
       ledger.deals.filter((deal) => deal.status === "accepted"),
     ).toHaveLength(1);
     expect(ledger.deals.find((deal) => deal.dealID === aToB)!.status).toBe(
-      "open",
+      "rejected",
     );
 
     // A betrayal against the single surviving pact yields exactly ONE verdict.

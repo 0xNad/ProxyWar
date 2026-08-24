@@ -33,10 +33,24 @@ import {
 } from "../../src/core/game/Game";
 import { GameUpdateType } from "../../src/core/game/GameUpdates";
 import { GameConfig, StampedIntent, Turn } from "../../src/core/Schemas";
+import {
+  AgentLeagueMatchRunner,
+  type AgentParticipant,
+} from "../../src/server/agents/AgentLeagueMatch";
+import type {
+  BuildAgentObservationInput,
+  ObservationBuilderLike,
+} from "../../src/server/agents/AgentObservationBuilder";
 import { AgentRunner } from "../../src/server/agents/AgentRunner";
+import type { AgentBrainInput } from "../../src/server/agents/AgentTypes";
 import { Client } from "../../src/server/Client";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
+import {
+  stubObservation,
+  stubVisiblePlayer,
+  type StubSeat,
+} from "./DealTestHarness";
 
 /**
  * The REAL server-side relay gate for free-text negotiation
@@ -188,10 +202,12 @@ describe("GameServer agent_message relay (real socket path)", () => {
       recipient: RECIPIENT_PLAYER_ID,
       text: MESSAGE_TEXT,
     });
-    // The wire is fire-and-forget: the sender gets no synchronous error back.
-    // The refusal is the SERVER dropping the intent, not the client failing —
-    // which is exactly why only a turn-stream assertion can prove the gate.
-    expect(result.accepted).toBe(true);
+    // The server returns an explicit synchronous error. Acceptance must never
+    // mean "the league inbox got it but no replay intent exists."
+    expect(result).toMatchObject({
+      accepted: false,
+      reason: "agent-message-feature-off",
+    });
 
     expect(log.warn).toHaveBeenCalledWith(
       "agent_message intent refused: feature is off",
@@ -220,6 +236,9 @@ describe("GameServer agent_message relay (real socket path)", () => {
       text: MESSAGE_TEXT,
     });
     expect(result.accepted).toBe(true);
+    expect(result.intent).toMatchObject({
+      messageEventID: expect.stringMatching(/^msg_/),
+    });
     expect(log.warn).not.toHaveBeenCalledWith(
       "agent_message intent refused: feature is off",
       expect.anything(),
@@ -231,6 +250,10 @@ describe("GameServer agent_message relay (real socket path)", () => {
       type: "agent_message",
       recipient: RECIPIENT_PLAYER_ID,
       text: MESSAGE_TEXT,
+      messageEventID:
+        result.intent?.type === "agent_message"
+          ? result.intent.messageEventID
+          : undefined,
       // Stamped from the authenticated connection by the server, never
       // supplied by the client.
       clientID: runner.clientID()!,
@@ -256,6 +279,9 @@ describe("GameServer agent_message relay (real socket path)", () => {
       (game as unknown as { turns: Turn[] }).turns,
     );
     expect(relayed).toHaveLength(1);
+    expect(relayed[0]).toMatchObject({
+      messageEventID: expect.stringMatching(/^msg_/),
+    });
 
     // Replay the EXACT server-stamped turn content through the real core:
     // Executor maps the intent to AgentMessageExecution by the stamped
@@ -319,7 +345,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
     expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
-  it("flag ON: the server stamp overwrites a spoofed clientID", async () => {
+  it("flag ON: a hand-crafted client cannot bypass the offered-id validator", async () => {
     process.env[FLAG] = "1";
     const { observer } = startWithRunnerAndObserver();
     const hand = makeHandClient("HAND0001");
@@ -339,11 +365,233 @@ describe("GameServer agent_message relay (real socket path)", () => {
         },
       }),
     );
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: client lacks agent message capability",
+      expect.objectContaining({ clientID: "HAND0001" }),
+    );
     game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
 
-    const intents = agentMessageIntents(turnsSeenBy(observer.ws));
-    expect(intents).toHaveLength(1);
-    expect(intents[0].clientID).toBe("HAND0001");
+  it("flag ON: even a capability client cannot relay a live message without a server-owned event id", async () => {
+    process.env[FLAG] = "1";
+    const { observer } = startWithRunnerAndObserver();
+    const hand = makeHandClient("HAND0001");
+    expect(game.joinAgentClient(hand.client)).toBe("joined");
+
+    await hand.ws.trigger(
+      "message",
+      JSON.stringify({
+        type: "intent",
+        intent: {
+          type: "agent_message",
+          recipient: RECIPIENT_PLAYER_ID,
+          text: "missing identity",
+        },
+      }),
+    );
+
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: missing server-owned event id",
+      expect.objectContaining({ clientID: "HAND0001" }),
+    );
+    expect(
+      hand.ws.sent.some((raw) =>
+        raw.includes("agent-message-event-id-required"),
+      ),
+    ).toBe(true);
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
+
+  it("flag ON: paused and rate-limited drops return accepted:false", () => {
+    process.env[FLAG] = "1";
+    const { runner, observer } = startWithRunnerAndObserver();
+
+    (game as unknown as { isPaused: boolean }).isPaused = true;
+    const paused = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "wait until resume",
+    });
+    expect(paused).toMatchObject({
+      accepted: false,
+      reason: "agent-message-game-paused",
+    });
+
+    (game as unknown as { isPaused: boolean }).isPaused = false;
+    const limiter = (
+      game as unknown as {
+        intentRateLimiter: { check: () => "ok" | "limit" | "kick" };
+      }
+    ).intentRateLimiter;
+    const originalCheck = limiter.check;
+    (game as unknown as { realtimeClock: boolean }).realtimeClock = true;
+    limiter.check = () => "limit";
+    const limited = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "one too many",
+    });
+    limiter.check = originalCheck;
+    (game as unknown as { realtimeClock: boolean }).realtimeClock = false;
+    expect(limited).toMatchObject({
+      accepted: false,
+      reason: "agent-message-rate-limited",
+    });
+
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
+
+  it("assigns a distinct server-owned id to every accepted message", () => {
+    process.env[FLAG] = "1";
+    const { runner } = startWithRunnerAndObserver();
+    const first = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "first",
+    });
+    const second = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "second",
+    });
+    const firstID =
+      first.intent?.type === "agent_message"
+        ? first.intent.messageEventID
+        : undefined;
+    const secondID =
+      second.intent?.type === "agent_message"
+        ? second.intent.messageEventID
+        : undefined;
+    expect(first.accepted).toBe(true);
+    expect(second.accepted).toBe(true);
+    expect(firstID).toMatch(/^msg_/);
+    expect(secondID).toMatch(/^msg_/);
+    expect(secondID).not.toBe(firstID);
+  });
+
+  it("joins one exact id across sender decision, replay intent, recipient observation, and recipient record", async () => {
+    process.env[FLAG] = "1";
+    const seats: StubSeat[] = [
+      { agentID: "agent-a", playerID: "PLYRA001", username: "Auri" },
+      { agentID: "agent-b", playerID: "PLYRB001", username: "Sefirot" },
+      { agentID: "agent-c", playerID: "PLYRC001", username: "Riven" },
+    ];
+    const receivedInputs: AgentBrainInput[][] = seats.map(() => []);
+    const runners = seats.map(
+      (seat) =>
+        new AgentRunner({
+          agentID: seat.agentID,
+          username: seat.username,
+          log: log as never,
+        }),
+    );
+    for (const runner of runners) {
+      expect(runner.attachToGame(game).status).toBe("joined");
+    }
+    game.start({ realtimeClock: false });
+
+    const participants: AgentParticipant[] = seats.map((seat, index) => ({
+      spec: { username: seat.username, profile: "diplomatic" },
+      runner: runners[index],
+      brain: {
+        brainType: "rule",
+        decide: (input: AgentBrainInput) => {
+          receivedInputs[index].push(input);
+          if (index === 0 && receivedInputs[index].length === 1) {
+            const offer = input.legalActions.find(
+              (action) =>
+                action.kind === "message" &&
+                action.metadata?.recipientID === seats[1].playerID,
+            );
+            return {
+              actionID: "hold",
+              messageActionID: offer?.id,
+              messageText: "One id, end to end.",
+              reason: "exercise the evidence join",
+            };
+          }
+          return { actionID: "hold", reason: "quiet" };
+        },
+      },
+    }));
+    const observationBuilder: ObservationBuilderLike = {
+      withObservationBatch: (_state, callback) => callback(),
+      build: (input: BuildAgentObservationInput) => {
+        const seat = seats.find(
+          (candidate) => candidate.agentID === input.agentID,
+        )!;
+        return stubObservation({
+          seat,
+          others: seats
+            .filter((candidate) => candidate.agentID !== seat.agentID)
+            .map((candidate) => stubVisiblePlayer(candidate)),
+          turnNumber: input.turnNumber,
+          gameID: "FRETEXT1",
+        });
+      },
+      summarize: () => "stable message join",
+    };
+    const league = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log: log as never,
+      observationBuilder,
+    });
+
+    await league.runDecisionTurn({ turnNumber: 0 });
+    game.advanceTurnsForTesting(1);
+    await league.runDecisionTurn({ turnNumber: 25 });
+
+    const records = league.decisionRecords();
+    const senderRecord = records.find(
+      (record) =>
+        record.agentID === seats[0].agentID && record.turnNumber === 0,
+    );
+    const messageEventID =
+      senderRecord?.decisionMetadata?.commsSlotMessageEventID;
+    const replayIntent = agentMessageIntents(
+      (game as unknown as { turns: Turn[] }).turns,
+    )[0];
+    const recipientInbox =
+      receivedInputs[1][1]?.observation.nonCombat.inboundMessages ?? [];
+    const thirdSeatInbox =
+      receivedInputs[2][1]?.observation.nonCombat.inboundMessages ?? [];
+    const recipientRecord = records.find(
+      (record) =>
+        record.agentID === seats[1].agentID && record.turnNumber === 25,
+    );
+
+    expect(messageEventID).toMatch(/^msg_/);
+    expect(replayIntent).toMatchObject({ messageEventID });
+    expect(recipientInbox.map((message) => message.messageEventID)).toEqual([
+      messageEventID,
+    ]);
+    expect(recipientRecord?.inboundMessageEventIDs).toEqual([messageEventID]);
+    expect(thirdSeatInbox).toHaveLength(0);
+  });
+
+  it("flag ON: the server re-applies reject-don't-rewrite text validation", () => {
+    process.env[FLAG] = "1";
+    const { runner, observer } = startWithRunnerAndObserver();
+
+    const result = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "fake\u202E attribution",
+    });
+    expect(result).toMatchObject({
+      accepted: false,
+      reason: "invalid-agent-message-text",
+    });
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: invalid text",
+      expect.objectContaining({
+        clientID: runner.clientID(),
+        reason:
+          "messageText contained invisible formatting or bidi-override characters",
+      }),
+    );
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
   it("flag ON: the real wire schema still kicks over-cap hand-crafted text", async () => {

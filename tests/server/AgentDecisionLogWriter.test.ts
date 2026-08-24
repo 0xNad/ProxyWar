@@ -1389,12 +1389,15 @@ const COMMS_FLAG = "PROXYWAR_TUNE_FREETEXT_MESSAGES";
 const COMMS_SLOT_KEYS = [
   "commsSlotActionID",
   "commsSlotRecipientID",
+  "commsSlotMessageEventID",
   "commsSlotText",
   "commsSlotAccepted",
   "commsSlotResult",
   "commsSlotRequestedID",
   "commsSlotRejected",
 ] as const;
+
+const MESSAGE_EVENT_ID = "msg_00000000-0000-4000-8000-000000000001";
 
 /** Agent-authored message body; survives the validator's tidying unchanged. */
 const MESSAGE_CLAIM =
@@ -1428,12 +1431,21 @@ function pickMessageTo(
 function stubAcceptedSubmission(
   harness: ReturnType<typeof dealLeagueHarness>,
 ): void {
+  let sequence = 0;
   for (const runner of harness.runners) {
-    runner.submitAgentMessage = () => ({
-      accepted: true,
-      reason: "accepted",
-      intent: null,
-    });
+    runner.submitAgentMessage = (input) => {
+      sequence += 1;
+      return {
+        accepted: true,
+        reason: "accepted",
+        intent: {
+          type: "agent_message",
+          recipient: input.recipient,
+          text: input.text,
+          messageEventID: `msg_00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+        },
+      };
+    };
   }
 }
 
@@ -1452,9 +1464,11 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
         turnNumber: 12,
       }),
       brainType: "external-http",
+      inboundMessageEventIDs: [MESSAGE_EVENT_ID],
       decisionMetadata: {
         commsSlotActionID: "message:P_B",
         commsSlotRecipientID: "P_B",
+        commsSlotMessageEventID: MESSAGE_EVENT_ID,
         commsSlotText: MESSAGE_CLAIM,
         commsSlotAccepted: true,
         commsSlotResult: "accepted",
@@ -1490,8 +1504,10 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
       await writeAndParseEntries([accepted, rejected, bare]);
     // The negotiation evidence: exact wording, recipient, and outcome.
     expect(acceptedEntry).toMatchObject({
+      inboundMessageEventIDs: [MESSAGE_EVENT_ID],
       commsSlotActionID: "message:P_B",
       commsSlotRecipientID: "P_B",
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
       commsSlotResult: "accepted",
@@ -1529,6 +1545,7 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
     expect(stamped!.decisionMetadata).toMatchObject({
       commsSlotActionID: `message:${EXT_B.playerID}`,
       commsSlotRecipientID: EXT_B.playerID,
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
     });
@@ -1542,6 +1559,7 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
     expect(entry).toMatchObject({
       commsSlotActionID: `message:${EXT_B.playerID}`,
       commsSlotRecipientID: EXT_B.playerID,
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
       commsSlotResult: "accepted",

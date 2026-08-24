@@ -279,6 +279,8 @@ interface DecisionLogEntry {
   selectedLegalActionId: string;
   selectedActionKind: LegalActionKind;
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
+  /** Server-owned message events visible to the agent for this decision. */
+  inboundMessageEventIDs?: string[];
   /** Staged diplomacy-slot evidence, separate from the primary action result. */
   dealSlotEvidence?: AgentDecisionRecord["dealSlotEvidence"];
   /** One-stage sealed spawn allocation evidence, copied verbatim and bounded at source. */
@@ -339,6 +341,7 @@ interface DecisionLogEntry {
    */
   commsSlotActionID?: string;
   commsSlotRecipientID?: string;
+  commsSlotMessageEventID?: string;
   commsSlotText?: string;
   commsSlotAccepted?: boolean;
   commsSlotResult?: string;
@@ -1088,6 +1091,9 @@ function decisionLogEntry(
       : {}),
     selectedLegalActionId: record.chosenActionID,
     selectedActionKind: record.chosenActionKind,
+    ...(record.inboundMessageEventIDs !== undefined
+      ? { inboundMessageEventIDs: record.inboundMessageEventIDs }
+      : {}),
     ...(record.chosenActionMetadata
       ? { selectedActionMetadata: record.chosenActionMetadata }
       : {}),
@@ -1145,6 +1151,14 @@ function decisionLogEntry(
           commsSlotRecipientID: stringMetadata(
             metadata,
             "commsSlotRecipientID",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotMessageEventID") !== undefined
+      ? {
+          commsSlotMessageEventID: stringMetadata(
+            metadata,
+            "commsSlotMessageEventID",
           ),
         }
       : {}),
