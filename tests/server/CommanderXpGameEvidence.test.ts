@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
@@ -9,6 +12,29 @@ import {
 
 describe("Commander XP game-owned evidence", () => {
   const runKey = "commander-xp-v2/test/canary/r00/C";
+
+  it("loads game evidence through the packaged ProxyWar module root", () => {
+    const adapterSource = readFileSync(
+      path.join(
+        process.cwd(),
+        "coworld-adapter",
+        "src",
+        "no-docker-coworld-episode.ts",
+      ),
+      "utf8",
+    );
+    expect(adapterSource).toContain(
+      'importProxyWar("src/server/agents/CommanderXpGameEvidence.ts")',
+    );
+    expect(adapterSource).toContain(
+      'importProxyWar("src/server/agents/CommanderXpCoworldIdentity.ts")',
+    );
+    expect(adapterSource).not.toMatch(
+      /from\s+["']\.\.\/\.\.\/src\/server\/agents\/CommanderXpGameEvidence\.ts["']/,
+    );
+    expect(adapterSource).not.toContain('from "./coworld-seed.ts"');
+  });
+
   it("projects execution and social outcomes while excluding text/provider material", () => {
     const record = {
       sequence: 7,
