@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { AgentBrainInput, LegalAction } from "./AgentTypes";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import {
@@ -21,6 +23,28 @@ import {
 
 export const MAX_EXPOSED_STRATEGIC_OPTIONS = 8;
 export const MAX_EXPOSED_PRESSURE_TARGETS = 2;
+
+/** Exact selector-input surface, computed before either B or C selects. */
+export function strategicOptionSurfaceSha256(
+  options: BuiltStrategicOptions,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalOptionValue(options)))
+    .digest("hex");
+}
+
+function canonicalOptionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalOptionValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => compareCommanderStrings(left, right))
+        .map(([key, entry]) => [key, canonicalOptionValue(entry)]),
+    );
+  }
+  return value;
+}
 
 /** Pure Stage 1 construction. Calling it has no effect on any existing brain. */
 export function buildStrategicOptions(

@@ -187,6 +187,7 @@ export interface CommanderArmMetrics {
   };
   deterministicPreferredOptionStampViolations: number;
   selectedOptionDistribution: Record<string, number>;
+  selectedOptionFamilyDistribution: Record<string, number>;
   planDurationDecisions: {
     mean: number | null;
     byPlan: Record<string, number>;
@@ -408,6 +409,71 @@ export interface CommanderConfirmatoryAnalysis {
   missingPairs: number;
   missingnessPolicy: "no-missing-pairs";
   results: CommanderConfirmatoryMetricAnalysis[];
+}
+
+export interface CommanderXpConfirmatoryAnalysisSpecification {
+  analysisID: "strategic-commander-xp-b-vs-c-paired-v3";
+  population: "48-complete-preregistered-bc-pairs";
+  alternative: "C-superior-to-B";
+  alpha: 0.05;
+  confidenceLevel: 0.95;
+  missingnessPolicy: "no-missing-pairs";
+  primaryEndpoint: "subject-win";
+  scoreRole: "redundant-descriptive-only";
+  multiplicityPolicy: "single-primary-no-adjustment";
+  minimumWinRateEffectCMinusB: 0.1;
+  winMethod: "exact-two-sided-mcnemar";
+  intervalMethod: "seeded-paired-bootstrap-percentile";
+  resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v3";
+  bootstrapIterations: 4096;
+  decisionRule: "all-48-complete-and-integrity-green-and-win-estimate-gt-minimum-and-p-lte-alpha-and-ci-lower-gt-minimum";
+  canaryClaimGate: "never";
+  performanceClaimGate: "external-seal-independent-review-required";
+}
+
+export interface CommanderXpPairedOutcome {
+  replicaIndex: number;
+  seed: number;
+  B: { won: boolean; score: number };
+  C: { won: boolean; score: number };
+}
+
+export interface CommanderXpConfirmatoryAnalysis {
+  status: "complete";
+  specification: CommanderXpConfirmatoryAnalysisSpecification;
+  specificationSha256: string;
+  completePairs: 48;
+  requiredPairs: 48;
+  missingPairs: 0;
+  missingnessPolicy: "no-missing-pairs";
+  primaryResult: {
+    metric: "win";
+    direction: "higher-is-better";
+    pairCount: 48;
+    estimateCMinusB: number;
+    confidenceInterval95: { lower: number; upper: number };
+    pValue: number;
+    pValueMethod: "exact-two-sided-mcnemar";
+    intervalMethod: "seeded-paired-bootstrap-percentile";
+  };
+  descriptiveScore: {
+    metric: "score";
+    role: "redundant-descriptive-only";
+    pairCount: 48;
+    estimateCMinusB: number;
+  };
+  superiorityDecision: {
+    requiredPairCount: 48;
+    integrityGatesGreen: true;
+    minimumWinRateEffectCMinusB: 0.1;
+    estimateExceedsMinimum: boolean;
+    pValueAtOrBelowAlpha: boolean;
+    confidenceLowerBoundExceedsMinimum: boolean;
+    ruleSatisfied: boolean;
+    performanceClaimEligibleForExternalReview: boolean;
+    performanceClaimAuthorized: false;
+    claimReviewStatus: "external-seal-independent-review-required";
+  };
 }
 
 export interface CommanderPairwiseComparison {
@@ -821,7 +887,7 @@ function commanderTripletMarkdown(
       `- Provider accounting: calls=${metrics.modelCalls}; promptCharacters=${metrics.promptCharacters}; latency=${inlineJson(metrics.planningLatencyMs)}; failures=${inlineJson(metrics.failures)}`,
       `- Plans: count=${metrics.planCount}; duration=${inlineJson(metrics.planDurationDecisions)}; replans=${inlineJson(metrics.replanReasons)}; transitions=${inlineJson(metrics.planTransitions)}; fallbackAuthored=${metrics.fallbackAuthoredPlans}`,
       `- Options: eligible=${inlineJson(metrics.eligibleOptionCount)}; exposed=${inlineJson(metrics.exposedOptionCount)}; familyCoverage=${inlineJson(metrics.optionFamilyCoverage)}; omitted=${metrics.omittedCandidateCount} ${inlineJson(metrics.omittedReasons)}; accountingViolations=${metrics.optionAccountingViolations}`,
-      `- Selection: distribution=${inlineJson(metrics.selectedOptionDistribution)}; preferredAbsent=${inlineJson(metrics.deterministicPreferredOptionAbsent)}; disagreement=${inlineJson(metrics.selectorDisagreement)}`,
+      `- Selection: distribution=${inlineJson(metrics.selectedOptionDistribution)}; families=${inlineJson(metrics.selectedOptionFamilyDistribution)}; preferredAbsent=${inlineJson(metrics.deterministicPreferredOptionAbsent)}; disagreement=${inlineJson(metrics.selectorDisagreement)}`,
       `- Fidelity: ${inlineJson(metrics.fidelity)}; counts=${inlineJson(metrics.fidelityCounts)}; blockedCycles=${inlineJson(metrics.blockedDecisionCycles)}; supportActions=${metrics.supportActionCount}; offFamily=${metrics.offFamilyActionViolations}; laterLayer=${metrics.laterLayerActionViolations}; zeroPrimaryCycles=${metrics.zeroPrimaryDecisionCycles}; planIdentityViolations=${metrics.planIdentityViolations}; batchPositionViolations=${metrics.batchPositionViolations}; stampViolations=${metrics.fidelityStampViolations}; optionNotExecutable=${inlineJson(metrics.optionNotExecutableReplans)}; zeroAlignedPlans=${metrics.plansWithZeroAlignedActions}; missingPrimaryPlans=${metrics.planPrimaryActionViolations}; excessSupportPlans=${metrics.planSupportActionViolations}; silentAbandonments=${metrics.silentlyAbandonedPlans}`,
       `- Exclusions: ${inlineJson(metrics.excludedFromLlmContribution)}; staleRejected=${metrics.staleRejectedAttempts}; staleAuthorityViolations=${metrics.staleAuthorityViolations}; rejectedOrFailed=${metrics.rejectedOrFailedAttempts}; responseEvidenceViolations=${metrics.responseEvidenceViolations}; canonicalPathViolations=${metrics.canonicalPathViolations}; effectAuditDiagnostic=${inlineJson(metrics.effectAudit)}`,
       `- Bounded post-disagreement deltas: ${inlineJson(metrics.boundedOutcomeDeltasAfterDisagreement)}`,
@@ -930,7 +996,7 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     if (metadataString(record, "commanderSelectorSource") !== "llm") {
       return false;
     }
-    const selected = metadataString(record, "planObjective");
+    const selected = metadataString(record, "commanderSelectedOptionID");
     const deterministic = metadataString(
       record,
       "commanderDeterministicPreferredOptionId",
@@ -953,8 +1019,13 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     .filter((record) => metadataBoolean(record, "externalPlannerCall") === true)
     .map((record) => metadataNumber(record, "plannerLatencyMs") ?? 0);
   const selectedDistribution = countStrings(
-    nonFallbackPlanStarts.map((record) =>
-      metadataString(record, "planObjective"),
+    planStarts.map((record) =>
+      metadataString(record, "commanderSelectedOptionID"),
+    ),
+  );
+  const selectedFamilyDistribution = countStrings(
+    planStarts.map((record) =>
+      metadataString(record, "commanderSelectedOptionFamily"),
     ),
   );
   const final = finalOutcome(run);
@@ -1030,6 +1101,7 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     },
     deterministicPreferredOptionStampViolations: preference.violations,
     selectedOptionDistribution: selectedDistribution,
+    selectedOptionFamilyDistribution: selectedFamilyDistribution,
     planDurationDecisions: durations,
     replanReasons: countStrings(
       cycles.map((record) => metadataString(record, "commanderReplanReason")),
@@ -2239,6 +2311,120 @@ export function computeCommanderConfirmatoryAnalysis(
   return { status: "complete", ...base, results };
 }
 
+/**
+ * Exact XP B/C paired analysis. The XP evidence layer supplies only the two
+ * preregistered outcome metrics, so it projects the already-verified rows into
+ * this narrow adapter while reusing the same statistical primitives as the
+ * full local Commander report.
+ */
+export function computeCommanderXpConfirmatoryAnalysis(
+  specification: CommanderXpConfirmatoryAnalysisSpecification,
+  pairs: readonly CommanderXpPairedOutcome[],
+): CommanderXpConfirmatoryAnalysis {
+  if (
+    stableJson(specification) !==
+      stableJson({
+        analysisID: "strategic-commander-xp-b-vs-c-paired-v3",
+        population: "48-complete-preregistered-bc-pairs",
+        alternative: "C-superior-to-B",
+        alpha: 0.05,
+        confidenceLevel: 0.95,
+        missingnessPolicy: "no-missing-pairs",
+        primaryEndpoint: "subject-win",
+        scoreRole: "redundant-descriptive-only",
+        multiplicityPolicy: "single-primary-no-adjustment",
+        minimumWinRateEffectCMinusB: 0.1,
+        winMethod: "exact-two-sided-mcnemar",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+        resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v3",
+        bootstrapIterations: 4096,
+        decisionRule:
+          "all-48-complete-and-integrity-green-and-win-estimate-gt-minimum-and-p-lte-alpha-and-ci-lower-gt-minimum",
+        canaryClaimGate: "never",
+        performanceClaimGate: "external-seal-independent-review-required",
+      } satisfies CommanderXpConfirmatoryAnalysisSpecification) ||
+    pairs.length !== 48 ||
+    new Set(pairs.map((pair) => pair.replicaIndex)).size !== 48 ||
+    pairs.some(
+      (pair) =>
+        !Number.isInteger(pair.replicaIndex) ||
+        pair.replicaIndex < 0 ||
+        pair.replicaIndex >= 48 ||
+        !Number.isInteger(pair.seed) ||
+        pair.seed < 0 ||
+        typeof pair.B.won !== "boolean" ||
+        typeof pair.C.won !== "boolean" ||
+        !Number.isFinite(pair.B.score) ||
+        !Number.isFinite(pair.C.score),
+    )
+  ) {
+    throw new Error("Commander XP confirmatory analysis input is invalid");
+  }
+  const ordered = [...pairs].sort(
+    (left, right) => left.replicaIndex - right.replicaIndex,
+  );
+  if (ordered.some((pair, index) => pair.replicaIndex !== index)) {
+    throw new Error("Commander XP confirmatory analysis pairs are incomplete");
+  }
+  const winDeltas = ordered.map(
+    (pair) => Number(pair.C.won) - Number(pair.B.won),
+  );
+  const scoreDeltas = ordered.map((pair) => pair.C.score - pair.B.score);
+  const pValue = exactTwoSidedMcNemarPValue(winDeltas);
+  const [lower, upper] = pairedBootstrapInterval(
+    winDeltas,
+    `${specification.resamplingSeed}:win:bootstrap`,
+    specification.bootstrapIterations,
+    specification.confidenceLevel,
+  );
+  const estimateCMinusB = mean(winDeltas) ?? 0;
+  const minimum = specification.minimumWinRateEffectCMinusB;
+  const estimateExceedsMinimum = estimateCMinusB > minimum;
+  const pValueAtOrBelowAlpha = pValue <= specification.alpha;
+  const confidenceLowerBoundExceedsMinimum = lower > minimum;
+  const ruleSatisfied =
+    estimateExceedsMinimum &&
+    pValueAtOrBelowAlpha &&
+    confidenceLowerBoundExceedsMinimum;
+  return {
+    status: "complete",
+    specification: structuredClone(specification),
+    specificationSha256: sha256StableJson(specification),
+    completePairs: 48,
+    requiredPairs: 48,
+    missingPairs: 0,
+    missingnessPolicy: "no-missing-pairs",
+    primaryResult: {
+      metric: "win",
+      direction: "higher-is-better",
+      pairCount: 48,
+      estimateCMinusB,
+      confidenceInterval95: { lower, upper },
+      pValue,
+      pValueMethod: "exact-two-sided-mcnemar",
+      intervalMethod: "seeded-paired-bootstrap-percentile",
+    },
+    descriptiveScore: {
+      metric: "score",
+      role: "redundant-descriptive-only",
+      pairCount: 48,
+      estimateCMinusB: mean(scoreDeltas) ?? 0,
+    },
+    superiorityDecision: {
+      requiredPairCount: 48,
+      integrityGatesGreen: true,
+      minimumWinRateEffectCMinusB: 0.1,
+      estimateExceedsMinimum,
+      pValueAtOrBelowAlpha,
+      confidenceLowerBoundExceedsMinimum,
+      ruleSatisfied,
+      performanceClaimEligibleForExternalReview: ruleSatisfied,
+      performanceClaimAuthorized: false,
+      claimReviewStatus: "external-seal-independent-review-required",
+    },
+  };
+}
+
 function sha256StableJson(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
@@ -3114,7 +3300,7 @@ function boundedOutcomeDelta(
   return {
     planID: metadataString(disagreement, "planID") ?? "unknown",
     selectedOptionID:
-      metadataString(disagreement, "planObjective") ?? "unknown",
+      metadataString(disagreement, "commanderSelectedOptionID") ?? "unknown",
     deterministicOptionID:
       metadataString(disagreement, "commanderDeterministicPreferredOptionId") ??
       "unknown",

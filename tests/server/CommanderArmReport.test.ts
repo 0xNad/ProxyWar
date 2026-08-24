@@ -216,6 +216,10 @@ function commanderRecord(input: {
     runtimeMode: "commander-v0-selector",
     planID,
     planObjective: selected,
+    commanderSelectedOptionID: selected,
+    commanderSelectedOptionFamily: selected.startsWith("pressure_rival:")
+      ? "pressure_rival"
+      : selected,
     planFollowed: fidelity === "aligned_primary",
     plannerFallbackUsed: input.fallback ?? false,
     externalPlannerCall: input.arm === "C" && input.planInstalled === true,
@@ -919,6 +923,13 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(
       firstTriplet(report).arms.C.metrics.selectedOptionDistribution,
     ).toEqual({
+      develop_economy: 1,
+      expand: 1,
+    });
+    expect(
+      firstTriplet(report).arms.C.metrics.selectedOptionFamilyDistribution,
+    ).toEqual({
+      develop_economy: 1,
       expand: 1,
     });
     expect(firstTriplet(report).arms.C.metrics.selectorDisagreement).toEqual({

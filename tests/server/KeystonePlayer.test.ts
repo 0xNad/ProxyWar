@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decisionRequestEnvelope,
+  normalizeCommanderExecutionEnvelope,
   normalizeDecisionResponse,
 } from "../../coworld-adapter/src/coworld-decision-wire";
 import {
@@ -33,6 +34,7 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
 import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
+import { isLandExpansionAction } from "../../src/server/agents/StrategicOptionCompatibility";
 
 const modules: KeystoneModules = {
   plannerExecutor: plannerExecutorModule,
@@ -157,6 +159,49 @@ describe("Coworld keystone player", () => {
       score: 0.4,
     });
     expect(rebuilt.legalActions[0].metadata).toEqual({ coastal: true });
+  });
+
+  it("reconstructs server-owned attack facts so Commander expansion stays executable", () => {
+    const input: AgentBrainInput = {
+      observation: { ...spawnBrainInput().observation, phase: "active" },
+      legalActions: [
+        {
+          id: "expand:terra-nullius:20",
+          kind: "attack",
+          label: "Expand into neutral land with 20% troops",
+          intent: { type: "attack", targetID: null, troops: 5_000 },
+          risk: { level: "low", score: 0.2 },
+          metadata: {
+            expansion: true,
+            targetID: null,
+            targetName: "Terra Nullius",
+            troops: 5_000,
+            troopPercent: 20,
+          },
+        },
+        {
+          id: "hold",
+          kind: "hold",
+          label: "Hold",
+          intent: null,
+          risk: { level: "none", score: 0 },
+        },
+      ],
+    };
+    const request = wireRequest(input) as {
+      legalActions: Array<Record<string, unknown>>;
+    };
+    expect(request.legalActions[0]).not.toHaveProperty("intent");
+
+    const rebuilt = requestToBrainInput(request);
+
+    expect(rebuilt.legalActions[0].intent).toEqual({
+      type: "attack",
+      targetID: null,
+      troops: 5_000,
+    });
+    expect(isLandExpansionAction(rebuilt.legalActions[0])).toBe(true);
+    expect(rebuilt.legalActions[1].intent).toBeNull();
   });
 
   it("rejects payloads without legal actions", () => {
@@ -427,6 +472,62 @@ describe("Coworld keystone player", () => {
       metadata: { runtimeMode: "llm-policy-planner " },
     });
     expect(forged).not.toHaveProperty("runtimeMode");
+  });
+
+  it("decisionToResponse binds Commander execution metadata without changing selected actions", () => {
+    const response = decisionToResponse(
+      "req_commander",
+      {
+        actionID: "hold:primary",
+        actionIDs: ["hold:primary", "fortify:support"],
+        reason: "execute the bound plan",
+        metadata: {
+          runtimeMode: "commander-v0-selector",
+          plannerSource: "strategic-commander-v0",
+          planID: "plan-keystone-fixture",
+          planObjective: "survive",
+          commanderSelectedOptionID: "survive",
+          commanderSelectedOptionFamily: "survive",
+          commanderSelectorSource: "deterministic",
+          commanderDeterministicPreferredOptionId: "survive",
+          commanderDeterministicPreferredOptionAbsent: false,
+          commanderFidelity: "aligned_primary",
+          commanderBatchFidelities: JSON.stringify({
+            "hold:primary": "aligned_primary",
+            "fortify:support": "aligned_support",
+          }),
+          batchIndex: 0,
+          batchSize: 2,
+          batchActionIDs: "hold:primary,fortify:support",
+        },
+      },
+      5,
+    );
+    const envelope = normalizeCommanderExecutionEnvelope(
+      response.commanderExecution,
+    );
+    expect(response.selectedLegalActionId).toBe("hold:primary");
+    expect(response.selectedLegalActionIds).toEqual([
+      "hold:primary",
+      "fortify:support",
+    ]);
+    expect(envelope).not.toBeNull();
+    expect(envelope?.metadata).toMatchObject({
+      runtimeMode: "commander-v0-selector",
+      planID: "plan-keystone-fixture",
+      planObjective: "survive",
+      commanderFidelity: "aligned_primary",
+      batchSize: 2,
+    });
+    expect(envelope?.metadataSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(envelope?.selection).toEqual({
+      planID: "plan-keystone-fixture",
+      selectedOptionID: "survive",
+      selectedOptionFamily: "survive",
+      selectorSource: "deterministic",
+      deterministicPreferredOptionID: "survive",
+      deterministicPreferredOptionAbsent: false,
+    });
   });
 
   it("ranks an all-spawn menu locally and carries the independent preference field", () => {

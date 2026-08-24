@@ -1,0 +1,59 @@
+# Eval-only StrategicCommander XP image. Build from repository root:
+#   docker build --platform linux/amd64 \
+#     --build-arg COMMANDER_XP_ADAPTER_SOURCE_SHA=<frozen-commit> \
+#     --build-arg COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA=<frozen-tree> \
+#     -f coworld-adapter/Dockerfile.commander-xp \
+#     -t proxywar-commander-xp:<tag> .
+#
+# Upload this image once, then create all six immutable policy versions from the
+# returned Coworld image ID. Commander A/B/C use the same Bedrock model and
+# byte-identical argv except for the final --arm=A|B|C token; the three fixed
+# opponents use the bundled deterministic starter argv.
+ARG COMMANDER_XP_BUILD_PLATFORM=linux/amd64
+FROM --platform=${COMMANDER_XP_BUILD_PLATFORM} node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848
+
+ARG COMMANDER_XP_BEHAVIOR_SOURCE_SHA=a69175a30577b3e516f09a2cb0960d4d129b3f33
+ARG COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA=b1b88e4a447acb885ed554592d3865af0178314f
+ARG COMMANDER_XP_ADAPTER_SOURCE_SHA
+ARG COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA
+ARG COMMANDER_XP_SOURCE_PROVENANCE_SHA256
+
+LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
+      org.opencontainers.image.revision="${COMMANDER_XP_ADAPTER_SOURCE_SHA}" \
+      com.proxywar.commander-xp.behavior-source-sha="${COMMANDER_XP_BEHAVIOR_SOURCE_SHA}" \
+      com.proxywar.commander-xp.behavior-source-tree-sha="${COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-xp.source-tree-sha="${COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-xp.source-provenance-sha256="${COMMANDER_XP_SOURCE_PROVENANCE_SHA256}"
+
+ENV PROXYWAR_REPO=/app/proxywar \
+    PROXYWAR_KEYSTONE_PLAN_EVERY=3 \
+    PROXYWAR_TUNE_STRUCTURED_DEALS=0 \
+    PROXYWAR_TUNE_FREETEXT_MESSAGES=0 \
+    PROXYWAR_TUNE_SPATIAL_OBSERVATION=0 \
+    PROXYWAR_TUNE_SPATIAL_MINIMAP=0 \
+    PROXYWAR_KEYSTONE_PROFILE=aggressive \
+    PROXYWAR_LLM_TIMEOUT_MS=12000 \
+    AWS_REGION=us-west-2 \
+    COMMANDER_XP_BEHAVIOR_SOURCE_SHA=${COMMANDER_XP_BEHAVIOR_SOURCE_SHA} \
+    COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA=${COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA} \
+    COMMANDER_XP_ADAPTER_SOURCE_SHA=${COMMANDER_XP_ADAPTER_SOURCE_SHA} \
+    COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA=${COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA} \
+    COMMANDER_XP_SOURCE_PROVENANCE_SHA256=${COMMANDER_XP_SOURCE_PROVENANCE_SHA256}
+
+WORKDIR /app/proxywar
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts && npm cache clean --force
+COPY tsconfig.json ./
+COPY src ./src
+COPY resources ./resources
+COPY coworld-adapter/src/keystone-player.ts ./coworld-adapter/src/keystone-player.ts
+
+WORKDIR /app/proxywar/coworld-adapter
+COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev && npm cache clean --force
+COPY coworld-adapter/src ./src
+
+WORKDIR /app/proxywar
+ENV NODE_ENV=production
+
+CMD ["node", "--import", "tsx", "/app/proxywar/coworld-adapter/src/commander-xp-player.ts", "--arm=A"]
