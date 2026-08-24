@@ -79,6 +79,7 @@
   "src/server/agents/StrategicCommanderBrain.ts",
   "src/server/agents/StrategicOptionBuilder.ts",
   "src/server/agents/StrategicOptionSelectors.ts",
+  "tests/automation/workflow-security.test.mjs",
   "tests/server/CommanderArmEquivalence.test.ts",
   "tests/server/CommanderArmReport.test.ts",
   "tests/server/CommanderExperimentVerifier.test.ts",

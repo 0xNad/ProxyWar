@@ -316,13 +316,14 @@ jobs:
           ref: ${{ inputs.source_sha || github.sha }}
           fetch-depth: 0
           submodules: false
+      - *checkout-protected-ci-control
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
       - name: Run admission and release security tests
         run: node --test tests/automation/*.test.mjs
       - name: Install Commander workflow test dependencies
-        run: npm ci --ignore-scripts
+        run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - name: Run Commander XP workflow security tests
         run: |
           node --test \

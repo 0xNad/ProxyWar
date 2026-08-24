@@ -223,7 +223,7 @@ test("every main CI dependency install uses the bounded retry wrapper", () => {
     ci.match(
       /node artifacts\/trusted-ci-control\/\.github\/scripts\/npm-ci-with-retry\.mjs/g,
     )?.length,
-    7,
+    8,
   );
   assert.match(ci, /ref: main/);
   assert.match(ci, /path: artifacts\/trusted-ci-control/);
