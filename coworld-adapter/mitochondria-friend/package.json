@@ -1,0 +1,14 @@
+{
+  "name": "proxywar-mitochondria-friend",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "description": "A deterministic diplomacy-first ProxyWar league policy.",
+  "scripts": {
+    "test": "node --test friendly-policy.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
