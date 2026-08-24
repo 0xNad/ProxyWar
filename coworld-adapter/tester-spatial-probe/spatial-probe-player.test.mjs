@@ -205,6 +205,36 @@ test("Gate 2 builds minimap-positioned tasks only from offered tile actions", ()
   assert.equal(expectedGate2Action(task, schema1Observation()), null);
 });
 
+test("Gate 2 task lanes do not contaminate each other", () => {
+  const actions = [
+    {
+      id: "attack:R_A:20",
+      kind: "attack",
+      metadata: { targetID: "R_A", troopPercent: 20 },
+    },
+    {
+      id: "attack:R_B:20",
+      kind: "attack",
+      metadata: { targetID: "R_B", troopPercent: 20 },
+    },
+    {
+      id: "build:City:10",
+      kind: "build",
+      metadata: { unit: "City", role: "economic", targetTile: 10 },
+    },
+    {
+      id: "build:City:20",
+      kind: "build",
+      metadata: { unit: "City", role: "economic", targetTile: 20 },
+    },
+  ];
+  assert.equal(
+    buildGate2Task(actions, 1, "structured").taskClass,
+    "structured_target",
+  );
+  assert.equal(buildGate2Task(actions, 0, "minimap").taskClass, "minimap_tile");
+});
+
 test("hosted probe answer is evidence-only and the offered carrier is executed", async () => {
   class FakeSocket {
     static latest;

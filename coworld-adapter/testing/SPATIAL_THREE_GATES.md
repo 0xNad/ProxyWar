@@ -29,6 +29,14 @@ mountain answer key, and interleaves ten minimap questions into each
 50-question episode. None of the cardinalities, thresholds, or advancement
 rules below changed after seeing the calibration data.
 
+The first mixed Gate 2 triplet is also retained as calibration rather than a
+feature verdict. Alternating structured and minimap tasks made minimap latency
+count against the structured reliability gate and supplied irrelevant context
+to both task types. Corrected Gate 2 policies run structured-only or
+minimap-only lanes, expose only the task-relevant subset of the already-admitted
+observation, and use a 13.5-second provider timeout within the hosted game's
+15-second decision limit. Gate thresholds remain unchanged.
+
 ## Shared invariants
 
 - Model: `us.anthropic.claude-sonnet-4-6`, with the response model recorded.

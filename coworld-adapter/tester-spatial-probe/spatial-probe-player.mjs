@@ -17,7 +17,7 @@ export const PROBE_MAX_TOKENS = 1024;
 const REGION =
   process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
 const SIDECAR = (process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME || "").trim();
-const PROBE_TIMEOUT_MS = 11_000;
+const PROBE_TIMEOUT_MS = 13_500;
 const PROBE_PREFIX = "PROXYWAR_SPATIAL_GATE ";
 const TARGET_ACTION_KINDS = new Set([
   "attack",
@@ -488,9 +488,11 @@ function tileTask(actions) {
   };
 }
 
-export function buildGate2Task(actions, index) {
+export function buildGate2Task(actions, index, taskMode = "mixed") {
   const target = targetTask(actions, index);
   const tile = tileTask(actions);
+  if (taskMode === "structured") return target;
+  if (taskMode === "minimap") return tile;
   if (target && tile) return index % 2 === 0 ? target : tile;
   return target ?? tile;
 }
@@ -590,9 +592,39 @@ export function expectedGate2Action(task, observation) {
     : minimapExpected(task, observation);
 }
 
-function compactLiveContext(observation) {
+function compactLiveContext(observation, task) {
   const spatial = boundedSpatialObservation(observation);
   const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
+  if (task?.taskClass === "structured_target") {
+    const targetIDs = new Set(
+      task.candidates.map((candidate) => candidate.targetID),
+    );
+    return {
+      rivals: (observation?.visiblePlayers ?? [])
+        .filter((rival) => targetIDs.has(rival.playerID))
+        .map((rival) => ({
+          playerID: rival.playerID,
+          name: rival.name,
+          sharesBorder: rival.sharesBorder,
+          ...(rival.bearing ? { bearing: rival.bearing } : {}),
+          ...(rival.distanceClass
+            ? { distanceClass: rival.distanceClass }
+            : {}),
+          ...(rival.borderWithYou
+            ? { borderWithYou: rival.borderWithYou }
+            : {}),
+          ...(rival.navalExposure
+            ? { navalExposure: rival.navalExposure }
+            : {}),
+        })),
+    };
+  }
+  if (task?.taskClass === "minimap_tile") {
+    return {
+      ...(mapInfo ? { mapInfo } : {}),
+      ...(spatial?.minimap ? { minimap: spatial.minimap } : {}),
+    };
+  }
   return {
     ...(mapInfo ? { mapInfo } : {}),
     ownState: {
@@ -642,7 +674,7 @@ function probePrompt(gate1, gate2, observation) {
             "unknown",
           ],
           candidates: gate2.candidates,
-          liveContext: compactLiveContext(observation),
+          liveContext: compactLiveContext(observation, gate2),
         }
       : null,
   };
@@ -650,8 +682,8 @@ function probePrompt(gate1, gate2, observation) {
     "You are taking a spatial-reading evaluation. Use only the supplied context.",
     "If the requested spatial fact is absent, answer exactly unknown; do not guess.",
     "For gate2, an action is only a label for the exact stated objective, not general strategy.",
-    'Return only JSON: {"gate1":"<one listed option> or null","gate2":"<one listed option, unknown, or null>"}.',
     JSON.stringify(task),
+    'Return only JSON: {"gate1":"<one listed option> or null","gate2":"<one listed option, unknown, or null>"}.',
   ].join("\n");
 }
 
@@ -748,7 +780,10 @@ async function callModel(bedrock, prompt) {
       inputTokens: null,
       outputTokens: null,
       latencyMs: Date.now() - started,
-      error: error?.name === "AbortError" ? "timeout" : "provider_error",
+      error:
+        controller.signal.aborted || error?.name === "AbortError"
+          ? "timeout"
+          : "provider_error",
     };
   } finally {
     clearTimeout(timeout);
@@ -776,6 +811,15 @@ function offsetFromArgv(argv) {
   return offset;
 }
 
+function taskModeFromArgv(argv) {
+  const raw =
+    argv.find((arg) => arg.startsWith("--task="))?.slice(7) ?? "mixed";
+  if (!["mixed", "structured", "minimap"].includes(raw)) {
+    throw new Error(`unsupported gate2 task mode: ${raw}`);
+  }
+  return raw;
+}
+
 function logEvent(event) {
   console.log(`${PROBE_PREFIX}${JSON.stringify(event)}`);
 }
@@ -789,6 +833,7 @@ export function startSpatialProbe({
   if (!url) throw new Error("COWORLD_PLAYER_WS_URL is required");
   const mode = modeFromArgv(argv);
   const gate1Offset = offsetFromArgv(argv);
+  const gate2TaskMode = taskModeFromArgv(argv);
   const cases = buildGate1Cases();
   const bedrock = BedrockClient();
   const socket = new WebSocketCtor(url);
@@ -810,6 +855,7 @@ export function startSpatialProbe({
         gate1Offset,
         model: PROBE_MODEL,
         maxTokens: PROBE_MAX_TOKENS,
+        gate2TaskMode,
         activeDecisions: activeIndex,
         modelCalls,
         providerFailures,
@@ -849,7 +895,9 @@ export function startSpatialProbe({
     const scenario = cases[(gate1Offset + activeIndex) % cases.length];
     const gate1 = mode === "gate2" ? null : gate1PromptCase(scenario, arm);
     const gate2 =
-      mode === "gate1" ? null : buildGate2Task(actions, activeIndex);
+      mode === "gate1"
+        ? null
+        : buildGate2Task(actions, activeIndex, gate2TaskMode);
     const shouldCall = gate1 !== null || gate2 !== null;
     let result = {
       ok: true,
@@ -886,6 +934,7 @@ export function startSpatialProbe({
       responseModel: result.responseModel,
       stopReason: result.stopReason,
       maxTokens: PROBE_MAX_TOKENS,
+      gate2TaskMode,
       responseTextChars: result.responseTextChars,
       responseTextSHA256: result.responseTextSHA256,
       arm,
