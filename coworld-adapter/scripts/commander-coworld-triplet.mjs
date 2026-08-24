@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const COWORLD_VERSION = "0.1.42";
 const VARIANT_ID = "tournament-4p-pangaea";
+const MAX_DECISION_MS = 25_000;
 const SAFE_ID = /^[A-Za-z0-9._/-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARM_NAMES = ["A", "B", "C"];
@@ -62,7 +63,7 @@ export function buildRequests(input) {
             commander_xp_run_key: runKey,
             max_decision_steps: 360,
             turns_per_decision_step: 100,
-            max_decision_ms: 15_000,
+            max_decision_ms: MAX_DECISION_MS,
             map: "Pangaea",
             map_size: "Compact",
             difficulty: "Easy",
@@ -457,7 +458,7 @@ async function main() {
     config: {
       maxDecisionSteps: 360,
       turnsPerDecisionStep: 100,
-      maxDecisionMs: 15_000,
+      maxDecisionMs: MAX_DECISION_MS,
       episodeTimeoutSeconds: 6_000,
     },
     summary,

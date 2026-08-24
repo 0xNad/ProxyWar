@@ -71,7 +71,7 @@ const REQUIRED_FLAGS = {
   PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
   PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
   PROXYWAR_KEYSTONE_PROFILE: "aggressive",
-  PROXYWAR_LLM_TIMEOUT_MS: "12000",
+  PROXYWAR_LLM_TIMEOUT_MS: "20000",
 } as const;
 const PROVIDER_PREFLIGHT_PROMPT =
   "Return exactly the single uppercase token OK and nothing else.";
@@ -721,7 +721,7 @@ function runtimeManifest(input: {
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
       KEYSTONE_PROFILE: "aggressive",
-      LLM_TIMEOUT_MS: "12000",
+      LLM_TIMEOUT_MS: "20000",
     },
     providerPreflight: {
       required: true,

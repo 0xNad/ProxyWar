@@ -85,7 +85,7 @@ describe("Commander XP hosted player", () => {
       PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
       PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
       PROXYWAR_KEYSTONE_PROFILE: "aggressive",
-      PROXYWAR_LLM_TIMEOUT_MS: "12000",
+      PROXYWAR_LLM_TIMEOUT_MS: "20000",
       BEDROCK_MODEL: "us.anthropic.claude-sonnet-4-6",
       AWS_REGION: "us-west-2",
       AWS_ENDPOINT_URL_BEDROCK_RUNTIME: "http://127.0.0.1:9100",
@@ -93,7 +93,7 @@ describe("Commander XP hosted player", () => {
     expect(assertCommanderXpEnvironment(exact)).toMatchObject({
       model: "us.anthropic.claude-sonnet-4-6",
       profile: "aggressive",
-      timeoutMs: 12000,
+      timeoutMs: 20000,
     });
     expect(() =>
       assertCommanderXpEnvironment({
@@ -116,9 +116,9 @@ describe("Commander XP hosted player", () => {
     expect(() =>
       assertCommanderXpEnvironment({
         ...exact,
-        PROXYWAR_LLM_TIMEOUT_MS: "13000",
+        PROXYWAR_LLM_TIMEOUT_MS: "12000",
       }),
-    ).toThrow(/LLM_TIMEOUT_MS=12000/);
+    ).toThrow(/LLM_TIMEOUT_MS=20000/);
     expect(() =>
       assertCommanderXpEnvironment({
         ...exact,

@@ -40,7 +40,7 @@ const manifest: CommanderXpRuntimeManifest = {
     SPATIAL_OBSERVATION: "0",
     SPATIAL_MINIMAP: "0",
     KEYSTONE_PROFILE: "aggressive",
-    LLM_TIMEOUT_MS: "12000",
+    LLM_TIMEOUT_MS: "20000",
   },
   providerPreflight: {
     required: true,
