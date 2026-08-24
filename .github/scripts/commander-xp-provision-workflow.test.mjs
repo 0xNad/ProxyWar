@@ -149,6 +149,16 @@ test("provision recovers only from exact cumulative immutable stage boundaries",
 
 test("provision proves exact 360x100 terminality and preserves product binding", () => {
   assert.match(workflow, /commander-xp-run-episode/);
+  assert.match(workflow, /--game-image="\$GAME_REPO_DIGEST"/);
+  assert.match(workflow, /--player-image="\$POLICY_REPO_DIGEST"/);
+  assert.match(
+    workflow,
+    /"\$POLICY_REPO_DIGEST" "\$POLICY_REPO_DIGEST" "\$POLICY_REPO_DIGEST" "\$POLICY_REPO_DIGEST"/,
+  );
+  assert.match(
+    workflow,
+    /\/app\/proxywar\/coworld-adapter\/src\/starter-player\.mjs/,
+  );
   assert.match(workflow, /commander-xp-certify/);
   assert.match(
     workflow,
@@ -188,10 +198,7 @@ test("provision retains only safe projections of presigned policy upload respons
   assert.match(policyProvisioner, /coworld-0\.1\.42-policy-upload-readback-v3/);
   assert.match(policyProvisioner, /coworld-0\.1\.42-policy-image-upload-v3/);
   assert.match(policyProvisioner, /adopted-after-remote-success/);
-  assert.match(
-    policyProvisioner,
-    /image\.get\("client_hash"\) != client_hash/,
-  );
+  assert.match(policyProvisioner, /image\.get\("client_hash"\) != client_hash/);
   assert.match(policyProvisioner, /not SHA256\.fullmatch\(image_digest\)/);
   assert.doesNotMatch(
     policyProvisioner,

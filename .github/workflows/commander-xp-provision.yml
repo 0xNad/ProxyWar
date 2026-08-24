@@ -752,7 +752,8 @@ jobs:
           node coworld-adapter/scripts/prepare-commander-xp-eval-manifest.mjs \
             --base=coworld-adapter/coworld/coworld_manifest.json \
             --output="$EVAL_ROOT/eval-coworld-manifest-v2.json" \
-            --image="$GAME_REPO_DIGEST" --version="$EVAL_VERSION" \
+            --game-image="$GAME_REPO_DIGEST" \
+            --player-image="$POLICY_REPO_DIGEST" --version="$EVAL_VERSION" \
             > "$RUNNER_TEMP/eval-manifest-result.json"
           coworld-adapter/coworld/tools/build_replay_viewer.sh \
             "$EVAL_ROOT/build/static-replay-viewer"
@@ -761,8 +762,8 @@ jobs:
           chmod 700 "$PROOF_OUTPUT_PARENT"
           PROOF_ROOT="$PROOF_OUTPUT_PARENT/terminal-proof"
           node .github/scripts/coworld-authenticated-command.mjs commander-xp-run-episode "$EVAL_ROOT/eval-coworld-manifest-v2.json" \
-            "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" \
-            --run node --run /app/integration/src/starter-player.mjs \
+            "$POLICY_REPO_DIGEST" "$POLICY_REPO_DIGEST" "$POLICY_REPO_DIGEST" "$POLICY_REPO_DIGEST" \
+            --run node --run /app/proxywar/coworld-adapter/src/starter-player.mjs \
             --variant tournament-4p-pangaea --timeout-seconds 6000 \
             --verify-replay --output-dir "$PROOF_ROOT"
           mapfile -t RESULTS < <(find "$PROOF_ROOT" -type f -name results.json)

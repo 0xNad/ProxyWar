@@ -19,7 +19,8 @@ const base = JSON.parse(
 describe("Commander XP eval-only Coworld manifest", () => {
   it("uses a distinct namespace, exact evidence env, and terminal cadence", () => {
     const manifest = commanderXpEvalManifest(base, {
-      image: `proxywar-coworld-commander-xp-eval@sha256:${"a".repeat(64)}`,
+      gameImage: `proxywar-coworld-commander-xp-game@sha256:${"a".repeat(64)}`,
+      playerImage: `proxywar-coworld-commander-xp-policy@sha256:${"b".repeat(64)}`,
       version: "0.0.1",
     });
     expect(manifest.game.name).toBe("proxywar-commander-xp-eval");
@@ -30,8 +31,8 @@ describe("Commander XP eval-only Coworld manifest", () => {
     expect(manifest.player[0]).toMatchObject({
       id: "proxywar-starter-websocket",
       type: "player",
-      image: `proxywar-coworld-commander-xp-eval@sha256:${"a".repeat(64)}`,
-      run: ["node", "/app/integration/src/starter-player.mjs"],
+      image: `proxywar-coworld-commander-xp-policy@sha256:${"b".repeat(64)}`,
+      run: ["node", "/app/proxywar/coworld-adapter/src/starter-player.mjs"],
       env: {},
     });
     expect(manifest.variants.map((entry: { id: string }) => entry.id)).toEqual([
@@ -80,9 +81,28 @@ describe("Commander XP eval-only Coworld manifest", () => {
   it("rejects mutable images", () => {
     expect(() =>
       commanderXpEvalManifest(base, {
-        image: "proxywar-coworld-commander-xp-eval:latest",
+        gameImage: "proxywar-coworld-commander-xp-game:latest",
+        playerImage: `proxywar-coworld-commander-xp-policy@sha256:${"b".repeat(64)}`,
         version: "0.0.1",
       }),
     ).toThrow("immutable digest");
+  });
+
+  it("rejects mutable or role-reused player images", () => {
+    const gameImage = `proxywar-coworld-commander-xp-game@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      commanderXpEvalManifest(base, {
+        gameImage,
+        playerImage: "proxywar-coworld-commander-xp-policy:latest",
+        version: "0.0.1",
+      }),
+    ).toThrow("player image must use an immutable digest");
+    expect(() =>
+      commanderXpEvalManifest(base, {
+        gameImage,
+        playerImage: gameImage,
+        version: "0.0.1",
+      }),
+    ).toThrow("must be role-specific");
   });
 });
