@@ -112,6 +112,11 @@ test("public-base workflow materializes one image through the exact Commander en
   assert.doesNotMatch(workflow, /policy-secret-envs|starter-player|--arm=/);
   assert.match(workflow, /commander-public-base-materialization-v2/);
   assert.match(workflow, /POLICY_IDENTITY_SHA256/);
+  assert.match(workflow, /POLICY_NAME="\$POLICY_IDENTITY_SHA256"/);
+  assert.doesNotMatch(
+    workflow,
+    /POLICY_NAME="proxywar-commander-public-base-v2-/,
+  );
   assert.match(workflow, /policy-identity-sha256/);
   assert.match(workflow, /docker pull "\$PUBLIC_IMAGE_URI"/);
   assert.match(

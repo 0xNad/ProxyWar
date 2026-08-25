@@ -132,9 +132,7 @@ def fixture_args(
     args.policy_identity_sha256 = MODULE.sha256_bytes(
         MODULE.canonical_bytes(MODULE.policy_identity(args))
     )
-    args.policy_name = (
-        "proxywar-commander-public-base-v2-" + args.policy_identity_sha256
-    )
+    args.policy_name = args.policy_identity_sha256
     return args
 
 
@@ -300,11 +298,56 @@ class PublicBaseMaterializeTest(unittest.TestCase):
     def test_policy_name_commits_exact_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             args = fixture_args(Path(temporary) / "output")
+            self.assertEqual(len(args.policy_name), 64)
+            self.assertEqual(args.policy_name, args.policy_identity_sha256)
+            payload = MODULE.policy_payload(args, "img_public_base_fixture")
+            self.assertEqual(
+                payload["tags"]["identity-sha256"],
+                args.policy_identity_sha256,
+            )
+            projection = fixture_policy(args, "img_public_base_fixture")
+            self.assertEqual(
+                projection["policyIdentitySha256"],
+                args.policy_identity_sha256,
+            )
+            self.assertEqual(
+                projection["readback"]["policyIdentitySha256"],
+                args.policy_identity_sha256,
+            )
             with patch.object(
                 MODULE.importlib.metadata, "version", return_value="0.1.42"
             ):
                 MODULE.validate_args(args)
                 args.source_provenance_digest = "sha256:" + "9" * 64
+                with self.assertRaisesRegex(RuntimeError, "policy identity"):
+                    MODULE.validate_args(args)
+
+    def test_policy_remote_adoption_rejects_another_full_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = fixture_args(Path(temporary) / "output")
+            other_identity = "f" * 64
+            self.assertNotEqual(args.policy_identity_sha256, other_identity)
+            current = SimpleNamespace(
+                id="pvid_other_identity",
+                name=other_identity,
+                version=1,
+            )
+            with self.assertRaisesRegex(RuntimeError, "policy readback mismatch"):
+                MODULE.policy_projection(
+                    args,
+                    "img_public_base_fixture",
+                    current,
+                    "adopted-after-remote-success",
+                    b"{}",
+                )
+
+    def test_policy_argument_rejects_truncated_identity_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = fixture_args(Path(temporary) / "output")
+            args.policy_name = args.policy_identity_sha256[:-1]
+            with patch.object(
+                MODULE.importlib.metadata, "version", return_value="0.1.42"
+            ):
                 with self.assertRaisesRegex(RuntimeError, "policy identity"):
                     MODULE.validate_args(args)
 

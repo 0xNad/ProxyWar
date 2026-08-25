@@ -3,9 +3,9 @@
 
 The protected workflow pins this helper to Coworld 0.1.42. It creates one
 exact-entrypoint materialization policy and no environment, league entry, or
-evaluation package. Exact Coworld image name/client-hash discovery and a
-provenance-committed policy name make completed work adoptable after local
-output loss without accepting an ambiguous name-only row.
+evaluation package. Exact Coworld image name/client-hash discovery and a policy
+name equal to the full provenance identity make completed work adoptable after
+local output loss without accepting an ambiguous name-only row.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ GHCR_IMAGE = re.compile(
 PUBLIC_IMAGE = re.compile(r"^public\.ecr\.aws/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")
 IMAGE_PAGE_SIZE = 200
 IMAGE_PAGE_LIMIT = 8
-POLICY_NAME = re.compile(r"^proxywar-commander-public-base-v2-[0-9a-f]{64}$")
+POLICY_NAME = re.compile(r"^[0-9a-f]{64}$")
 POLICY_PURPOSE = "commander-public-base-materialization-v2"
 PUBLIC_IMAGE_ATTEMPTS = 12
 PUBLIC_IMAGE_INTERVAL_SECONDS = 5
@@ -215,7 +215,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if (
         not POLICY_NAME.fullmatch(args.policy_name)
         or not re.fullmatch(r"^[0-9a-f]{64}$", args.policy_identity_sha256)
-        or args.policy_name.rsplit("-", 1)[1] != args.policy_identity_sha256
+        or args.policy_name != args.policy_identity_sha256
         or args.policy_identity_sha256 != expected_policy_identity
     ):
         raise RuntimeError("Commander public base policy identity is crossed")
@@ -372,9 +372,11 @@ def policy_projection(
         "id": str(current.id),
         "name": current.name,
         "version": current.version,
+        "policyIdentitySha256": current.name,
     }
     if (
         readback["name"] != args.policy_name
+        or readback["policyIdentitySha256"] != args.policy_identity_sha256
         or readback["version"] != 1
         or not readback["id"]
     ):
@@ -562,6 +564,8 @@ def validate_recovered_policy(
         != sha256_bytes(canonical_bytes(payload))
         or not isinstance(readback, dict)
         or readback.get("name") != args.policy_name
+        or readback.get("policyIdentitySha256")
+        != args.policy_identity_sha256
         or readback.get("version") != 1
     ):
         raise RuntimeError("Commander public base recovered policy binding mismatch")

@@ -289,7 +289,7 @@ test("maps one exact Commander public-base materialization without credentials",
       "commander-public-base-materialize",
       "upload",
       `--image=ghcr.io/0xnad/proxywar-commander-public-base@${digest}`,
-      `--policy-name=proxywar-commander-public-base-v2-${"2".repeat(64)}`,
+      `--policy-name=${"2".repeat(64)}`,
       `--policy-identity-sha256=${"2".repeat(64)}`,
       `--source-sha=${"3".repeat(40)}`,
       `--source-tree-sha=${"4".repeat(40)}`,
@@ -310,6 +310,20 @@ test("maps one exact Commander public-base materialization without credentials",
       /python\|.*commander-public-base-materialize\.py upload --image=ghcr\.io\/0xnad\/proxywar-commander-public-base@sha256:/,
     );
     assert.doesNotMatch(lines[1], /token/);
+
+    const crossedIdentity = spawnSync(
+      process.execPath,
+      [
+        wrapper,
+        ...args.map((argument) =>
+          argument.startsWith("--policy-name=")
+            ? `--policy-name=${"9".repeat(64)}`
+            : argument,
+        ),
+      ],
+      { encoding: "utf8", env },
+    );
+    assert.notEqual(crossedIdentity.status, 0);
   });
 });
 
@@ -323,7 +337,7 @@ test("maps only an exact retained public-base recovery directory", () => {
       "commander-public-base-materialize",
       "upload",
       `--image=ghcr.io/0xnad/proxywar-commander-public-base@${digest}`,
-      `--policy-name=proxywar-commander-public-base-v2-${"2".repeat(64)}`,
+      `--policy-name=${"2".repeat(64)}`,
       `--policy-identity-sha256=${"2".repeat(64)}`,
       `--source-sha=${"3".repeat(40)}`,
       `--source-tree-sha=${"4".repeat(40)}`,
