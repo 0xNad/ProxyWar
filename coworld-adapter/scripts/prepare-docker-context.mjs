@@ -18,7 +18,6 @@ const proxyWarEntries = [
   "vite.config.ts",
   "src",
   "resources",
-  "proprietary",
   // ship the starter SDK (createStarterAgent) so the LLM policy can import it
   "examples",
   // Fixture and source-verification scripts used by package checks.
@@ -66,6 +65,7 @@ await fs.writeFile(
     "node_modules",
     "artifacts",
     ".docker-context",
+    "proprietary",
     ".env",
     ".env.*",
     "*.pem",
@@ -108,6 +108,7 @@ function shouldCopy(source) {
     name === "node_modules" ||
     name === "artifacts" ||
     name === ".docker-context" ||
+    name === "proprietary" ||
     name === ".DS_Store" ||
     name === "coverage" ||
     name === "dist" ||
