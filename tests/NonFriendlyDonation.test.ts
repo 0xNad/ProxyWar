@@ -213,6 +213,27 @@ describe("non-friendly donation configuration", () => {
     expect(donor.donationsSentSince(0)).toEqual([]);
   });
 
+  it("direct methods reject a live player object outside the sender's game", async () => {
+    const primary = await pair({ donateToNonFriendly: true });
+    const foreign = await pair({ donateToNonFriendly: true });
+    resetGold(primary.donor, 10_000n);
+    primary.donor.setTroops(10_000);
+    const donorGold = primary.donor.gold();
+    const foreignGold = foreign.recipient.gold();
+    const donorTroops = primary.donor.troops();
+    const foreignTroops = foreign.recipient.troops();
+
+    expect(primary.donor.canDonateGold(foreign.recipient)).toBe(false);
+    expect(primary.donor.canDonateTroops(foreign.recipient)).toBe(false);
+    expect(primary.donor.donateGold(foreign.recipient, 1_000n)).toBe(false);
+    expect(primary.donor.donateTroops(foreign.recipient, 1_000)).toBe(false);
+    expect(primary.donor.gold()).toBe(donorGold);
+    expect(foreign.recipient.gold()).toBe(foreignGold);
+    expect(primary.donor.troops()).toBe(donorTroops);
+    expect(foreign.recipient.troops()).toBe(foreignTroops);
+    expect(primary.donor.donationsSentSince(0)).toEqual([]);
+  });
+
   it("missing recipients fail without a transfer or fabricated receipt", async () => {
     const { game, donor } = await pair({ donateToNonFriendly: true });
     resetGold(donor, 10_000n);

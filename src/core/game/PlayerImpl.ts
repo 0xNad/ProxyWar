@@ -848,8 +848,11 @@ export class PlayerImpl implements Player {
   }
 
   private canDonateTo(recipient: Player): boolean {
+    const recipientID = recipient.id();
     return (
-      recipient.id() !== this.id() &&
+      recipientID !== this.id() &&
+      this.mg.hasPlayer(recipientID) &&
+      this.mg.player(recipientID) === recipient &&
       this.isAlive() &&
       !this.isDisconnected() &&
       recipient.isAlive() &&
