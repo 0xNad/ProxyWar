@@ -10,6 +10,10 @@ const production = readFileSync(
   ".github/workflows/coworld-production.yml",
   "utf8",
 );
+const commissionerProduction = readFileSync(
+  ".github/workflows/coworld-commissioner-production.yml",
+  "utf8",
+);
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
 const vite = readFileSync("vite.config.ts", "utf8");
@@ -82,6 +86,106 @@ test("production secrets are isolated to a protected main environment job", () =
   assert.match(
     production,
     /test "\$SOURCE_SHA" = "\$\(gh api repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/,
+  );
+});
+
+test("commissioner migration is an operator-only exact-source protected production dispatch", () => {
+  assert.match(commissionerProduction, /workflow_dispatch:/);
+  assert.match(commissionerProduction, /source_sha:\n\s+description:/);
+  assert.match(commissionerProduction, /required: true/);
+  assert.doesNotMatch(
+    commissionerProduction,
+    /pull_request:|pull_request_target:|schedule:/,
+  );
+  assert.match(commissionerProduction, /test "\$GITHUB_ACTOR" = "0xNad"/);
+  assert.match(
+    commissionerProduction,
+    /CONTROL_SHA=\$\(gh api repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/,
+  );
+  assert.match(
+    commissionerProduction,
+    /compare\/\$SOURCE_SHA\.\.\.\$CONTROL_SHA/,
+  );
+  assert.match(commissionerProduction, /case "\$RELATION" in ahead\|identical/);
+  assert.match(
+    commissionerProduction,
+    /test "\$\(git rev-parse HEAD\)" = "\$CONTROL_SHA"/,
+  );
+  assert.match(
+    commissionerProduction,
+    /environment:\n\s+name: coworld-production/,
+  );
+  assert.match(commissionerProduction, /group: proxywar-coworld-production/);
+  assert.match(commissionerProduction, /cancel-in-progress: false/);
+  assert.deepEqual(
+    [...commissionerProduction.matchAll(/secrets\.([A-Z0-9_]+)/g)].map(
+      (match) => match[1],
+    ),
+    [
+      "COWORLD_API_TOKEN",
+      "COWORLD_API_TOKEN",
+      "COWORLD_API_TOKEN",
+      "COWORLD_API_TOKEN",
+    ],
+  );
+});
+
+test("commissioner migration consumes an exact certified release and rechecks every mutation gate", () => {
+  assert.match(commissionerProduction, /resolve-ci "\$SOURCE_SHA"/);
+  assert.match(commissionerProduction, /resolve-release-run "\$SOURCE_SHA"/);
+  assert.match(
+    commissionerProduction,
+    /resolve-release-artifact "\$SOURCE_SHA"/,
+  );
+  assert.match(
+    commissionerProduction,
+    /actions\/artifacts\/\$RELEASE_ARTIFACT_ID\/zip/,
+  );
+  assert.match(
+    commissionerProduction,
+    /sha256sum --check coworld-release\.sha256/,
+  );
+  assert.match(commissionerProduction, /unsafe release artifact member/);
+  assert.match(commissionerProduction, /unsafe release archive member/);
+  assert.match(commissionerProduction, /validate-artifact/);
+  assert.match(commissionerProduction, /validate-image/);
+  assert.match(commissionerProduction, /linux-amd64 commissioner image/);
+  assert.match(
+    commissionerProduction,
+    /resolve-ci "\$SOURCE_SHA" "\$RUNNER_TEMP\/ci-runs-recheck\.json"/,
+  );
+  assert.match(
+    commissionerProduction,
+    /releaseArtifactId.*RELEASE_ARTIFACT_ID/,
+  );
+  assert.match(commissionerProduction, /validate-source "\$SOURCE_SHA"/);
+  assert.match(commissionerProduction, /next-version "\$COWORLD_NAME"/);
+});
+
+test("commissioner mutation is narrow, guarded, certified, canonical, bound, and durably recorded", () => {
+  assert.match(
+    commissionerProduction,
+    /patch-commissioner "\$COWORLD_NAME" "\$LOCAL_COMMISSIONER_IMAGE" \\\n+\s+--runnable-id "\$COMMISSIONER_RUNNABLE_ID" --version "\$PATCH_VERSION"/,
+  );
+  assert.match(commissionerProduction, /coworld-docker-guard\.mjs/);
+  assert.match(commissionerProduction, /docker" run --rm invalid-image/);
+  assert.match(commissionerProduction, /test "\$\?" -eq 126/);
+  assert.match(commissionerProduction, /certification-state/);
+  assert.match(commissionerProduction, /test "\$STATE" != failed/);
+  assert.match(commissionerProduction, /commissioner_migration_version/);
+  assert.match(commissionerProduction, /validate-final/);
+  assert.match(
+    commissionerProduction,
+    /coworld-commissioner-migration-evidence\.json/,
+  );
+  assert.match(commissionerProduction, /state=success/);
+  assert.match(commissionerProduction, /state=failure/);
+  assert.match(commissionerProduction, /migration-finalizer:/);
+  assert.doesNotMatch(commissionerProduction, /set -x/);
+  assert.doesNotMatch(commissionerProduction, /echo.*COWORLD_API_TOKEN/);
+  assert.doesNotMatch(
+    commissionerProduction,
+    /upload-artifact[\s\S]{0,500}(credentials|\.softmax|COWORLD_API_TOKEN)/i,
   );
 });
 

@@ -161,6 +161,43 @@ test("keeps the fail-closed Docker guard connected during an exact upload", () =
   });
 });
 
+test("runs only the exact commissioner patch with the fail-closed Docker guard", () => {
+  withFakeRuntime(({ env, capture, dockerCapture }) => {
+    const image = "proxywar-commissioner-local:coworld-0123456789ab";
+    const result = spawnSync(
+      process.execPath,
+      [
+        wrapper,
+        "patch-commissioner",
+        "proxywar",
+        image,
+        "--runnable-id",
+        "proxywar-ladder-commissioner",
+        "--version",
+        "0.1.63",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...env,
+          COWORLD_REAL_DOCKER: "/usr/bin/docker",
+          DOCKER_HOST: "unix:///fixture/docker.sock",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      /^coworld\|patch-commissioner proxywar proxywar-commissioner-local:coworld-0123456789ab --runnable-id proxywar-ladder-commissioner --version 0\.1\.63\|.+\|$/,
+    );
+    assert.equal(
+      fs.readFileSync(dockerCapture, "utf8"),
+      "docker|/usr/bin/docker|unix:///fixture/docker.sock|\n",
+    );
+  });
+});
+
 test("rejects symlinked and missing XP create bodies before authentication", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const body = path.join(root, "request.json");
@@ -400,6 +437,33 @@ test("rejects unsupported and malformed command modes before authentication", ()
     ["replay-open", "ereq_fixture", "--no-open-browser", "--hosted"],
     ["list", "--json", "extra"],
     ["next-version", "bad name"],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "malicious.invalid/image:latest",
+      "--runnable-id",
+      "proxywar-ladder-commissioner",
+      "--version",
+      "0.1.63",
+    ],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "proxywar-commissioner-local:coworld-0123456789ab",
+      "--runnable-id",
+      "other-runnable",
+      "--version",
+      "0.1.63",
+    ],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "proxywar-commissioner-local:coworld-0123456789ab",
+      "--runnable-id",
+      "proxywar-ladder-commissioner",
+      "--version",
+      "latest",
+    ],
     ["commander-xp-run-episode", "/etc/outside.json"],
     ["commander-xp-certify", "/etc/outside.json"],
     ["upload-coworld", "/etc/outside.json"],
