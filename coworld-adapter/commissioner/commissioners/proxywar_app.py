@@ -1,90 +1,110 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from math import floor, isfinite
+from pathlib import Path
+from typing import Any
 
 from commissioners.common.app import commissioner_app, run
 from commissioners.common.commissioners import register_commissioner
 from commissioners.common.protocol import CommissionerRoundReport
-from commissioners.common.protocol import EpisodeFailed as CommissionerProtocolEpisodeFailed
-from commissioners.common.protocol import EpisodeRequest as CommissionerProtocolEpisodeRequest
-from commissioners.common.protocol import EpisodeResult as CommissionerProtocolEpisodeResult
+from commissioners.common.protocol import (
+    EpisodeFailed as CommissionerProtocolEpisodeFailed,
+)
+from commissioners.common.protocol import (
+    EpisodeRequest as CommissionerProtocolEpisodeRequest,
+)
+from commissioners.common.protocol import (
+    EpisodeResult as CommissionerProtocolEpisodeResult,
+)
 from commissioners.common.protocol import RoundComplete as CommissionerRoundComplete
 from commissioners.common.protocol import RoundStart as CommissionerRoundStart
-from commissioners.common.protocol import ScheduleEpisodes as CommissionerScheduleEpisodes
-from commissioners.common.ruleset_strategy.commissioner import RulesetStrategyCommissioner
+from commissioners.common.protocol import (
+    ScheduleEpisodes as CommissionerScheduleEpisodes,
+)
+from commissioners.common.ruleset_strategy.commissioner import (
+    RulesetStrategyCommissioner,
+)
 from commissioners.common.ruleset_strategy.entrants import select_rule
 from commissioners.common.ruleset_strategy.round_start import RoundStartView
 from commissioners.common.ruleset_strategy.scheduling import schedule_entries
 
-# Declared once here and in the manifest's variants[] -- each id must exist there, and each
-# entry's game_config.num_agents must equal the seat count declared for it below.
-# Each rung declares a MAP POOL (variant ids differing only by map); rounds rotate
-# through the pool by round_number so a season sweeps every map deterministically.
-# Pool order matters: index 0 is the most battle-tested map (Pangaea) so round 1 of
-# any fresh league lands on proven config.
-COMPETITION_LADDER: list[tuple[int, list[str]]] = [
-    (2, ["tournament-2p-pangaea", "tournament-2p-asia"]),
-    (4, ["tournament-4p-pangaea", "tournament-4p-asia", "tournament-4p-europe"]),
-    (8, ["tournament-8p-pangaea", "tournament-8p-world", "tournament-8p-asia"]),
-    (
-        12,
-        [
-            # Battle-tested first (fresh-league round 1 lands on index 0); the
-            # 2026-08-02 additions are ordered by hosted confidence and were
-            # each qualified through the memory-regression gate (80-step native
-            # 12P episode under the hosted heap posture) before shipping.
-            "tournament-12p-pangaea",
-            "tournament-12p-asia",
-            "tournament-12p-blacksea",
-            "tournament-12p-eastasia",
-            "tournament-12p-oceania",
-            # tournament-12p-europe remains a declared manual variant, but is
-            # quarantined from automatic Competition scheduling. The missing
-            # pre-promotion wall-clock gate recurred in live rounds 1323 and
-            # 1332: 10 Europe episodes timed out before results/replay across
-            # 0.1.24 and 0.1.26. Re-add only after a full hosted deadline proof.
-            #
-            # tournament-12p-{world,britannia,northamerica} are likewise
-            # declared manual variants quarantined 2026-08-11 (operator-
-            # directed) for round wall-time: engine cost per 100-turn decision
-            # cycle scales with land tiles, so these continental maps run
-            # multi-hour rounds (12P NorthAmerica rounds hit 171-324 min).
-            # Re-add per map after engine work plus a full-length hosted probe
-            # on that map lands well inside the 100-min artifact deadline.
-        ],
-    ),
-    (
-        16,
-        [
-            # Added 2026-08-10 for whole-company league events
-            # (operator-directed, requested by the platform team): denser games
-            # and fewer episodes per round at 16+ entrants. Pool widened to the
-            # proven 12P rotation on 2026-08-11 (operator-directed) after
-            # per-map 16-seat boot proofs plus full-length 16-seat games on
-            # Pangaea and World bracketing the map-size spectrum. Europe stays
-            # excluded while its 12P hosted-deadline quarantine stands.
-            # Reverting the league to 12-seat rounds is a commissioner-only
-            # patch that removes this entry; individual maps can be pulled from
-            # this pool the same way.
-            "tournament-16p-pangaea",
-            "tournament-16p-asia",
-            "tournament-16p-blacksea",
-            "tournament-16p-eastasia",
-            "tournament-16p-oceania",
-            # tournament-16p-{world,britannia,northamerica} remain declared
-            # manual variants but are quarantined 2026-08-11 (operator-
-            # directed) for round wall-time. Engine cost per 100-turn decision
-            # cycle scales with land tiles (~15s/cycle on NorthAmerica's 1.24M
-            # land tiles vs ~5s on Oceania's 195k), so these maps ran 62/45/40
-            # min average episodes and 126-187 min rounds vs 36-52 min on the
-            # compact maps; NorthAmerica also produced the rung's only
-            # episode_timeout kills (100 min burned, no scores). Re-add per
-            # map after engine work plus a full-length hosted 16-seat probe on
-            # that map lands well inside the 100-min artifact deadline.
-        ],
-    ),
-]
+MAP_ROTATION_CONTRACT_PATH = (
+    Path(__file__).resolve().parent
+    / "ruleset_strategy_commissioner"
+    / "configs"
+    / "proxywar-map-rotation.json"
+)
+_VARIANT_CONFIG_FIELDS = {
+    "map": "map",
+    "mapSize": "map_size",
+    "maxDecisionSteps": "max_decision_steps",
+    "turnsPerDecisionStep": "turns_per_decision_step",
+    "episodeTimeoutSeconds": "episode_timeout_seconds",
+}
+
+
+def _load_map_rotation_contract() -> tuple[
+    list[tuple[int, list[str]]], dict[str, dict[str, Any]]
+]:
+    """Load the release-pinned map pool and reject malformed scheduler authority.
+
+    The JSON file is copied into the commissioner image and independently checked
+    against the Coworld manifest by the release gate. Keeping the pool outside
+    executable code lets release review compare the scheduler, manifest, and
+    post-release monitoring expectations as one bounded contract.
+    """
+
+    payload = json.loads(MAP_ROTATION_CONTRACT_PATH.read_text())
+    if payload.get("schemaVersion") != 1:
+        raise ValueError("map rotation contract must use schemaVersion 1")
+    rungs = payload.get("competitionRungs")
+    if not isinstance(rungs, list) or not rungs:
+        raise ValueError("map rotation contract must declare competitionRungs")
+
+    ladder: list[tuple[int, list[str]]] = []
+    variants_by_id: dict[str, dict[str, Any]] = {}
+    previous_seats = 0
+    for rung in rungs:
+        if not isinstance(rung, dict) or set(rung) != {"seats", "variants"}:
+            raise ValueError("each map rotation rung must contain seats and variants")
+        seats = rung["seats"]
+        variants = rung["variants"]
+        if not isinstance(seats, int) or seats <= previous_seats:
+            raise ValueError("map rotation seat counts must be strictly increasing")
+        if not isinstance(variants, list) or not variants:
+            raise ValueError(f"map rotation rung {seats} must contain variants")
+        previous_seats = seats
+        ids: list[str] = []
+        for variant in variants:
+            expected_keys = {"id", *_VARIANT_CONFIG_FIELDS}
+            if not isinstance(variant, dict) or set(variant) != expected_keys:
+                raise ValueError(
+                    f"map rotation rung {seats} contains a malformed variant"
+                )
+            variant_id = variant["id"]
+            if (
+                not isinstance(variant_id, str)
+                or variant_id in variants_by_id
+                or not variant_id.startswith(f"tournament-{seats}p-")
+            ):
+                raise ValueError(f"invalid map rotation variant id: {variant_id!r}")
+            if not isinstance(variant["map"], str) or not variant["map"]:
+                raise ValueError(f"invalid map for {variant_id}")
+            variants_by_id[variant_id] = {"seats": seats, **variant}
+            ids.append(variant_id)
+        ladder.append((seats, ids))
+    return ladder, variants_by_id
+
+
+# Pool order is release authority: index 0 is the most battle-tested map, and
+# round N deterministically selects index (N - 1) modulo pool length. The 12p
+# and 16p rungs intentionally share the same conservative five-map comparison
+# pool: Pangaea, Asia, Black Sea, East Asia, and Oceania. Europe and the large
+# continental maps remain declared manual variants but quarantined from
+# automatic scheduling for their recorded hosted artifact-deadline failures.
+COMPETITION_LADDER, COMPETITION_VARIANTS = _load_map_rotation_contract()
 
 # This is the source-side counterpart of the live league's
 # settings.ladder.fulfillment.allowed_failures=0.05 contract. The platform does
@@ -278,9 +298,8 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
 
         rule = select_rule(config, view.current_division, view.memberships)
         entries = view.entries(rule)
-        available_variant_ids = {variant.id for variant in round_start.variants}
         variant_id, num_agents, variant_round_occurrence_index = self._fit_ladder_rung(
-            len(entries), available_variant_ids, round_number
+            len(entries), round_start.variants, round_number
         )
         pool = view.pool(rule)
         pool_config = dict(pool.config)
@@ -350,13 +369,48 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         )
 
     def _fit_ladder_rung(
-        self, champion_count: int, available_variant_ids: set[str], round_number: int
+        self,
+        champion_count: int,
+        available_variants: list[Any],
+        round_number: int,
     ) -> tuple[str, int, int]:
-        ladder = [
-            (seats, pool)
-            for seats, variant_pool in COMPETITION_LADDER
-            if (pool := [v for v in variant_pool if v in available_variant_ids])
-        ]
+        variants_by_id = {variant.id: variant for variant in available_variants}
+        if len(variants_by_id) != len(available_variants):
+            raise ValueError("round start contains duplicate variant ids")
+
+        ladder: list[tuple[int, list[str]]] = []
+        for seats, pool in COMPETITION_LADDER:
+            present = [
+                variant_id for variant_id in pool if variant_id in variants_by_id
+            ]
+            if not present:
+                # Whole-rung absence is supported for package/commissioner
+                # rollout compatibility. A partly declared rung is not: it
+                # silently changes modulo rotation and comparison coverage.
+                continue
+            if present != pool:
+                missing = [
+                    variant_id
+                    for variant_id in pool
+                    if variant_id not in variants_by_id
+                ]
+                raise ValueError(
+                    f"competition rung {seats} is incomplete; missing {missing}"
+                )
+            for variant_id in pool:
+                expected = COMPETITION_VARIANTS[variant_id]
+                game_config = variants_by_id[variant_id].game_config
+                if game_config.get("num_agents") != seats:
+                    raise ValueError(
+                        f"{variant_id} num_agents does not match {seats}-seat rung"
+                    )
+                for contract_field, game_config_field in _VARIANT_CONFIG_FIELDS.items():
+                    if game_config.get(game_config_field) != expected[contract_field]:
+                        raise ValueError(
+                            f"{variant_id} {game_config_field} does not match "
+                            "the release map contract"
+                        )
+            ladder.append((seats, pool))
         if not ladder:
             raise ValueError(
                 "none of the configured competition ladder variants "

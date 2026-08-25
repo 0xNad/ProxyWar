@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 from uuid import UUID
@@ -15,10 +16,10 @@ os.environ.setdefault("RULESET_STRATEGY_CONFIG_NAME", "proxywar")
 
 from commissioners.common.adapters import schedule_rounds_for_request
 from commissioners.common.protocol import (
-    DivisionInfo,
     EPISODE_SEED_MAX,
-    EpisodeResult,
+    DivisionInfo,
     EpisodeRequest,
+    EpisodeResult,
     EpisodeScore,
     LeagueInfo,
     MembershipInfo,
@@ -26,16 +27,16 @@ from commissioners.common.protocol import (
     ScheduleRoundsRequest,
     VariantInfo,
 )
+from commissioners.common.ruleset_strategy import scheduling as ruleset_scheduling
+from commissioners.common.ruleset_strategy.config import (
+    RulesetStrategyCommissionerConfig,
+)
 from commissioners.common.server import (
     _close_reason,
     _send_episode_batch,
     create_app,
 )
-from commissioners.common.ruleset_strategy.config import (
-    RulesetStrategyCommissionerConfig,
-)
-from commissioners.common.ruleset_strategy import scheduling as ruleset_scheduling
-from commissioners.proxywar_app import ProxyWarCommissioner
+from commissioners.proxywar_app import COMPETITION_LADDER, ProxyWarCommissioner
 
 CONFIG_PATH = (
     Path(__file__).parents[1]
@@ -44,12 +45,34 @@ CONFIG_PATH = (
     / "configs"
     / "proxywar.yaml"
 )
+MANIFEST_PATH = Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
 LEAGUE_ID = UUID("00000000-0000-0000-0000-000000000001")
 DIVISION_ID = UUID("00000000-0000-0000-0000-000000000002")
 QUALIFIER_POLICY_ID = UUID("00000000-0000-0000-0003-000000000001")
 
 
 QUALIFIER_DIVISION_ID = UUID("00000000-0000-0000-0000-000000000009")
+
+
+def _competition_variants(*seat_counts: int) -> list[VariantInfo]:
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    manifest_by_id = {variant["id"]: variant for variant in manifest["variants"]}
+    wanted = {
+        variant_id
+        for seats, pool in COMPETITION_LADDER
+        if seats in seat_counts
+        for variant_id in pool
+    }
+    return [
+        VariantInfo(
+            id=variant_id,
+            name=manifest_by_id[variant_id]["name"],
+            game_config=manifest_by_id[variant_id]["game_config"],
+        )
+        for _seats, pool in COMPETITION_LADDER
+        for variant_id in pool
+        if variant_id in wanted
+    ]
 
 
 def qualifier_round_start(entrant_count: int = 1) -> RoundStart:
@@ -126,16 +149,7 @@ def competition_round_start(champion_count: int) -> RoundStart:
             for index, policy_id in enumerate(policy_ids)
         ],
         recent_results=[],
-        variants=[
-            VariantInfo(
-                id="tournament-12p-pangaea",
-                name="12-player Pangaea",
-                game_config={
-                    "num_agents": 12,
-                    "episode_timeout_seconds": 3600,
-                },
-            )
-        ],
+        variants=_competition_variants(12),
         state={
             "round_config": {
                 "current_division_id": str(DIVISION_ID),
@@ -348,14 +362,7 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
     champion_count: int,
 ) -> None:
     round_start = competition_round_start(champion_count)
-    round_start.variants = [
-        VariantInfo(
-            id=f"tournament-{seat_count}p-pangaea",
-            name=f"{seat_count}-player Pangaea",
-            game_config={"num_agents": seat_count},
-        )
-        for seat_count in (2, 4, 8, 12, 16)
-    ]
+    round_start.variants = _competition_variants(2, 4, 8, 12, 16)
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
@@ -373,18 +380,7 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
 def _sixteen_rung_variants() -> list[VariantInfo]:
     # The variant list a live RoundStart carries once the package declares the
     # 16-seat variant alongside the 12-seat pool.
-    return [
-        VariantInfo(
-            id="tournament-12p-pangaea",
-            name="12-player Pangaea",
-            game_config={"num_agents": 12, "episode_timeout_seconds": 3600},
-        ),
-        VariantInfo(
-            id="tournament-16p-pangaea",
-            name="16-player Pangaea",
-            game_config={"num_agents": 16, "episode_timeout_seconds": 4500},
-        ),
-    ]
+    return _competition_variants(12, 16)
 
 
 def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant() -> (
@@ -392,6 +388,7 @@ def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant
 ):
     round_start = competition_round_start(25)
     round_start.variants = _sixteen_rung_variants()
+    round_start.round_number = 1
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
@@ -487,6 +484,7 @@ def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
     # (seats <= champions), producing the 4-episode floor of full-field games.
     round_start = competition_round_start(16)
     round_start.variants = _sixteen_rung_variants()
+    round_start.round_number = 1
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
@@ -499,6 +497,7 @@ def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
 def test_fifteen_champion_field_stays_on_twelve_seats() -> None:
     round_start = competition_round_start(15)
     round_start.variants = _sixteen_rung_variants()
+    round_start.round_number = 1
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
@@ -514,6 +513,7 @@ def test_sixteen_rung_without_manifest_variant_falls_back_to_twelve_seats() -> N
     # 12-seat rounds (the rung filters to available variants), so the
     # commissioner and package can ship in either order.
     round_start = competition_round_start(25)
+    round_start.round_number = 1
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
@@ -568,7 +568,7 @@ def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
     # hosted round failure, not a local error, without it).
     import json
 
-    from commissioners.proxywar_app import COMPETITION_LADDER
+    from commissioners.proxywar_app import COMPETITION_LADDER, COMPETITION_VARIANTS
 
     manifest_path = Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -580,7 +580,71 @@ def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
                 f"which is not in the manifest"
             )
             variant = next(v for v in manifest["variants"] if v["id"] == variant_id)
-            assert variant["game_config"]["num_agents"] == seat_count
+            config = variant["game_config"]
+            expected = COMPETITION_VARIANTS[variant_id]
+            assert config["num_agents"] == seat_count
+            assert config["map"] == expected["map"]
+            assert config["map_size"] == expected["mapSize"]
+            assert config["max_decision_steps"] == expected["maxDecisionSteps"]
+            assert config["turns_per_decision_step"] == expected["turnsPerDecisionStep"]
+            assert (
+                config["episode_timeout_seconds"] == expected["episodeTimeoutSeconds"]
+            )
+
+
+def test_competition_scheduler_rejects_a_supported_variant_with_wrong_map() -> None:
+    round_start = competition_round_start(25)
+    round_start.variants = _competition_variants(12, 16)
+    for index, variant in enumerate(round_start.variants):
+        if variant.id == "tournament-16p-asia":
+            round_start.variants[index] = variant.model_copy(
+                update={"game_config": {**variant.game_config, "map": "Europe"}}
+            )
+            break
+    else:  # pragma: no cover - fixture corruption guard
+        raise AssertionError("16p Asia fixture missing")
+
+    with pytest.raises(ValueError, match="does not match the release map contract"):
+        commissioner().schedule_episodes_for_round_start(round_start)
+
+
+def test_competition_scheduler_rejects_a_partly_declared_map_pool() -> None:
+    round_start = competition_round_start(25)
+    round_start.variants = [
+        variant
+        for variant in _competition_variants(12, 16)
+        if variant.id != "tournament-16p-oceania"
+    ]
+
+    with pytest.raises(ValueError, match="competition rung 16 is incomplete"):
+        commissioner().schedule_episodes_for_round_start(round_start)
+
+
+def test_manual_quarantined_variant_cannot_enter_automatic_rotation() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    manual = next(
+        variant
+        for variant in manifest["variants"]
+        if variant["id"] == "tournament-16p-world"
+    )
+    round_start = competition_round_start(25)
+    round_start.variants = [
+        *_competition_variants(12, 16),
+        VariantInfo(
+            id=manual["id"],
+            name=manual["name"],
+            game_config=manual["game_config"],
+        ),
+    ]
+
+    selected: list[str] = []
+    for round_number in range(1, 11):
+        round_start.round_number = round_number
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        selected.append(scheduled.episodes[0].variant_id)
+
+    assert "tournament-16p-world" not in selected
+    assert set(selected) == set(dict(COMPETITION_LADDER)[16])
 
 
 def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
@@ -601,14 +665,7 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     )
 
     round_start = competition_round_start(12)
-    round_start.variants = [
-        VariantInfo(
-            id=variant_id,
-            name=variant_id,
-            game_config={"num_agents": 12},
-        )
-        for variant_id in pool
-    ]
+    round_start.variants = _competition_variants(12)
 
     seen: list[str] = []
     for offset in range(len(pool)):
@@ -646,14 +703,7 @@ def test_sixteen_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     )
 
     round_start = competition_round_start(25)
-    round_start.variants = [
-        VariantInfo(
-            id=variant_id,
-            name=variant_id,
-            game_config={"num_agents": 16},
-        )
-        for variant_id in pool
-    ]
+    round_start.variants = _competition_variants(16)
 
     # Round 1 anchors on pool[0]: a fresh league's first 16-seat round (and
     # the certifier's) lands on the most battle-tested map, not a phase shift.
@@ -769,19 +819,10 @@ def test_competition_ladder_twelve_p_ids_are_unique() -> None:
 
 
 def _with_full_ladder(round_start: RoundStart) -> RoundStart:
-    # `competition_round_start` only declares a single 12p variant by
-    # default (matching the champion-field-heavy fixtures above); these
-    # episodeIndex tests use a small 4-champion field, so the full declared
-    # ladder (2/4/8/12) must be present for `_fit_ladder_rung` to route to
-    # a rung the field can actually fill.
-    round_start.variants = [
-        VariantInfo(
-            id=f"tournament-{seat_count}p-pangaea",
-            name=f"{seat_count}-player Pangaea",
-            game_config={"num_agents": seat_count},
-        )
-        for seat_count in (2, 4, 8, 12)
-    ]
+    # These episodeIndex tests use a small 4-champion field, so the full
+    # declared ladder must be present for `_fit_ladder_rung` to route to a
+    # rung the field can actually fill.
+    round_start.variants = _competition_variants(2, 4, 8, 12)
     return round_start
 
 
@@ -834,18 +875,7 @@ def test_spawn_priority_indices_are_consecutive_within_a_round(path: str) -> Non
 
 def test_episode_index_advances_when_the_same_map_recurs() -> None:
     round_start = competition_round_start(4)
-    round_start.variants = [
-        VariantInfo(
-            id=variant_id,
-            name=variant_id,
-            game_config={"num_agents": 4},
-        )
-        for variant_id in (
-            "tournament-4p-pangaea",
-            "tournament-4p-asia",
-            "tournament-4p-europe",
-        )
-    ]
+    round_start.variants = _competition_variants(4)
 
     # The four-player rung has three maps. Round 1 and round 4 therefore use
     # the same variant, with occurrence indices 0 and 1 respectively.
@@ -877,14 +907,7 @@ def test_same_variant_indices_balance_username_priority_for_fixed_16p_roster(
 
     pool = dict(COMPETITION_LADDER)[16]
     round_start = competition_round_start(16)
-    round_start.variants = [
-        VariantInfo(
-            id=variant_id,
-            name=variant_id,
-            game_config={"num_agents": 16},
-        )
-        for variant_id in pool
-    ]
+    round_start.variants = _competition_variants(16)
     monkeypatch.setattr(ruleset_scheduling, "_round_shuffle_seed", lambda: 1234)
 
     # AgentSpawnSelection.buildAgentSpawnPriority code-unit sorts usernames,

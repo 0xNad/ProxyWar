@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "comparisonPoolSeatCounts": [12, 16],
+  "competitionRungs": [
+    {
+      "seats": 2,
+      "variants": [
+        {
+          "id": "tournament-2p-pangaea",
+          "map": "Pangaea",
+          "mapSize": "Compact",
+          "maxDecisionSteps": 300,
+          "turnsPerDecisionStep": 25,
+          "episodeTimeoutSeconds": 1200
+        },
+        {
+          "id": "tournament-2p-asia",
+          "map": "Asia",
+          "mapSize": "Compact",
+          "maxDecisionSteps": 300,
+          "turnsPerDecisionStep": 25,
+          "episodeTimeoutSeconds": 1200
+        }
+      ]
+    },
+    {
+      "seats": 4,
+      "variants": [
+        {
+          "id": "tournament-4p-pangaea",
+          "map": "Pangaea",
+          "mapSize": "Compact",
+          "maxDecisionSteps": 300,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 2400
+        },
+        {
+          "id": "tournament-4p-asia",
+          "map": "Asia",
+          "mapSize": "Compact",
+          "maxDecisionSteps": 300,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 2400
+        },
+        {
+          "id": "tournament-4p-europe",
+          "map": "Europe",
+          "mapSize": "Compact",
+          "maxDecisionSteps": 300,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 2400
+        }
+      ]
+    },
+    {
+      "seats": 8,
+      "variants": [
+        {
+          "id": "tournament-8p-pangaea",
+          "map": "Pangaea",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 400,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3000
+        },
+        {
+          "id": "tournament-8p-world",
+          "map": "World",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 400,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3000
+        },
+        {
+          "id": "tournament-8p-asia",
+          "map": "Asia",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 400,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3000
+        }
+      ]
+    },
+    {
+      "seats": 12,
+      "variants": [
+        {
+          "id": "tournament-12p-pangaea",
+          "map": "Pangaea",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3600
+        },
+        {
+          "id": "tournament-12p-asia",
+          "map": "Asia",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3600
+        },
+        {
+          "id": "tournament-12p-blacksea",
+          "map": "BlackSea",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3600
+        },
+        {
+          "id": "tournament-12p-eastasia",
+          "map": "EastAsia",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3600
+        },
+        {
+          "id": "tournament-12p-oceania",
+          "map": "Oceania",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 3600
+        }
+      ]
+    },
+    {
+      "seats": 16,
+      "variants": [
+        {
+          "id": "tournament-16p-pangaea",
+          "map": "Pangaea",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 4500
+        },
+        {
+          "id": "tournament-16p-asia",
+          "map": "Asia",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 4500
+        },
+        {
+          "id": "tournament-16p-blacksea",
+          "map": "BlackSea",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 4500
+        },
+        {
+          "id": "tournament-16p-eastasia",
+          "map": "EastAsia",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 4500
+        },
+        {
+          "id": "tournament-16p-oceania",
+          "map": "Oceania",
+          "mapSize": "Normal",
+          "maxDecisionSteps": 500,
+          "turnsPerDecisionStep": 100,
+          "episodeTimeoutSeconds": 4500
+        }
+      ]
+    }
+  ],
+  "postReleaseMonitoring": {
+    "minimumTerminalRoundsPerMap": 1,
+    "minimumCompletionRate": 0.95,
+    "minimumScoreBearingCoverage": 1,
+    "minimumSpawnValidityCoverage": 1,
+    "minimumTelemetryCoverage": 1,
+    "minimumReplayIntegrityCoverage": 1,
+    "minimumArtifactIntegrityCoverage": 1,
+    "warnAtEpisodeTimeoutFraction": 0.8
+  }
+}

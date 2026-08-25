@@ -3,20 +3,28 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 import {
+  assertMapResourceFixtures,
+  assertMapRotationContract,
   assertTemplateRebuildsReplayViewer,
   extractSourceSha,
   stampManifest,
 } from "./coworld-release-policy.mjs";
 
+const MAP_CONTRACT_PATH =
+  "coworld-adapter/commissioner/commissioners/ruleset_strategy_commissioner/configs/proxywar-map-rotation.json";
+
 const [command, path] = process.argv.slice(2);
 if (!command || !path)
   throw new Error("usage: coworld-manifest.mjs verify-template|stamp <path>");
 const manifest = JSON.parse(readFileSync(path, "utf8"));
+const mapContract = JSON.parse(readFileSync(MAP_CONTRACT_PATH, "utf8"));
+const mapSummary = assertMapRotationContract(manifest, mapContract);
+assertMapResourceFixtures(mapSummary);
 
 if (command === "verify-template") {
   assertTemplateRebuildsReplayViewer(manifest);
   process.stdout.write(
-    "Coworld template uses the canonical replay-viewer build hook.\n",
+    `Coworld template uses the canonical replay-viewer build hook and ${mapSummary.scheduledVariantIds.length} release-pinned map variants.\n`,
   );
 } else if (command === "stamp") {
   const sourceSha = process.env.SOURCE_SHA;

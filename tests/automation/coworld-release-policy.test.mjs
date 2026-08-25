@@ -10,6 +10,8 @@ import {
   validateBatchSnapshot,
 } from "../../.github/scripts/coworld-queue.mjs";
 import {
+  assertMapResourceFixtures,
+  assertMapRotationContract,
   assertTemplateRebuildsReplayViewer,
   certificationGate,
   createReleaseRecord,
@@ -36,6 +38,18 @@ const template = {
     },
   },
 };
+const releaseManifest = JSON.parse(
+  readFileSync(
+    "coworld-adapter/coworld/coworld_manifest_template.json",
+    "utf8",
+  ),
+);
+const mapContract = JSON.parse(
+  readFileSync(
+    "coworld-adapter/commissioner/commissioners/ruleset_strategy_commissioner/configs/proxywar-map-rotation.json",
+    "utf8",
+  ),
+);
 
 test("every release template requires the canonical replay-viewer rebuild hook", () => {
   assert.equal(assertTemplateRebuildsReplayViewer(template), true);
@@ -43,6 +57,87 @@ test("every release template requires the canonical replay-viewer rebuild hook",
     assertTemplateRebuildsReplayViewer({
       game: { replay_viewer: { bundle: `sha256:${"b".repeat(64)}` } },
     }),
+  );
+});
+
+test("release-pinned map rotation uses only exact supported manifest variants", () => {
+  const protectedContracts = structuredClone({
+    provenance: releaseManifest.game.docs.pages.find(
+      (page) => page.id === "proxywar-release-provenance",
+    ),
+    results: releaseManifest.game.results_schema,
+    replay: releaseManifest.game.replay_viewer,
+  });
+
+  const summary = assertMapRotationContract(releaseManifest, mapContract);
+
+  assert.deepEqual(summary.comparisonMaps, [
+    "Pangaea",
+    "Asia",
+    "BlackSea",
+    "EastAsia",
+    "Oceania",
+  ]);
+  assert.equal(summary.scheduledVariantIds.length, 18);
+  assert.deepEqual(summary.scheduledMaps, [
+    "Pangaea",
+    "Asia",
+    "Europe",
+    "World",
+    "BlackSea",
+    "EastAsia",
+    "Oceania",
+  ]);
+  assert.equal(assertMapResourceFixtures(summary), true);
+  assert.deepEqual(
+    {
+      provenance: releaseManifest.game.docs.pages.find(
+        (page) => page.id === "proxywar-release-provenance",
+      ),
+      results: releaseManifest.game.results_schema,
+      replay: releaseManifest.game.replay_viewer,
+    },
+    protectedContracts,
+    "map validation must not mutate exact-source, result, or replay contracts",
+  );
+});
+
+test("map release gate fails closed on a mismatched or missing scheduled map", () => {
+  const mismatched = structuredClone(releaseManifest);
+  mismatched.variants.find(
+    (variant) => variant.id === "tournament-16p-asia",
+  ).game_config.map = "Europe";
+  assert.throws(
+    () => assertMapRotationContract(mismatched, mapContract),
+    /tournament-16p-asia map does not match map rotation contract/,
+  );
+
+  const missing = structuredClone(releaseManifest);
+  missing.variants = missing.variants.filter(
+    (variant) => variant.id !== "tournament-16p-oceania",
+  );
+  assert.throws(
+    () => assertMapRotationContract(missing, mapContract),
+    /tournament-16p-oceania is missing from manifest/,
+  );
+});
+
+test("comparison map pool order is identical across 12p and 16p", () => {
+  const bySeats = new Map(
+    mapContract.competitionRungs.map((rung) => [
+      rung.seats,
+      rung.variants.map((variant) => variant.map),
+    ]),
+  );
+  assert.deepEqual(bySeats.get(12), bySeats.get(16));
+
+  const divergent = structuredClone(mapContract);
+  divergent.competitionRungs
+    .find((rung) => rung.seats === 16)
+    .variants.reverse();
+  assert.throws(
+    () => assertMapRotationContract(releaseManifest, divergent),
+    /comparison rungs must use the same ordered map pool/,
   );
 });
 
