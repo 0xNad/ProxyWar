@@ -118,6 +118,14 @@ test("emergency league pause is operator-only, exact-source, and fail-closed", (
     emergencyLeaguePause,
     /git\/ref\/heads\/main --jq \.object\.sha/,
   );
+  assert.equal(
+    [
+      ...emergencyLeaguePause.matchAll(
+        /git\/ref\/heads\/main --jq \.object\.sha/g,
+      ),
+    ].length,
+    2,
+  );
   assert.match(emergencyLeaguePause, /head_sha==\$sha/);
   assert.match(
     emergencyLeaguePause,

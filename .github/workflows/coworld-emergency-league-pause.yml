@@ -48,9 +48,12 @@ jobs:
       - name: Pause scheduling and verify readback
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           RECEIPT_PATH: ${{ runner.temp }}/proxywar-league-pause.json
         run: |
+          set -euo pipefail
+          test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
           node --input-type=module <<'NODE'
           import fs from "node:fs";
 
