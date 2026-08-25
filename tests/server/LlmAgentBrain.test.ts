@@ -1226,7 +1226,7 @@ describe("in-house social prompt arm (PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT)", () 
     });
 
     expect(createHash("sha256").update(prompt).digest("hex")).toBe(
-      "18c1fb6970d7dcdbcef5b6b654f6b086ea1b44e5878b9e2caff95dd2b16ff4e3",
+      "115722841286b5518089e8c29b248e0b794b3f0f9288fc1bc41bc145231ba4f1",
     );
   });
 
