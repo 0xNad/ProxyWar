@@ -239,8 +239,11 @@ export class LangSelector extends LitElement {
       "token-login",
     ];
 
-    document.title = this.translateText("main.title") ?? document.title;
-
+    // Translate the shell title only when its <title> still carries the
+    // data-i18n marker. Replay/premiere routers replace that node with a
+    // route-specific title before this async hydration completes; assigning
+    // document.title unconditionally here used to overwrite that truthful
+    // match title with the generic product name.
     document.querySelectorAll("[data-i18n]").forEach((element) => {
       const key = element.getAttribute("data-i18n");
       if (key === null) return;

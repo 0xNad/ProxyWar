@@ -57,6 +57,22 @@ export const COWORLD_AGENT_RUNTIME_MODES = [
 export type CoworldAgentRuntimeMode =
   (typeof COWORLD_AGENT_RUNTIME_MODES)[number];
 
+export interface CoworldProviderEvidence {
+  callKind: "planner" | "action";
+  provider: string;
+  requestedModel: string;
+  attemptedModels: string[];
+  attemptCount: number;
+  completedAttemptCount: number;
+  failedAttemptCount: number;
+  timedOutAttemptCount: number;
+  responseModel?: string;
+  requestID?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  rawOutputPresent: boolean;
+}
+
 /**
  * Exact privacy-safe Commander execution metadata permitted across the
  * untrusted player -> game wire.  This literal is parity-tested against the
@@ -341,6 +357,131 @@ export function normalizeRuntimeMode(
   value: unknown,
 ): CoworldAgentRuntimeMode | undefined {
   return COWORLD_AGENT_RUNTIME_MODES.find((mode) => mode === value);
+}
+
+/**
+ * Strict, bounded policy-self-attestation for an actual model/provider call.
+ * A websocket response is not itself provider evidence: deterministic policies
+ * such as Mito must remain zero-call/zero-cost unless they send this envelope.
+ */
+export function normalizeProviderEvidence(
+  value: unknown,
+): CoworldProviderEvidence | null {
+  if (!isRecord(value)) return null;
+  const allowed = [
+    "callKind",
+    "provider",
+    "requestedModel",
+    "attemptedModels",
+    "attemptCount",
+    "completedAttemptCount",
+    "failedAttemptCount",
+    "timedOutAttemptCount",
+    "responseModel",
+    "requestID",
+    "inputTokens",
+    "outputTokens",
+    "rawOutputPresent",
+  ];
+  if (!Object.keys(value).every((key) => allowed.includes(key))) return null;
+  const boundedLabel = (input: unknown, max: number): string | undefined =>
+    typeof input === "string" &&
+    input.length > 0 &&
+    input.length <= max &&
+    /^[A-Za-z0-9._:/-]+$/.test(input)
+      ? input
+      : undefined;
+  const tokenCount = (input: unknown): number | undefined =>
+    typeof input === "number" &&
+    Number.isSafeInteger(input) &&
+    input >= 0 &&
+    input <= 1_000_000_000
+      ? input
+      : undefined;
+  const attemptCount = (input: unknown): number | undefined =>
+    typeof input === "number" &&
+    Number.isSafeInteger(input) &&
+    input >= 0 &&
+    input <= 8
+      ? input
+      : undefined;
+  const provider = boundedLabel(value.provider, 64);
+  const requestedModel = boundedLabel(value.requestedModel, 160);
+  const callKind =
+    value.callKind === "planner" || value.callKind === "action"
+      ? value.callKind
+      : undefined;
+  const attempts = attemptCount(value.attemptCount);
+  const completedAttempts = attemptCount(value.completedAttemptCount);
+  const failedAttempts = attemptCount(value.failedAttemptCount);
+  const timedOutAttempts = attemptCount(value.timedOutAttemptCount);
+  if (
+    !Array.isArray(value.attemptedModels) ||
+    value.attemptedModels.length < 1 ||
+    value.attemptedModels.length > 8
+  ) {
+    return null;
+  }
+  const attemptedModels = value.attemptedModels.map((model) =>
+    boundedLabel(model, 160),
+  );
+  if (
+    callKind === undefined ||
+    provider === undefined ||
+    requestedModel === undefined ||
+    attempts === undefined ||
+    attempts < 1 ||
+    completedAttempts === undefined ||
+    failedAttempts === undefined ||
+    timedOutAttempts === undefined ||
+    completedAttempts + failedAttempts + timedOutAttempts !== attempts ||
+    attemptedModels.length !== attempts ||
+    attemptedModels.some((model) => model === undefined) ||
+    attemptedModels[0] !== requestedModel
+  ) {
+    return null;
+  }
+  const responseModel = boundedLabel(value.responseModel, 160);
+  const requestID = boundedLabel(value.requestID, 160);
+  const inputTokens = tokenCount(value.inputTokens);
+  const outputTokens = tokenCount(value.outputTokens);
+  if (
+    (value.responseModel !== undefined && responseModel === undefined) ||
+    (value.requestID !== undefined && requestID === undefined) ||
+    (value.inputTokens !== undefined && inputTokens === undefined) ||
+    (value.outputTokens !== undefined && outputTokens === undefined) ||
+    typeof value.rawOutputPresent !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    completedAttempts === 0 &&
+    (responseModel !== undefined ||
+      requestID !== undefined ||
+      inputTokens !== undefined ||
+      outputTokens !== undefined ||
+      value.rawOutputPresent)
+  ) {
+    // Response identity, usage, and raw-output presence can only come from a
+    // completed provider response. Accepting them on an all-failed/timed-out
+    // group would make an internally impossible self-attestation look valid.
+    return null;
+  }
+  return {
+    callKind,
+    provider,
+    requestedModel,
+    attemptedModels: attemptedModels as string[],
+    attemptCount: attempts,
+    completedAttemptCount: completedAttempts,
+    failedAttemptCount: failedAttempts,
+    timedOutAttemptCount: timedOutAttempts,
+    ...(responseModel !== undefined ? { responseModel } : {}),
+    ...(requestID !== undefined ? { requestID } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    rawOutputPresent: value.rawOutputPresent,
+  };
 }
 
 /**
@@ -682,7 +823,7 @@ export function normalizeDecisionResponse(
  * the league never sees.
  */
 export interface ComposedCoworldDecision extends NormalizedDecisionResponse {
-  metadata: Record<string, unknown>;
+  metadata: Record<string, string | number | boolean | null>;
 }
 
 /**
@@ -712,6 +853,9 @@ export function composeCoworldDecision(input: {
   const commanderExecution = normalizeCommanderExecutionEnvelope(
     message.commanderExecution,
   );
+  const providerEvidence = normalizeProviderEvidence(message.providerEvidence);
+  const providerEvidenceInvalid =
+    message.providerEvidence !== undefined && providerEvidence === null;
   const runtimeMode =
     commanderExecution?.metadata.runtimeMode ??
     normalizeRuntimeMode(message.runtimeMode);
@@ -719,7 +863,9 @@ export function composeCoworldDecision(input: {
     ...normalized,
     metadata: {
       brain: "coworld-websocket",
-      externalActionCall: true,
+      // Receiving a policy websocket frame is not evidence of a model call.
+      // Only a strict, bounded self-attestation can opt into provider/cost
+      // accounting; deterministic policies therefore remain zero-call.
       parseSuccess: true,
       // Degradation flags come from the player on the wire — never assume
       // health. A policy whose brain failed must show up in fallback_count
@@ -734,6 +880,11 @@ export function composeCoworldDecision(input: {
             commanderExecutionSha256: commanderExecution.metadataSha256,
             commanderSelectionSha256: commanderExecution.selectionSha256,
           }),
+      // Provider evidence is the sole call-accounting authority. Stamp these
+      // AFTER the Commander envelope so its legacy self-report cannot invent
+      // or overwrite a strict provider classification.
+      externalActionCall: providerEvidence?.callKind === "action",
+      externalPlannerCall: providerEvidence?.callKind === "planner",
       ...(message.llmPlannerDegraded === true
         ? { llmPlannerDegraded: true }
         : {}),
@@ -749,11 +900,42 @@ export function composeCoworldDecision(input: {
         : {}),
       coworldSlot: slot,
       coworldRequestID: requestID,
-      rawProviderOutputPresent: true,
-      externalRawOutput: JSON.stringify(message).slice(0, 1000),
+      rawProviderOutputPresent: providerEvidence?.rawOutputPresent === true,
+      ...(providerEvidence === null
+        ? providerEvidenceInvalid
+          ? { providerEvidenceInvalid: true }
+          : {}
+        : {
+            providerEvidenceSource: "policy-self-attested",
+            providerCallKind: providerEvidence.callKind,
+            providerName: providerEvidence.provider,
+            providerRequestedModel: providerEvidence.requestedModel,
+            providerAttemptedModels: JSON.stringify(
+              providerEvidence.attemptedModels,
+            ),
+            providerAttemptCount: providerEvidence.attemptCount,
+            providerCompletedAttemptCount:
+              providerEvidence.completedAttemptCount,
+            providerFailedAttemptCount: providerEvidence.failedAttemptCount,
+            providerTimedOutAttemptCount:
+              providerEvidence.timedOutAttemptCount,
+            ...(providerEvidence.responseModel !== undefined
+              ? { providerResponseModel: providerEvidence.responseModel }
+              : {}),
+            ...(providerEvidence.requestID !== undefined
+              ? { providerRequestID: providerEvidence.requestID }
+              : {}),
+            ...(providerEvidence.inputTokens !== undefined
+              ? { providerInputTokens: providerEvidence.inputTokens }
+              : {}),
+            ...(providerEvidence.outputTokens !== undefined
+              ? { providerOutputTokens: providerEvidence.outputTokens }
+              : {}),
+          }),
       offeredLegalActionCount,
-      confidence:
-        typeof message.confidence === "number" ? message.confidence : undefined,
+      ...(typeof message.confidence === "number"
+        ? { confidence: message.confidence }
+        : {}),
     },
   };
 }

@@ -1,7 +1,7 @@
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b
 WORKDIR /app
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
 COPY llm-player.mjs starter-player.mjs owner-capabilities.mjs ./
 ARG PROXYWAR_PROMPT_HARDENING=1
 ARG PROXYWAR_PROMPT_CACHE=0

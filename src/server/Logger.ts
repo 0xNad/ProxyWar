@@ -29,7 +29,7 @@ if (config.otelEnabled()) {
   // Initialize the OpenTelemetry Logger Provider
   const loggerProvider = new LoggerProvider({
     resource,
-    processors: [new SimpleLogRecordProcessor(logExporter)],
+    processors: [new SimpleLogRecordProcessor({ exporter: logExporter })],
   });
 
   // Set as the global logger provider

@@ -80,6 +80,33 @@ function decision(actionID: string, actionIDs?: string[]): AgentDecision {
 }
 
 describe("AgentDecisionValidator primary-slot policy", () => {
+  it("rejects a batch whose primary entry disagrees with the scalar action id", () => {
+    expect(
+      validateAgentDecisionBatch(
+        decision(hold.id, [ordinary.id, hold.id]),
+        menu,
+      ),
+    ).toEqual({
+      ok: false,
+      actions: [hold],
+      rejectedActionIDs: [hold.id, ordinary.id],
+      fallback: hold,
+      reason: `decision batch primary did not match scalar action id: ${ordinary.id} != ${hold.id}`,
+    });
+  });
+
+  it("rejects both authorities when the scalar id is absent from the batch", () => {
+    expect(
+      validateAgentDecisionBatch(decision(hold.id, [ordinary.id]), menu),
+    ).toEqual({
+      ok: false,
+      actions: [hold],
+      rejectedActionIDs: [hold.id, ordinary.id],
+      fallback: hold,
+      reason: `decision batch primary did not match scalar action id: ${ordinary.id} != ${hold.id}`,
+    });
+  });
+
   it("pins legacy scalar and batch compatibility for all four deal kinds", () => {
     for (const deal of deals) {
       expect(validateAgentDecision(decision(deal.id), menu)).toEqual({

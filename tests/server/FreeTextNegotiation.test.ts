@@ -544,6 +544,26 @@ describe("comms-slot validation", () => {
     }
   });
 
+  it.each([
+    ["U+180E MONGOLIAN VOWEL SEPARATOR", "\u180e"],
+    ["U+0600 ARABIC NUMBER SIGN", "\u0600"],
+    ["U+E0001 LANGUAGE TAG", String.fromCodePoint(0xe0001)],
+  ])("rejects non-BMP and non-bidi Unicode format control %s", (_, format) => {
+    expect(
+      validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `deal${format}now`,
+        }),
+        menu,
+      ),
+    ).toEqual({
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    });
+  });
+
   it("rejects repeated U+2065 invisible padding", () => {
     const result = validateAgentMessageDecision(
       decision({
@@ -769,6 +789,41 @@ describe("agent_message intent schema (independent wire bound)", () => {
         text: "deal?",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts a server-owned event id while keeping legacy replay intents compatible", () => {
+    expect(
+      AgentMessageIntentSchema.safeParse({
+        type: "agent_message",
+        recipient: "AB12cd34",
+        text: "deal?",
+        messageEventID: "msg_00000000-0000-4000-8000-000000000001",
+      }).success,
+    ).toBe(true);
+    expect(
+      AgentMessageIntentSchema.safeParse({
+        type: "agent_message",
+        recipient: "AB12cd34",
+        text: "legacy replay",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects malformed or non-server-shaped event ids", () => {
+    for (const messageEventID of [
+      "policy-authored-id",
+      "msg_00000000-0000-1000-8000-000000000001",
+      `msg_${"a".repeat(100)}`,
+    ]) {
+      expect(
+        AgentMessageIntentSchema.safeParse({
+          type: "agent_message",
+          recipient: "AB12cd34",
+          text: "deal?",
+          messageEventID,
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("rejects text past the cap even if an upstream bug let it through", () => {

@@ -84,13 +84,20 @@ function stubAcceptedSubmission(
   harness: ReturnType<typeof dealLeagueHarness>,
   onSubmit?: () => void,
 ): void {
+  let sequence = 0;
   for (const runner of harness.runners) {
-    runner.submitAgentMessage = () => {
+    runner.submitAgentMessage = (input) => {
       onSubmit?.();
+      sequence += 1;
       return {
         accepted: true,
         reason: "stubbed transport",
-        intent: null,
+        intent: {
+          type: "agent_message",
+          recipient: input.recipient,
+          text: input.text,
+          messageEventID: `msg_00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+        },
       };
     };
   }
@@ -128,6 +135,7 @@ describe("free-text message delivery and privacy", () => {
     const recipientInbox = inboxOf(harness.handles, 1, 1);
     expect(recipientInbox).toHaveLength(1);
     expect(recipientInbox[0]).toMatchObject({
+      messageEventID: expect.stringMatching(/^msg_/),
       senderID: "P_A",
       senderName: "Auri",
       text: "Hold the north and I will not touch you.",
@@ -169,9 +177,39 @@ describe("free-text message delivery and privacy", () => {
       .records()
       .find((record) => record.agentID === "a1");
     expect(senderRecord?.decisionMetadata).toMatchObject({
+      commsSlotMessageEventID: expect.stringMatching(/^msg_/),
       commsSlotRecipientID: "P_B",
       commsSlotText: text,
     });
+  });
+
+  it("persists one exact event id across sender record, recipient inbox, and recipient decision record", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [sendMessageTo("P_B", "One stable piece of evidence."), quiet],
+        [quiet, quiet],
+        [quiet, quiet],
+      ],
+    });
+    stubAcceptedSubmission(harness);
+
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const senderRecord = harness
+      .records()
+      .find((record) => record.agentID === A.agentID);
+    const eventID = senderRecord?.decisionMetadata?.commsSlotMessageEventID;
+    expect(eventID).toMatch(/^msg_/);
+
+    await harness.league.runDecisionTurn({ turnNumber: 25 });
+    expect(inboxOf(harness.handles, 1, 1)[0]?.messageEventID).toBe(eventID);
+    expect(inboxOf(harness.handles, 2, 1)).toHaveLength(0);
+    const recipientRecord = harness
+      .records()
+      .find(
+        (record) => record.agentID === B.agentID && record.turnNumber === 25,
+      );
+    expect(recipientRecord?.inboundMessageEventIDs).toEqual([eventID]);
   });
 
   it.each([

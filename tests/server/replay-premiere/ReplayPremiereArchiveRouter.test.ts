@@ -881,7 +881,10 @@ describe("archived durable clip route", () => {
       const payload = archivePayloadFrom(
         await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
       );
-      expect(payload.replayRunKey).toBe(expectedRunKey);
+      // A source-derived run key is not evidence that playback bytes remain.
+      // Suppress the playback promise so the client renders the durable ended
+      // presentation instead of entering the generic replay-failure flow.
+      expect(payload.replayRunKey).toBeNull();
       expect(payload.clipGenerationTarget).toBeNull();
     });
 
@@ -892,10 +895,75 @@ describe("archived durable clip route", () => {
       const payload = archivePayloadFrom(
         await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
       );
+      expect(payload.replayRunKey).toBe(expectedRunKey);
       expect(payload.clipGenerationTarget).toEqual({
         kind: "league_run",
         replayRunKey: expectedRunKey,
       });
     });
+  });
+
+  it("fails closed to durable results when retained replay resolution errors", async () => {
+    const store = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: root,
+    });
+    await store.recordReclaimed(
+      buildPremiereResultSummary({
+        premiereId: ARCHIVED_ID,
+        sourceRunId: "coworld-run-001",
+        sourceKind: "rated_coworld",
+        publicationCommitmentHash: sha256Hex(ARCHIVED_ID),
+        terminalState: "revealed",
+        revealedAt: "2026-07-20T18:00:00.000Z",
+        reclaimedAt: "2026-07-20T18:45:00.000Z",
+        outcome: {
+          winner: {
+            category: "player",
+            groupLabel: null,
+            seatIds: ["SEAT0001"],
+          },
+          turnCount: 6,
+          completedAt: "2026-07-20T18:00:00.600Z",
+          standings: [
+            { seatId: "SEAT0001", displayName: "Alpha", won: true },
+            { seatId: "SEAT0002", displayName: "Beta", won: false },
+          ],
+        },
+        predictions: [],
+        markers: [],
+      }),
+      sha256Hex(ARCHIVED_ID),
+    );
+    const app = express();
+    app.use(
+      createReplayPremiereArchiveRouter({
+        registry: { get: () => null },
+        archiveStore: store,
+        loadAppShell: async () => APP_SHELL,
+        publicOrigin: PUBLIC_ORIGIN,
+        pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+        resolveClipGenerationTarget: async () => {
+          throw new Error("retained source lookup failed");
+        },
+      }),
+    );
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    servers.push(server);
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("test server did not bind a TCP address");
+    }
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/premiere/${ARCHIVED_ID}`,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    const payload = archivePayloadFrom(body);
+    expect(payload.replayRunKey).toBeNull();
+    expect(payload.clipGenerationTarget).toBeNull();
+    expect(body).toContain("Alpha");
   });
 });

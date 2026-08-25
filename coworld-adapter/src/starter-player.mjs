@@ -405,7 +405,8 @@ const MESSAGE_OPENERS = {
 // the LLM starter's DEAL_TRUST_MIN_RELIABILITY.
 const MESSAGE_TRUST_MIN_RELIABILITY = 0.5;
 
-// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
+// Inbound messages already answered, keyed by server-owned messageEventID
+// (`${senderID}:${turnNumber}` for legacy observations), plus
 // `opener:${recipientID}` for counterparties already opened with and
 // `reply:${senderID}:${n}` for the lifetime reply budget. Module scope, so it
 // is exactly one match's memory.
@@ -444,12 +445,22 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   if (offers.length === 0) return null;
 
   // Only messages we can both attribute and key the anti-loop memory with.
-  const inbound = (obs?.nonCombat?.inboundMessages || []).filter(
+  const attributedInbound = (obs?.nonCombat?.inboundMessages || []).filter(
     (entry) => typeof entry?.senderID === "string" && entry.senderID.length > 0,
   );
-  if (inbound.length === 0) {
+  if (attributedInbound.length === 0) {
     return chooseMessageOpener(offers, obs, answered, dealMove);
   }
+  const inbound = attributedInbound.filter((entry) => {
+    const key =
+      typeof entry.messageEventID === "string"
+        ? entry.messageEventID
+        : `${entry.senderID}:${entry.turnNumber}`;
+    return !answered.has(key);
+  });
+  // There were real inbound messages, but every one is already answered.
+  // Stay silent rather than opening a second conversation.
+  if (inbound.length === 0) return null;
 
   // Newest by turn; on a tie the later inbox entry wins, since the server
   // appends newest last. No clock and no randomness: same inbox, same pick.
@@ -465,9 +476,10 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   // below is what actually ends a conversation. Deliberately NOT falling
   // through to an opener here: having just declined to repeat ourselves,
   // opening a second conversation would be chatter.
-  const key = `${senderID}:${newest.turnNumber}`;
-  if (answered.has(key)) return null;
-
+  const key =
+    typeof newest.messageEventID === "string"
+      ? newest.messageEventID
+      : `${senderID}:${newest.turnNumber}`;
   // Lifetime reply budget for this counterparty: sequential slot keys in the
   // same match-scoped memory, so no extra state and no signature change.
   let repliesSpent = 0;

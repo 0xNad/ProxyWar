@@ -1045,6 +1045,50 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(daveey?.timeSeries).toEqual({ winrate: null, score: null });
   });
 
+  test("never publishes a registered status that contradicts standing.isHouse", () => {
+    const house = agent({
+      id: "agt_auri",
+      slug: "auri",
+      displayName: "Auri",
+      shortCode: "AUR",
+      emblem: {
+        style: "geometric-svg-v1",
+        seed: "agt_auri",
+        assetPath: "resources/identity/emblems/agt_auri.svg",
+      },
+      policyMatchRule: {
+        playerName: "Auri",
+        policyFamily: "Auri Commander",
+      },
+      status: "house",
+    });
+    const mirror = baseMirror({
+      standings: [
+        {
+          rank: 1,
+          playerName: "Auri",
+          ratingPolicyLabel: null,
+          activeChampionPolicyLabel: "Auri Commander:v2",
+          policyLabel: null,
+          score: 1548.33,
+          roundsPlayed: 483,
+          isHouse: false,
+        },
+      ],
+    });
+    const model = buildProxyWarPublicReadModel(
+      mirror,
+      { builders: [], agents: [house], versions: [] },
+      featuredMatchStoreOf(),
+    );
+    const auri = model.agents.find((entry) => entry.playerName === "Auri");
+    expect(auri).toMatchObject({
+      status: "house",
+      standing: { isHouse: true },
+      activeVersion: { familyMismatch: false, publicVersionLabel: "v2" },
+    });
+  });
+
   test("timeSeries.score is populated per-player from the standings-history store, and stays null below its own 2-snapshot threshold for a player with only one", () => {
     const model = buildProxyWarPublicReadModel(
       baseMirror(),

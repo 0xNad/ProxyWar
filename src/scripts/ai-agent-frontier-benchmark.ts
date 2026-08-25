@@ -182,6 +182,11 @@ interface FrontierRunSummary {
   plannerSources: Record<string, number>;
   executorSources: Record<string, number>;
   actionSelectionSources: Record<string, number>;
+  /**
+   * Deprecated field names retained for benchmark-artifact compatibility.
+   * Values count trusted in-process provider activity records, not provider
+   * billing calls or independently verified Coworld policy activity.
+   */
   externalPlannerCallCount: number;
   externalActionCallCount: number;
   rawProviderOutputRecordCount: number;
@@ -1731,11 +1736,11 @@ function assertRequiredExternalBrainSucceeded(input: {
     return;
   }
 
-  const externalCalls =
+  const trustedProviderActivityRecords =
     input.summary.externalPlannerCallCount +
     input.summary.externalActionCallCount;
   if (
-    externalCalls > 0 &&
+    trustedProviderActivityRecords > 0 &&
     input.summary.parseFailures === 0 &&
     input.summary.fallbacks === 0 &&
     input.summary.rejectedIntentCount === 0
@@ -1761,7 +1766,7 @@ function assertRequiredExternalBrainSucceeded(input: {
   throw new Error(
     [
       `Required ${input.brainMode} run was not clean, so this is not a real external-brain benchmark.`,
-      `externalCalls=${externalCalls}`,
+      `trustedProviderActivityRecords=${trustedProviderActivityRecords}`,
       `parseFailures=${input.summary.parseFailures}`,
       `fallbacks=${input.summary.fallbacks}`,
       `rejectedIntents=${input.summary.rejectedIntentCount}`,
@@ -1813,7 +1818,7 @@ function frontierReport(input: {
     "## Per-run summaries",
     ...input.runSummaries.map(
       (summary) =>
-        `- Run ${summary.index}: ${summary.won ? "WIN" : "loss"}, profile=${summary.profile}, mode=${summary.runtimeMode}, survived=${summary.survived}, termination=${summary.termination}, winner=${summary.winner ?? "none"}, turns=${summary.turns}, tileShare=${percent(summary.tileShare)}, profileGate=${summary.profileDifferentiation.distinctEnough ? "distinct" : "review"}, profileStall=${summary.profileDifferentiation.stallRisk}, avgDecisionMs=${Math.round(summary.averageDecisionLatencyMs)}, externalPlannerCalls=${summary.externalPlannerCallCount}, externalActionCalls=${summary.externalActionCallCount}, fallbacks=${summary.fallbacks}, parseFailures=${summary.parseFailures}${summary.openFrontReplayUrl ? `, replay=${summary.openFrontReplayUrl}` : ""}.`,
+        `- Run ${summary.index}: ${summary.won ? "WIN" : "loss"}, profile=${summary.profile}, mode=${summary.runtimeMode}, survived=${summary.survived}, termination=${summary.termination}, winner=${summary.winner ?? "none"}, turns=${summary.turns}, tileShare=${percent(summary.tileShare)}, profileGate=${summary.profileDifferentiation.distinctEnough ? "distinct" : "review"}, profileStall=${summary.profileDifferentiation.stallRisk}, avgDecisionMs=${Math.round(summary.averageDecisionLatencyMs)}, trustedPlannerActivityRecords=${summary.externalPlannerCallCount}, trustedActionActivityRecords=${summary.externalActionCallCount}, fallbacks=${summary.fallbacks}, parseFailures=${summary.parseFailures}${summary.openFrontReplayUrl ? `, replay=${summary.openFrontReplayUrl}` : ""}.`,
     ),
     "",
     "## Profile differentiation metrics",
@@ -1852,8 +1857,8 @@ function frontierReport(input: {
     "- Added deterministic AgentSettings for reserves, attack triggers, expansion ratios, retreat thresholds, one-war discipline, and nation-inspired structure timing.",
     "",
     "## Cost accounting",
-    `External planner calls: ${input.cost.externalPlannerCallCount}. External action calls: ${input.cost.externalActionCallCount}. Total external calls: ${input.cost.callCount}.`,
-    `Estimated input tokens: ${input.cost.inputTokens}. Estimated output tokens: ${input.cost.outputTokens}. Estimated cost: $${input.cost.estimatedCostUsd.toFixed(4)}.`,
+    `Trusted in-process planner activity records: ${input.cost.externalPlannerCallCount}. Trusted in-process action activity records: ${input.cost.externalActionCallCount}. Total trusted activity records: ${input.cost.callCount}.`,
+    `Modeled input tokens: ${input.cost.inputTokens}. Modeled output tokens: ${input.cost.outputTokens}. Modeled cost estimate: $${input.cost.estimatedCostUsd.toFixed(4)}.`,
     `Pricing note: ${input.cost.note}`,
     "",
     "## Suggested next improvements",
@@ -1865,10 +1870,10 @@ function frontierReport(input: {
 }
 
 function runtimeAttributionReport(runs: FrontierRunSummary[]): string[] {
-  const externalPlannerCalls = sum(
+  const trustedPlannerActivityRecords = sum(
     runs.map((run) => run.externalPlannerCallCount),
   );
-  const externalActionCalls = sum(
+  const trustedActionActivityRecords = sum(
     runs.map((run) => run.externalActionCallCount),
   );
   const rawProviderOutputs = sum(
@@ -1885,8 +1890,8 @@ function runtimeAttributionReport(runs: FrontierRunSummary[]): string[] {
     `- Planner sources: ${JSON.stringify(mergeNestedCounts(runs, "plannerSources"))}`,
     `- Executor sources: ${JSON.stringify(mergeNestedCounts(runs, "executorSources"))}`,
     `- Action selection sources: ${JSON.stringify(mergeNestedCounts(runs, "actionSelectionSources"))}`,
-    `- External planner calls: ${externalPlannerCalls}`,
-    `- External action calls: ${externalActionCalls}`,
+    `- Trusted in-process planner activity records: ${trustedPlannerActivityRecords}`,
+    `- Trusted in-process action activity records: ${trustedActionActivityRecords}`,
     `- Raw provider output records: ${rawProviderOutputs}`,
     `- Local executor actions: ${localExecutorActions}`,
     `- LLM direct action selections: ${llmActionSelections}`,
@@ -2465,14 +2470,11 @@ function mergeActionCounts(
 
 function estimateCost(runs: FrontierRunSummary[]) {
   const records = runs.flatMap((run) => run.records);
-  const plannerRecords = records.filter(
-    (record) =>
-      record.decisionMetadata?.externalPlannerCall === true ||
-      (record.decisionMetadata?.plannerRan === true &&
-        record.decisionMetadata?.planPlannerSource === "codex-cli"),
+  const plannerRecords = records.filter((record) =>
+    trustedProviderActivity(record, "planner"),
   );
-  const actionRecords = records.filter(
-    (record) => record.decisionMetadata?.externalActionCall === true,
+  const actionRecords = records.filter((record) =>
+    trustedProviderActivity(record, "action"),
   );
   const externalRecords = [...plannerRecords, ...actionRecords];
   if (plannerRecords.length === 0) {
@@ -2489,7 +2491,7 @@ function estimateCost(runs: FrontierRunSummary[]) {
         inputTokens: 0,
         outputTokens: 0,
         estimatedCostUsd: 0,
-        note: "No external planner or action-selector calls were made; cost is zero for local-only and mock-only modes.",
+        note: "No trusted in-process provider activity records were emitted; no provider-call or cost claim is made for local, mock, or policy-self-attested activity.",
       };
     }
   }
@@ -2506,7 +2508,7 @@ function estimateCost(runs: FrontierRunSummary[]) {
       inputTokens: 0,
       outputTokens: 0,
       estimatedCostUsd: 0,
-      note: "No external provider calls were detected.",
+      note: "No trusted in-process provider activity records were detected.",
     };
   }
   const inputChars = sum(
@@ -2570,8 +2572,18 @@ function estimateCost(runs: FrontierRunSummary[]) {
     estimatedCostUsd:
       (inputTokens / 1_000_000) * pricing.inputPerMTok +
       (outputTokens / 1_000_000) * pricing.outputPerMTok,
-    note: `Provider usage was not exposed directly; token counts are estimated from prompt/output characters using ${model} pricing ${pricing.inputPerMTok}/${pricing.outputPerMTok} USD per million input/output tokens. Local-only and mock-only decisions are excluded.`,
+    note: `This is a modeled estimate from trusted in-process activity records and prompt/output characters, not provider billing proof. It uses ${model} pricing ${pricing.inputPerMTok}/${pricing.outputPerMTok} USD per million input/output tokens. Local, mock, and policy-self-attested decisions are excluded.`,
   };
+}
+
+function trustedProviderActivity(
+  record: AgentDecisionRecord,
+  callKind: "planner" | "action",
+): boolean {
+  return (
+    record.decisionMetadata?.providerEvidenceSource === "trusted-in-process" &&
+    record.decisionMetadata?.providerCallKind === callKind
+  );
 }
 
 function pricingForModel(model: string) {

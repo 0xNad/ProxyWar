@@ -504,6 +504,17 @@ describe("sanitizeStatedReason", () => {
     expect(sanitizeStatedReason("x".repeat(401))).toBeNull();
   });
 
+  it.each([
+    "dgd:err:atk",
+    "rul:atk",
+    "e1:hold",
+    "heuristic-expand",
+    "heuristic expand",
+    "fallback:hold",
+  ])("rejects policy/debug reason %s", (reason) => {
+    expect(sanitizeStatedReason(reason)).toBeNull();
+  });
+
   it("preserves genuine prose reasons unchanged, including ones that mention adjacent-but-not-denylisted words", () => {
     expect(
       sanitizeStatedReason(

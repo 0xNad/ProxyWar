@@ -18,9 +18,11 @@ const allowedCommands = new Set([
   "commander-xp-run-episode",
   "commander-xp-certify",
   "episode-logs",
+  "episodes",
   "leagues",
   "list",
   "next-version",
+  "replay-open",
   "status",
   "upload-coworld",
   "xp-request",
@@ -252,6 +254,27 @@ if (command === "commander-xp-policy-provision") {
       "authenticated Coworld Commander XP policy provision mode is malformed",
     );
   }
+}
+if (
+  command === "episodes" &&
+  !(
+    args.length === 2 &&
+    /^ereq_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    args[1] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld episodes mode is malformed");
+}
+if (
+  command === "replay-open" &&
+  !(
+    args.length === 3 &&
+    /^ereq_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    args[1] === "--hosted" &&
+    args[2] === "--no-open-browser"
+  )
+) {
+  throw new Error("authenticated Coworld replay-open mode is malformed");
 }
 if (
   command === "status" &&

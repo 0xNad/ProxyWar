@@ -6,9 +6,9 @@
   "license": "MIT",
   "description": "An LLM-powered diplomacy-first ProxyWar league policy.",
   "scripts": {
-    "test": "node --test friendly-policy.node-test.mjs"
+    "test": "node --test friendly-policy.node-test.mjs supply-chain.node-test.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "8.21.3"
   }
 }

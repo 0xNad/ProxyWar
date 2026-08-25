@@ -188,10 +188,10 @@ describe("GameServer agent_message relay (real socket path)", () => {
       recipient: RECIPIENT_PLAYER_ID,
       text: MESSAGE_TEXT,
     });
-    // The wire is fire-and-forget: the sender gets no synchronous error back.
-    // The refusal is the SERVER dropping the intent, not the client failing —
-    // which is exactly why only a turn-stream assertion can prove the gate.
-    expect(result.accepted).toBe(true);
+    expect(result).toMatchObject({
+      accepted: false,
+      reason: "agent-message-feature-off",
+    });
 
     expect(log.warn).toHaveBeenCalledWith(
       "agent_message intent refused: feature is off",
@@ -220,6 +220,9 @@ describe("GameServer agent_message relay (real socket path)", () => {
       text: MESSAGE_TEXT,
     });
     expect(result.accepted).toBe(true);
+    expect(result.intent).toMatchObject({
+      messageEventID: expect.stringMatching(/^msg_/),
+    });
     expect(log.warn).not.toHaveBeenCalledWith(
       "agent_message intent refused: feature is off",
       expect.anything(),
@@ -231,6 +234,10 @@ describe("GameServer agent_message relay (real socket path)", () => {
       type: "agent_message",
       recipient: RECIPIENT_PLAYER_ID,
       text: MESSAGE_TEXT,
+      messageEventID:
+        result.intent?.type === "agent_message"
+          ? result.intent.messageEventID
+          : undefined,
       // Stamped from the authenticated connection by the server, never
       // supplied by the client.
       clientID: runner.clientID()!,
@@ -256,6 +263,9 @@ describe("GameServer agent_message relay (real socket path)", () => {
       (game as unknown as { turns: Turn[] }).turns,
     );
     expect(relayed).toHaveLength(1);
+    expect(relayed[0]).toMatchObject({
+      messageEventID: expect.stringMatching(/^msg_/),
+    });
 
     // Replay the EXACT server-stamped turn content through the real core:
     // Executor maps the intent to AgentMessageExecution by the stamped
@@ -319,7 +329,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
     expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
-  it("flag ON: the server stamp overwrites a spoofed clientID", async () => {
+  it("flag ON: a hand-crafted client cannot bypass the offered-id validator", async () => {
     process.env[FLAG] = "1";
     const { observer } = startWithRunnerAndObserver();
     const hand = makeHandClient("HAND0001");
@@ -339,11 +349,127 @@ describe("GameServer agent_message relay (real socket path)", () => {
         },
       }),
     );
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: client lacks agent message capability",
+      expect.objectContaining({ clientID: "HAND0001" }),
+    );
     game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
 
-    const intents = agentMessageIntents(turnsSeenBy(observer.ws));
-    expect(intents).toHaveLength(1);
-    expect(intents[0].clientID).toBe("HAND0001");
+  it("flag ON: even a capability client cannot relay without a server-owned event id", async () => {
+    process.env[FLAG] = "1";
+    const { observer } = startWithRunnerAndObserver();
+    const hand = makeHandClient("HAND0001");
+    expect(game.joinAgentClient(hand.client)).toBe("joined");
+
+    await hand.ws.trigger(
+      "message",
+      JSON.stringify({
+        type: "intent",
+        intent: {
+          type: "agent_message",
+          recipient: RECIPIENT_PLAYER_ID,
+          text: "missing identity",
+        },
+      }),
+    );
+
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: missing server-owned event id",
+      expect.objectContaining({ clientID: "HAND0001" }),
+    );
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
+
+  it("flag ON: paused and rate-limited drops return accepted:false", () => {
+    process.env[FLAG] = "1";
+    const { runner, observer } = startWithRunnerAndObserver();
+
+    (game as unknown as { isPaused: boolean }).isPaused = true;
+    expect(
+      runner.submitAgentMessage({
+        recipient: RECIPIENT_PLAYER_ID,
+        text: "wait until resume",
+      }),
+    ).toMatchObject({
+      accepted: false,
+      reason: "agent-message-game-paused",
+    });
+
+    (game as unknown as { isPaused: boolean }).isPaused = false;
+    const limiter = (
+      game as unknown as {
+        intentRateLimiter: { check: () => "ok" | "limit" | "kick" };
+      }
+    ).intentRateLimiter;
+    const originalCheck = limiter.check;
+    (game as unknown as { realtimeClock: boolean }).realtimeClock = true;
+    limiter.check = () => "limit";
+    const limited = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "one too many",
+    });
+    limiter.check = originalCheck;
+    (game as unknown as { realtimeClock: boolean }).realtimeClock = false;
+    expect(limited).toMatchObject({
+      accepted: false,
+      reason: "agent-message-rate-limited",
+    });
+
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
+
+  it("assigns a distinct server-owned id to every accepted message", () => {
+    process.env[FLAG] = "1";
+    const { runner } = startWithRunnerAndObserver();
+    const first = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "first",
+    });
+    const second = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "second",
+    });
+    const firstID =
+      first.intent?.type === "agent_message"
+        ? first.intent.messageEventID
+        : undefined;
+    const secondID =
+      second.intent?.type === "agent_message"
+        ? second.intent.messageEventID
+        : undefined;
+    expect(first.accepted).toBe(true);
+    expect(second.accepted).toBe(true);
+    expect(firstID).toMatch(/^msg_/);
+    expect(secondID).toMatch(/^msg_/);
+    expect(secondID).not.toBe(firstID);
+  });
+
+  it("flag ON: the server re-applies reject-don't-rewrite text validation", () => {
+    process.env[FLAG] = "1";
+    const { runner, observer } = startWithRunnerAndObserver();
+
+    const result = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "fake\u202E attribution",
+    });
+    expect(result).toMatchObject({
+      accepted: false,
+      reason: "invalid-agent-message-text",
+    });
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: invalid text",
+      expect.objectContaining({
+        clientID: runner.clientID(),
+        reason:
+          "messageText contained invisible formatting or bidi-override characters",
+      }),
+    );
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
   it("flag ON: the real wire schema still kicks over-cap hand-crafted text", async () => {

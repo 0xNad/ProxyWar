@@ -2,9 +2,10 @@
  * Archived-premiere payload reading. The archived-results presentation that
  * used to live here is retired (2026-08-10: watch surfaces show the plain
  * OpenFront HUD); an archived premiere now opens straight into the ordinary
- * league replay when its run is still mirrored. Only the payload contract
- * survives: the archive router injects a non-executing JSON island that names
- * the premiere and (when retained) its replay run.
+ * league replay only when the archive router has freshly verified that its run
+ * is still retained and renderable. Otherwise the durable archive payload
+ * remains the source of truth and the client renders the terminal premiere
+ * presentation without attempting playback.
  */
 
 const ARCHIVE_DATA_ELEMENT_ID = "proxywar-premiere-archive";

@@ -122,8 +122,12 @@ export function createPlatformAccountRouter(
         claims,
       });
     } catch (error) {
-      logError("platform_account_read_failed", error);
-      sendFailure(res, 503, "PLATFORM_UNAVAILABLE");
+      sendPlatformSecurityFailure(
+        res,
+        logError,
+        "platform_account_read_failed",
+        error,
+      );
     }
   });
 

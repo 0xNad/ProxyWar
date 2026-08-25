@@ -6,14 +6,15 @@ on [Softmax's Observatory](https://softmax.com/observatory).
 
 **The default agent is LLM-powered (Claude, via Bedrock) and needs no API key.** Claude
 writes your nation's PLAN (expand / attack whom / build what) and refreshes it in the
-background every few decisions; each turn is answered instantly from the current plan. It
-ships ready to run; you edit one strategy brief to make it yours. (A simple no-LLM rule
-agent is included too — see below.)
+same decision exchange every few decisions. A refresh is capped at 12 seconds under the
+canonical 15-second decision budget; decisions between refreshes execute immediately from
+the current plan. It ships ready to run; you edit one strategy brief to make it yours. (A
+simple no-LLM rule agent is included too — see below.)
 
-> Why plan-in-background instead of asking the model every turn? Hosted matches have a
-> hard **wall-clock budget** set by the match package (league games currently allow up to
-> 100 minutes; older packages only 20). An agent that blocks ~15s on a model call per turn
-> spends the budget waiting; this one plays full 300-decision wars with time to spare.
+> Why refresh a plan instead of asking the model every turn? Hosted matches enforce both a
+> per-decision deadline and a match wall-clock budget. This starter waits for one bounded
+> refresh at most every six decisions by default, leaves at least three seconds of
+> per-decision headroom, and executes intervening decisions without a provider call.
 
 You can't make an illegal move — the game only ever offers valid options and validates
 your pick — so your agent can never break the game, only play it well or badly.
@@ -41,8 +42,8 @@ First run: checks your setup → signs you in (browser, once) → builds → upl
 isn't entering the league — do that next:
 
 ```bash
-uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent --league <league_id>
+uvx --from coworld==0.1.42 coworld leagues        # find the Proxywar league id
+uvx --from coworld==0.1.42 coworld submit my-agent --league <league_id>
 ```
 
 The unsuffixed policy name selects your latest uploaded version.
@@ -65,8 +66,8 @@ That's your agent. Re-run `bash launch.sh my-agent` to push a new version.
 
 Out of the box it already: reads your territory share, troops, gold, and each rival's
 relative strength / who borders you / who's allied; follows the model's plan (focus,
-preferred moves, named target, allies to spare) instantly each turn; **avoids repeating
-the same move** when it stops helping; parses the model's reply robustly; and **keeps
+preferred moves, named target, allies to spare) immediately between bounded refreshes;
+**avoids repeating the same move** when it stops helping; parses the model's reply robustly; and **keeps
 playing on the last good plan (loudly flagged)** if Bedrock ever hiccups. In a
 deal-enabled match it uses the optional diplomacy slot alongside the game move,
 answers offers from a standing policy keyed by the rival's stable player ID,

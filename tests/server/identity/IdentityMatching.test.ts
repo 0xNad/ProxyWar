@@ -4,6 +4,7 @@ import {
   findAgentForPlayerName,
   parsePolicyLabel,
   resolveObservedVersion,
+  resolvePublicHouseStatus,
 } from "../../../src/server/identity/IdentityMatching";
 import type {
   AgentProfile,
@@ -67,6 +68,29 @@ describe("findAgentForPlayerName", () => {
   });
 });
 
+describe("resolvePublicHouseStatus", () => {
+  test("uses an exact registered identity status instead of a contradictory transient membership bit", () => {
+    expect(
+      resolvePublicHouseStatus("Auri", false, [
+        agent({
+          policyMatchRule: {
+            playerName: "Auri",
+            policyFamily: "Auri Commander",
+          },
+          status: "house",
+        }),
+      ]),
+    ).toBe(true);
+    expect(resolvePublicHouseStatus("daveey", true, [agent()])).toBe(false);
+  });
+
+  test("preserves Coworld's observed classification for an unregistered participant", () => {
+    expect(resolvePublicHouseStatus("unmapped-house", true, [agent()])).toBe(
+      true,
+    );
+  });
+});
+
 describe("resolveObservedVersion", () => {
   test("prefers the champion label when both are present", () => {
     const result = resolveObservedVersion(agent(), [], {
@@ -80,7 +104,12 @@ describe("resolveObservedVersion", () => {
 
   test("falls back to the rating label when champion is null (the 8-participant seed case)", () => {
     const result = resolveObservedVersion(
-      agent({ policyMatchRule: { playerName: "calc", policyFamily: "my-proxywar-agent" } }),
+      agent({
+        policyMatchRule: {
+          playerName: "calc",
+          policyFamily: "my-proxywar-agent",
+        },
+      }),
       [],
       {
         playerName: "calc",
@@ -172,9 +201,7 @@ describe("resolveObservedVersion", () => {
 
 describe("computeUnmappedPlayerNames", () => {
   test("returns empty when every live player has a registered agent", () => {
-    expect(
-      computeUnmappedPlayerNames(["daveey"], [agent()]),
-    ).toEqual([]);
+    expect(computeUnmappedPlayerNames(["daveey"], [agent()])).toEqual([]);
   });
 
   test("reports a live player with no registered agent", () => {

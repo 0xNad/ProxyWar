@@ -4,8 +4,11 @@
  * mount-into-jsdom + stubbed global fetch convention established in
  * `WatchPage.test.ts`/`LobbyPage.test.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
+import "../../../src/client/publicapp/BuildPage";
+import type { BuildPage } from "../../../src/client/publicapp/BuildPage";
 
 vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
@@ -14,9 +17,6 @@ vi.mock("../../../src/client/Utils", () => ({
 vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
   analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
 }));
-import "../../../src/client/publicapp/BuildPage";
-import type { BuildPage } from "../../../src/client/publicapp/BuildPage";
-import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 function mount(): BuildPage {
   const el = document.createElement("build-page") as BuildPage;
@@ -57,7 +57,8 @@ beforeEach(() => {
           proposedBuilder: { slug: "test-builder" },
           emblemPreviewSvg: "<svg>preview</svg>",
           profileFileJson: '{"proposedAgent":{"slug":"test-agent"}}',
-          githubIssueUrl: "https://github.com/0xNad/ProxyWar/issues/new?title=x",
+          githubIssueUrl:
+            "https://github.com/0xNad/ProxyWar/issues/new?title=x",
         }),
         { status: 200 },
       );
@@ -95,15 +96,15 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = el.querySelectorAll<HTMLButtonElement>(
-      'button[aria-current]',
+      "button[aria-current]",
     );
     expect(stepButtons.length).toBe(7);
     stepButtons[1].click();
     await flushMicrotasks();
     expect(normalizedText(el)).toContain("build_page.step2.heading");
-    const stepReachedCalls = vi.mocked(analytics.track).mock.calls.filter(
-      ([name]) => name === "build_step_reached",
-    );
+    const stepReachedCalls = vi
+      .mocked(analytics.track)
+      .mock.calls.filter(([name]) => name === "build_step_reached");
     expect(stepReachedCalls.length).toBe(2);
     expect(stepReachedCalls[1]).toEqual(["build_step_reached", { step: 2 }]);
   });
@@ -112,16 +113,16 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     stepButtons()[1].click();
     await flushMicrotasks();
     stepButtons()[0].click();
     await flushMicrotasks();
     stepButtons()[1].click();
     await flushMicrotasks();
-    const stepReachedCalls = vi.mocked(analytics.track).mock.calls.filter(
-      ([name]) => name === "build_step_reached",
-    );
+    const stepReachedCalls = vi
+      .mocked(analytics.track)
+      .mock.calls.filter(([name]) => name === "build_step_reached");
     // step 1 (mount) + step 2 (first visit) = 2, never a 3rd for the repeat visit
     expect(stepReachedCalls.length).toBe(2);
   });
@@ -130,14 +131,14 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     for (let step = 2; step <= 7; step++) {
       stepButtons()[step - 1].click();
       await flushMicrotasks();
     }
-    const flowStartedCalls = vi.mocked(analytics.track).mock.calls.filter(
-      ([name]) => name === "build_flow_started",
-    );
+    const flowStartedCalls = vi
+      .mocked(analytics.track)
+      .mock.calls.filter(([name]) => name === "build_flow_started");
     expect(flowStartedCalls.length).toBe(1);
   });
 
@@ -145,7 +146,7 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     for (let step = 2; step <= 7; step++) {
       stepButtons()[step - 1].click();
       await flushMicrotasks();
@@ -161,7 +162,7 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     for (let step = 2; step <= 7; step++) {
       stepButtons()[step - 1].click();
       await flushMicrotasks();
@@ -204,7 +205,7 @@ describe("build-page", () => {
     const el = mount();
     await Promise.resolve();
     const stepButtons = el.querySelectorAll<HTMLButtonElement>(
-      'button[aria-current]',
+      "button[aria-current]",
     );
     stepButtons[2].click();
     await Promise.resolve();
@@ -218,7 +219,9 @@ describe("build-page", () => {
     await flushMicrotasks();
     expect(
       fetchMock.mock.calls.some(([input]) =>
-        String(input).startsWith("/api/build/emblem-preview?slug=cyan-hellstar"),
+        String(input).startsWith(
+          "/api/build/emblem-preview?slug=cyan-hellstar",
+        ),
       ),
     ).toBe(true);
     expect(el.querySelector('[style*="112233"]')).not.toBeNull();
@@ -228,7 +231,7 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = el.querySelectorAll<HTMLButtonElement>(
-      'button[aria-current]',
+      "button[aria-current]",
     );
     stepButtons[2].click();
     await flushMicrotasks();
@@ -249,13 +252,15 @@ describe("build-page", () => {
       'a[href^="https://github.com/0xNad/ProxyWar/issues/new"]',
     );
     expect(issueLink).not.toBeNull();
-    expect(analytics.track).toHaveBeenCalledWith("registration_draft_submitted");
+    expect(analytics.track).toHaveBeenCalledWith(
+      "registration_draft_submitted",
+    );
   });
 
   it("never sends a verifiedGithub field in the submission request body", async () => {
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -273,7 +278,7 @@ describe("build-page", () => {
   it("Step 3: a space-containing GitHub username shows the field-level error, never the generic banner, and never hits the network (2026-08-01 P1 fix)", async () => {
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     const githubInput = form.querySelector<HTMLInputElement>(
@@ -283,7 +288,9 @@ describe("build-page", () => {
     githubInput.dispatchEvent(new Event("input"));
     await flushMicrotasks();
     // Live validation already flags it before any submit attempt.
-    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+    expect(normalizedText(el)).toContain(
+      "build_page.step3.github_error_format",
+    );
 
     fetchMock.mockClear();
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -293,14 +300,16 @@ describe("build-page", () => {
         String(input).startsWith("/api/build/registration-submission"),
       ),
     ).toBe(false);
-    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+    expect(normalizedText(el)).toContain(
+      "build_page.step3.github_error_format",
+    );
     expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
   });
 
   it("Step 3: leaving the optional GitHub username field empty still succeeds", async () => {
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -336,7 +345,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     const githubInput = form.querySelector<HTMLInputElement>(
@@ -347,7 +356,9 @@ describe("build-page", () => {
     await flushMicrotasks();
     form.dispatchEvent(new Event("submit", { cancelable: true }));
     await flushMicrotasks();
-    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+    expect(normalizedText(el)).toContain(
+      "build_page.step3.github_error_format",
+    );
     expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
   });
 
@@ -369,7 +380,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -409,7 +420,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -441,7 +452,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -478,7 +489,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -528,7 +539,7 @@ describe("build-page", () => {
     });
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[2].click();
     await flushMicrotasks();
     const form = el.querySelector("form")!;
     form.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -546,7 +557,7 @@ describe("build-page", () => {
   it("Step 6 renders the verify checklist without any dead/fabricated command", async () => {
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[5].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[5].click();
     await flushMicrotasks();
     expect(normalizedText(el)).toContain("build_page.step6.profile_mapped");
     expect(normalizedText(el)).toContain("build_page.step6.mapping_explainer");
@@ -560,7 +571,7 @@ describe("build-page", () => {
     // existing uv project (pyproject.toml/venv) a fresh clone never has.
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[3].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[3].click();
     await flushMicrotasks();
     const text = normalizedText(el);
     expect(text).toContain("uvx --from softmax-cli softmax login");
@@ -571,7 +582,7 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     stepButtons()[3].click();
     await flushMicrotasks();
     expect(normalizedText(el)).toContain("build_page.step4.toolchain_note");
@@ -589,7 +600,7 @@ describe("build-page", () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     stepButtons()[5].click();
     await flushMicrotasks();
     const step6Link = el.querySelector<HTMLAnchorElement>(
@@ -615,18 +626,44 @@ describe("build-page", () => {
     // callout was removed rather than left pointing at a dead link.
     const el = mount();
     await flushMicrotasks();
-    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[1].click();
+    el.querySelectorAll<HTMLButtonElement>("button[aria-current]")[1].click();
     await flushMicrotasks();
     expect(el.querySelector('a[href="/agent-start"]')).toBeNull();
-    expect(normalizedText(el)).not.toContain("build_page.step2.exhibition_note");
-    expect(normalizedText(el)).not.toContain("build_page.step2.exhibition_link");
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step2.exhibition_note",
+    );
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step2.exhibition_link",
+    );
+  });
+
+  it("uses only the canonical Coworld starter for clone and launch commands", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
+
+    stepButtons()[1].click();
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain(
+      "git clone https://github.com/0xNad/proxywar-coworld-starter.git",
+    );
+    expect(normalizedText(el)).not.toContain("proxywar-commander-starter");
+
+    stepButtons()[4].click();
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain(
+      "git clone https://github.com/0xNad/proxywar-coworld-starter.git",
+    );
+    expect(normalizedText(el)).toContain("bash launch.sh my-agent");
+    expect(normalizedText(el)).not.toContain("proxywar-commander-starter");
   });
 
   it("Step 4 fulfills Step 2's 'linked in Step 4' protocol-reference promise with a real link (t3-02, 2026-08-02)", async () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
-      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+      el.querySelectorAll<HTMLButtonElement>("button[aria-current]");
     stepButtons()[1].click();
     await flushMicrotasks();
     expect(normalizedText(el)).toContain("build_page.step2.byo_desc");

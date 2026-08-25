@@ -27,6 +27,47 @@ export type AgentMessageDecisionValidation =
   | { ok: true; action: LegalAction; text: string }
   | { ok: false; reason: string };
 
+export type AgentMessageTextValidation =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
+
+export interface AgentDecisionBatchPrimaryMismatch {
+  scalarActionID: string;
+  batchPrimaryActionID: string;
+  rejectedActionIDs: string[];
+  reason: string;
+}
+
+/**
+ * One authority rule for scalar/batch compatibility. Both the standalone
+ * validator and the live layered match path call this helper, so an ambiguous
+ * request cannot become valid merely because it entered through a different
+ * batch executor.
+ */
+export function agentDecisionBatchPrimaryMismatch(
+  decision: AgentDecision,
+): AgentDecisionBatchPrimaryMismatch | null {
+  const batchPrimaryActionID = decision.actionIDs?.[0];
+  if (
+    batchPrimaryActionID === undefined ||
+    batchPrimaryActionID === decision.actionID
+  ) {
+    return null;
+  }
+  const rejectedActionIDs = [
+    decision.actionID,
+    ...(decision.actionIDs ?? []),
+  ].filter(
+    (actionID, index, actionIDs) => actionIDs.indexOf(actionID) === index,
+  );
+  return {
+    scalarActionID: decision.actionID,
+    batchPrimaryActionID,
+    rejectedActionIDs,
+    reason: `decision batch primary did not match scalar action id: ${loggableActionID(batchPrimaryActionID)} != ${loggableActionID(decision.actionID)}`,
+  };
+}
+
 /**
  * Validates the OPTIONAL second selection, `AgentDecision.dealActionID` (the
  * diplomacy slot). Returns null only when the field is absent — the shipped
@@ -131,6 +172,30 @@ export function validateAgentMessageDecision(
       reason: `message selection named a non-message action kind (${action.kind}): ${loggableActionID(requestedID)}`,
     };
   }
+  const textValidation = validateAgentMessageText(
+    text,
+    `message selection ${loggableActionID(requestedID)} carried blank messageText`,
+  );
+  return textValidation.ok
+    ? { ok: true, action, text: textValidation.text }
+    : textValidation;
+}
+
+/**
+ * Applies the raw-text half of the comms-slot contract independently of an
+ * offered menu. GameServer re-applies it at the socket boundary so direct
+ * callers cannot bypass the validator's reject-don't-rewrite rules.
+ */
+export function validateAgentMessageText(
+  text: unknown,
+  blankReason = "agent message text was blank",
+): AgentMessageTextValidation {
+  if (typeof text !== "string") {
+    return {
+      ok: false,
+      reason: "agent message text was not a string",
+    };
+  }
   // C0 controls (including tab, LF, and CR), DEL, and C1 controls can alter
   // transcript layout, terminal framing, or prompt boundaries. Check the RAW
   // text before any blank/length handling: accepting then collapsing these
@@ -145,8 +210,10 @@ export function validateAgentMessageDecision(
   // Invisible formatting characters are checked on the RAW text, BEFORE any
   // other validation. Three distinct abuses:
   //
-  // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
-  //    reorder the rendered line. The transcript renders as
+  // 1. Every Unicode FORMAT character (General_Category=Cf), including bidi
+  //    controls, tag characters, zero-width controls, deprecated invisible
+  //    separators, and script-specific format controls, can visually reorder
+  //    or invisibly alter the rendered line. The transcript renders as
   //    "{sender} -> {recipient}: {msg}" and we own only the English string --
   //    Crowdin owns every other locale, and any locale placing {msg} first
   //    would let attacker text reorder the ATTRIBUTION. Spoofing who said what
@@ -154,11 +221,7 @@ export function validateAgentMessageDecision(
   //    exists to produce, and `unsafeDescription: false` makes the line a
   //    single text node, so it cannot be repaired with <bdi> at render time.
   //
-  // 2. ZERO-WIDTH PADDING (U+200B-200D, U+2060, U+00AD, U+FEFF) buys up to 280
-  //    invisible characters that cost real tokens in every recipient's prompt
-  //    and render as a blank chat row.
-  //
-  // 3. LINE/PARAGRAPH SEPARATORS (U+2028-2029) create raw layout boundaries
+  // 2. LINE/PARAGRAPH SEPARATORS (U+2028-2029) create raw layout boundaries
   //    even though they sit outside the C0/C1 ranges above.
   //
   // Rejected rather than stripped, like every other violation here: silently
@@ -171,11 +234,10 @@ export function validateAgentMessageDecision(
   // word boundary the agent never wrote. For a feature whose whole purpose is
   // negotiation EVIDENCE, a rewritten quote is worse than a rejected one, so
   // this check remains on the raw string.
-  if (
-    /[\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
-      text,
-    )
-  ) {
+  // U+2065 is currently unassigned rather than Cf, but the whole U+2060-206F
+  // control block is reserved for invisible word/bidi formatting and remains
+  // rejected so a future Unicode assignment cannot silently widen the wire.
+  if (/(?:\p{Cf}|[\u2028\u2029\u2060-\u206F])/u.test(text)) {
     return {
       ok: false,
       reason:
@@ -185,7 +247,7 @@ export function validateAgentMessageDecision(
   if (text.trim().length === 0) {
     return {
       ok: false,
-      reason: `message selection ${loggableActionID(requestedID)} carried blank messageText`,
+      reason: blankReason,
     };
   }
   if (text.length > FREETEXT_MESSAGE_MAX_CHARS) {
@@ -194,7 +256,7 @@ export function validateAgentMessageDecision(
       reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
     };
   }
-  return { ok: true, action, text };
+  return { ok: true, text };
 }
 
 /**
@@ -255,6 +317,18 @@ export function validateAgentDecisionBatch(
   legalActions: LegalAction[],
   options: AgentDecisionValidationOptions = {},
 ): AgentDecisionBatchValidation {
+  const primaryMismatch = agentDecisionBatchPrimaryMismatch(decision);
+  if (primaryMismatch !== null) {
+    const fallback =
+      legalActions.find((candidate) => candidate.kind === "hold") ?? null;
+    return {
+      ok: false,
+      actions: fallback ? [fallback] : [],
+      rejectedActionIDs: primaryMismatch.rejectedActionIDs,
+      fallback,
+      reason: primaryMismatch.reason,
+    };
+  }
   const requestedActionIDs = requestedBatchActionIDs(decision);
   const actions: LegalAction[] = [];
   const rejectedActionIDs: string[] = [];

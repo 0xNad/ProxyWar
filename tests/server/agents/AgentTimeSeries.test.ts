@@ -7,7 +7,10 @@ import {
 } from "../../../src/server/agents/AgentTimeSeries";
 import type { StandingsHistorySnapshot } from "../../../src/server/agents/CoworldLeagueStandingsHistory";
 
-function episode(completedAt: string | null, isWinner: boolean): WinLossEpisode {
+function episode(
+  completedAt: string | null,
+  isWinner: boolean,
+): WinLossEpisode {
   return { completedAt, isWinner };
 }
 
@@ -144,15 +147,126 @@ describe("computeScoreSeries", () => {
     const snapshots = [
       snapshot("2026-07-31T10:00:00.000Z", [
         { playerName: "Auri", score: 9.0, rank: 2, activeVersionLabel: "v7" },
-        { playerName: "odin free", score: 31.0, rank: 1, activeVersionLabel: "v2" },
+        {
+          playerName: "odin free",
+          score: 31.0,
+          rank: 1,
+          activeVersionLabel: "v2",
+        },
       ]),
       snapshot("2026-07-31T11:00:00.000Z", [
         { playerName: "Auri", score: 9.5, rank: 2, activeVersionLabel: "v7" },
-        { playerName: "odin free", score: 32.0, rank: 1, activeVersionLabel: "v2" },
+        {
+          playerName: "odin free",
+          score: 32.0,
+          rank: 1,
+          activeVersionLabel: "v2",
+        },
       ]),
     ];
     const series = computeScoreSeries(snapshots, "Auri");
     expect(series?.points.map((p) => p.score)).toEqual([9.0, 9.5]);
+  });
+
+  test("omits internal policy-family labels from public version markers", () => {
+    const snapshots = [
+      snapshot("2026-07-31T10:00:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 1500,
+          rank: 2,
+          activeVersionLabel: "proxywar-e2e-smoke-private:v1",
+        },
+      ]),
+      snapshot("2026-07-31T11:00:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 1510,
+          rank: 1,
+          activeVersionLabel: "proxywar-freetext-tester:v2",
+        },
+      ]),
+    ];
+    const series = computeScoreSeries(snapshots, "Auri");
+    expect(series?.points.map((point) => point.activeVersionLabel)).toEqual([
+      null,
+      null,
+    ]);
+    expect(series?.points.map((point) => point.versionFirstObserved)).toEqual([
+      false,
+      false,
+    ]);
+    expect(JSON.stringify(series)).not.toContain("smoke");
+    expect(JSON.stringify(series)).not.toContain("tester");
+  });
+
+  test("starts at the latest comparable score regime after an order-of-magnitude scale reset", () => {
+    const snapshots = [
+      snapshot("2026-08-13T23:50:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 8.35,
+          rank: 2,
+          activeVersionLabel: "legacy:v1",
+        },
+      ]),
+      snapshot("2026-08-14T00:12:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 0.25,
+          rank: 2,
+          activeVersionLabel: "legacy:v1",
+        },
+      ]),
+      snapshot("2026-08-14T03:03:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 1804,
+          rank: 1,
+          activeVersionLabel: "current:v1",
+        },
+      ]),
+      snapshot("2026-08-14T03:13:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 1495.82,
+          rank: 2,
+          activeVersionLabel: "current:v1",
+        },
+      ]),
+    ];
+    const series = computeScoreSeries(snapshots, "Auri");
+    expect(series?.points.map((point) => point.score)).toEqual([1804, 1495.82]);
+    expect(series?.recordedSince).toBe("2026-08-14T03:03:00.000Z");
+    expect(series?.points.map((point) => point.versionFirstObserved)).toEqual([
+      true,
+      false,
+    ]);
+    expect(series?.methodology).toContain(
+      "most recent comparable score regime",
+    );
+  });
+
+  test("hides a new score regime until it has two comparable snapshots", () => {
+    const snapshots = [
+      snapshot("2026-08-13T23:50:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 8.35,
+          rank: 2,
+          activeVersionLabel: "legacy:v1",
+        },
+      ]),
+      snapshot("2026-08-14T03:03:00.000Z", [
+        {
+          playerName: "Auri",
+          score: 1804,
+          rank: 1,
+          activeVersionLabel: "current:v1",
+        },
+      ]),
+    ];
+    expect(computeScoreSeries(snapshots, "Auri")).toBeNull();
   });
 });
 

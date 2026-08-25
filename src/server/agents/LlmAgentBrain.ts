@@ -73,7 +73,8 @@ export class LlmAgentBrain implements AgentBrain {
           executorSource: "llm-action-selector",
           actionSelectionSource: "llm-action-selector",
           externalPlannerCall: false,
-          externalActionCall: providerIsExternal(this.options.provider),
+          // No provider invocation occurs on this branch.
+          externalActionCall: false,
           rawProviderOutputPresent: false,
           llmParseOk: false,
           llmParseFailureReason: "no legal actions offered",
@@ -172,6 +173,12 @@ export class LlmAgentBrain implements AgentBrain {
           actionSelectionSource: "llm-action-selector",
           externalPlannerCall: false,
           externalActionCall: providerIsExternal(this.options.provider),
+          ...(providerIsExternal(this.options.provider)
+            ? {
+                providerEvidenceSource: "trusted-in-process",
+                providerCallKind: "action",
+              }
+            : {}),
           rawProviderOutputPresent:
             providerIsExternal(this.options.provider) &&
             rawOutput.trim().length > 0,
@@ -239,6 +246,12 @@ export class LlmAgentBrain implements AgentBrain {
         actionSelectionSource: "llm-action-selector",
         externalPlannerCall: false,
         externalActionCall: providerIsExternal(this.options.provider),
+        ...(providerIsExternal(this.options.provider)
+          ? {
+              providerEvidenceSource: "trusted-in-process",
+              providerCallKind: "action",
+            }
+          : {}),
         rawProviderOutputPresent:
           providerIsExternal(this.options.provider) &&
           rawOutput.trim().length > 0,

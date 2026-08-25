@@ -252,9 +252,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
       "PLAN(attack -> Auri)",
     );
 
-    // The next scheduled refresh remains in flight when the match final arrives.
-    // The summary must say that its token totals are incomplete rather than
-    // silently undercounting the request.
+    // The next scheduled refresh is terminated at the bounded deadline before
+    // final, so the summary records one error and no provider tail.
     vi.useFakeTimers();
     runtime.socket!.emit("message", decisionRequest("req-3"));
     runtime.socket!.emit("message", decisionRequest("req-4"));
@@ -303,10 +302,10 @@ describe("tester-starter-llm hardened runtime arm", () => {
         spatialVisibilityModel: "global-lockstep-public-map-v1",
         attempts: 2,
         responses: 1,
-        errors: 0,
+        errors: 1,
         responsesWithUsage: 1,
-        inFlightRequests: 1,
-        usageComplete: false,
+        inFlightRequests: 0,
+        usageComplete: true,
         usageAvailable: true,
         inputTokens: 3525,
         outputTokens: 42,

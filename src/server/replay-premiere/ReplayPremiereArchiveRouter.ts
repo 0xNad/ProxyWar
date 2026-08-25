@@ -77,7 +77,11 @@ export interface ReplayPremiereArchiveRouterOptions {
   loadAppShell(): Promise<string>;
   publicOrigin: string;
   pageContentSecurityPolicy: string;
-  /** True only while the ordinary replay source is retained and renderable. */
+  /**
+   * True only while the ordinary replay source is retained and renderable.
+   * The result gates both playback and clip generation: an archive page must
+   * never advertise a replay identity whose bytes have already aged out.
+   */
   resolveClipGenerationTarget?: (replayRunKey: string) => Promise<boolean>;
   onOperatorError?: (error: unknown) => void;
 }
@@ -814,17 +818,30 @@ async function handleArchivedDocumentRequest(context: {
   );
   const clipByteLength = clip?.byteLength ?? null;
   await clip?.close();
-  const replayRunKey =
+  const candidateReplayRunKey =
     summary.sourceKind === "rated_coworld"
       ? publicRunKeyForSourceRunId(summary.sourceRunId)
       : null;
-  const clipGenerationTarget =
-    replayRunKey !== null &&
+  const isRevealPublic =
     summary.revealedAt !== null &&
     (summary.terminalState === "revealed" ||
-      summary.terminalState === "archived") &&
+      summary.terminalState === "archived");
+  // A source-derived run key is only an identity candidate. Exposing it to the
+  // browser is a playback promise, so require a current retained/renderable
+  // source check. Without that proof the durable result summary remains the
+  // page's honest terminal presentation and Main never starts the replay
+  // loader that would otherwise end on the generic failure veil.
+  const replayRunKey =
+    candidateReplayRunKey !== null &&
+    isRevealPublic &&
     options.resolveClipGenerationTarget !== undefined &&
-    (await options.resolveClipGenerationTarget(replayRunKey).catch(() => false))
+    (await options
+      .resolveClipGenerationTarget(candidateReplayRunKey)
+      .catch(() => false))
+      ? candidateReplayRunKey
+      : null;
+  const clipGenerationTarget =
+    replayRunKey !== null
       ? { kind: "league_run" as const, replayRunKey }
       : null;
   const payload: PremiereArchiveClientPayload = {

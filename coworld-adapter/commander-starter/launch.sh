@@ -25,6 +25,9 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="proxywar-commander-starter:latest"
 MODEL="us.anthropic.claude-sonnet-4-6"
+COWORLD_PACKAGE="coworld==0.1.42"
+SOFTMAX_CLI_PACKAGE="softmax-cli==0.26.30"
+SOURCE_SHA="${STARTER_SOURCE_SHA:-}"
 BLOCKED=0
 AUTH=unknown
 
@@ -47,16 +50,27 @@ case "$(uname -s)" in
   *) printf '%s\n' 'This starter supports macOS and Linux (use WSL on Windows).' >&2; exit 1 ;;
 esac
 
+if [ -z "$SOURCE_SHA" ] && command -v git >/dev/null 2>&1; then
+  if git -C "$HERE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -n "$(git -C "$HERE" status --porcelain --untracked-files=all -- .)" ]; then
+      needs 'starter source has local changes: commit the reviewed source or set STARTER_SOURCE_SHA explicitly for a reviewed source archive'
+    else
+      SOURCE_SHA="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)"
+    fi
+  fi
+fi
+if [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$ ]]; then
+  ok "source revision $SOURCE_SHA"
+else
+  needs 'source revision is unavailable: run from a Git clone or set STARTER_SOURCE_SHA to its exact 40- or 64-character commit SHA'
+fi
+
+# uv is an explicit prerequisite. Never execute a mutable remote installer from
+# this release path; install it using the verified upstream documentation.
 if command -v uv >/dev/null 2>&1; then
   ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
-elif [ "$DOCTOR" = 1 ]; then
-  needs 'uv is missing: https://docs.astral.sh/uv/'
-elif confirm 'uv is missing. Install it in your user account now?'; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-  command -v uv >/dev/null 2>&1 && ok 'uv installed' || needs 'uv installed but is not on PATH yet'
 else
-  needs 'uv is required: curl -LsSf https://astral.sh/uv/install.sh | sh'
+  needs 'uv is required: https://docs.astral.sh/uv/getting-started/installation/'
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -75,7 +89,7 @@ else
 fi
 
 if command -v uv >/dev/null 2>&1; then
-  AUTH="$(uvx --from coworld python - 2>/dev/null <<'PY' || true
+  AUTH="$(uvx --from "$COWORLD_PACKAGE" python - 2>/dev/null <<'PY' || true
 try:
     from coworld.api_client import CoworldApiClient
     with CoworldApiClient.from_login(server_url="https://softmax.com/api") as client:
@@ -96,14 +110,17 @@ fi
 if [ "$BLOCKED" = 1 ]; then exit 1; fi
 
 if [ "$AUTH" != ok ]; then
-  uvx --from softmax-cli softmax login
+  uvx --from "$SOFTMAX_CLI_PACKAGE" softmax login
 fi
 
 printf '%s\n' '==> Building the pinned Commander image (linux/amd64)...'
-docker build --platform linux/amd64 -t "$IMAGE" "$HERE"
+docker build --platform linux/amd64 \
+  --build-arg "STARTER_SOURCE_SHA=$SOURCE_SHA" \
+  -t "$IMAGE" \
+  "$HERE"
 
 printf "==> Uploading '%s' with Bedrock enabled...\n" "$NAME"
-uvx --from coworld coworld upload-policy "$IMAGE" \
+uvx --from "$COWORLD_PACKAGE" coworld upload-policy "$IMAGE" \
   --name "$NAME" \
   --use-bedrock \
   --bedrock-model "$MODEL" \
@@ -112,7 +129,7 @@ uvx --from coworld coworld upload-policy "$IMAGE" \
   --run tsx \
   --run /app/proxywar/coworld-adapter/src/commander-player.ts
 
-POLICY_ID="$(uvx --from coworld python - "$NAME" <<'PY'
+POLICY_ID="$(uvx --from "$COWORLD_PACKAGE" python - "$NAME" <<'PY'
 import sys
 from coworld.api_client import CoworldApiClient
 with CoworldApiClient.from_login(server_url="https://softmax.com/api") as client:
@@ -125,5 +142,5 @@ printf '\nUploaded Commander policy-version ID:\n\n    %s\n\n' "$POLICY_ID"
 printf '%s\n' \
   'Enter it in Proxy War:' \
   '' \
-  '    uvx --from coworld coworld leagues' \
-  "    uvx --from coworld coworld submit \"$NAME\" --league <league_id>"
+  "    uvx --from $COWORLD_PACKAGE coworld leagues" \
+  "    uvx --from $COWORLD_PACKAGE coworld submit \"$NAME\" --league <league_id>"

@@ -959,7 +959,9 @@ export interface Game extends GameMap {
   /**
    * Free-text agent negotiation. Emits one agent-authored message for display
    * and observation. `text` is inert cargo — no simulation state reads it — so
-   * wording can never affect determinism or replay hashes.
+   * wording can never affect simulation determinism or game-state hashes. The
+   * replay payload still records the words, so its file hash is expected to
+   * differ when the text differs.
    */
   displayAgentMessage(
     text: string,

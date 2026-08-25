@@ -41,6 +41,7 @@
  * PRE-INTERPOLATED because `defaultText` is returned as-is and never fed
  * through ICU.
  */
+import { AGENT_MESSAGE_EVENT_ID_REGEX } from "../core/Schemas";
 import {
   aiLeagueSpectatorDisplayName,
   aiLeagueSpectatorText,
@@ -64,6 +65,7 @@ import {
   type LeadSample,
   type SeriesLeadChangeBeat,
 } from "./LeadChangeTracker";
+import { publicStatedReasonText } from "./ReplayDecisionStore";
 import {
   spectatorReplaySnapshots,
   spectatorReplayVersion,
@@ -335,19 +337,19 @@ function messageBeatsDisplayEnabled(): boolean {
 }
 
 /**
- * One DELIVERED agent message, extracted from the replay record itself.
+ * One server-relayed agent-message intent, extracted from the replay record.
  *
  * THE TURN STREAM IS THE SOURCE, deliberately. decisions.jsonl also carries
- * the comms slot (`commsSlotText` + `commsSlotAccepted`), but that flag is
- * the RUNNER's claim: a runner armed with PROXYWAR_TUNE_FREETEXT_MESSAGES
- * against a server without it records `accepted: true` for a message the
- * relay silently dropped (known evidence-honesty gap, owned elsewhere). An
- * `agent_message` intent inside a recorded turn is the game server's own
- * relay — if it is in the record, every client simulated it and the
- * recipient's observation carried it. Beats built from intents can never
- * announce a conversation that did not happen.
+ * the comms slot (`commsSlotText` + `commsSlotAccepted`), and the current
+ * runner converts the server's synchronous feature-off rejection to
+ * `accepted:false`. The recorded `agent_message` intent is stronger evidence
+ * that the server admitted and queued the message. It is not proof of eventual
+ * display: `AgentMessageExecution` deliberately drops the queued message if
+ * its recipient dies before execution.
  */
 export interface RecordedAgentMessage {
+  /** Stable server-owned join; absent on archived pre-ID records. */
+  messageEventID?: string;
   turn: number;
   /** Ordinal in record order — deterministic tiebreak among same-turn beats. */
   sequence: number;
@@ -360,7 +362,7 @@ export interface RecordedAgentMessage {
 }
 
 /**
- * Walk a raw game record for delivered `agent_message` intents. Runtime
+ * Walk a raw game record for server-relayed `agent_message` intents. Runtime
  * shape-checked like every other artifact this module consumes: the record
  * arrives as parsed JSON, and a malformed turn costs that turn's messages,
  * never the mount. Sender names resolve through `info.players` (clientID →
@@ -400,6 +402,7 @@ export function recordedAgentMessages(
         clientID?: unknown;
         recipient?: unknown;
         text?: unknown;
+        messageEventID?: unknown;
       };
       if (
         candidate.type !== "agent_message" ||
@@ -413,6 +416,10 @@ export function recordedAgentMessages(
       const senderName = usernameByClientID.get(candidate.clientID);
       if (senderName === undefined) continue;
       messages.push({
+        ...(typeof candidate.messageEventID === "string" &&
+        AGENT_MESSAGE_EVENT_ID_REGEX.test(candidate.messageEventID)
+          ? { messageEventID: candidate.messageEventID }
+          : {}),
         turn: entry.turnNumber,
         sequence: messages.length,
         senderName,
@@ -506,7 +513,8 @@ function messageWarRoomEvents(
       lastAnnouncedTurnByPair.set(pairKey, message.turn);
     }
     curated.push({
-      id: `message:${message.turn}:${message.sequence}`,
+      id:
+        message.messageEventID ?? `message:${message.turn}:${message.sequence}`,
       kind: "message",
       turn: message.turn,
       sequence: message.sequence,
@@ -569,13 +577,9 @@ function planChangeWarRoomEvents(
         { actor, plan: objective },
         `${actor} shifts plan to ${objective}`,
       ),
-      publicReason: decision.reason,
+      publicReason: publicStatedReasonText(decision.reason),
       participants: [actor],
-      expandedDetail:
-        typeof decision.planRationale === "string" &&
-        decision.planRationale.trim().length > 0
-          ? decision.planRationale.trim()
-          : null,
+      expandedDetail: publicStatedReasonText(decision.planRationale ?? null),
       tier: 2,
     });
   }
@@ -1036,11 +1040,11 @@ export function curatedWarRoomEvents(
     // Both still pass through the spectator-text anonymizer so names cannot
     // leak when Anonymous Names is enabled.
     const serverFact = aiLeagueSpectatorText(event.publicText ?? event.message);
+    const publicAgentClaim = publicStatedReasonText(event.statedReason ?? null);
     const agentClaim =
-      typeof event.statedReason === "string" &&
-      event.statedReason.trim().length > 0
-        ? aiLeagueSpectatorText(event.statedReason.trim())
-        : null;
+      publicAgentClaim === null
+        ? null
+        : aiLeagueSpectatorText(publicAgentClaim);
 
     if (isAiLeagueDealEventKind(event.kind)) {
       const factKey = aiLeagueDealFactKey(event);
@@ -1635,7 +1639,7 @@ export interface BroadcastBeatsInput {
   /** Canonical record range, the timeline's own 100% mark. */
   replayMaxTurn?: number | null;
   decisions?: readonly BroadcastBeatsDecision[];
-  /** Delivered free-text messages off the record's own turns — see `recordedAgentMessages`. */
+  /** Server-relayed free-text intents from recorded turns — see `recordedAgentMessages`. */
   agentMessages?: readonly RecordedAgentMessage[];
 }
 

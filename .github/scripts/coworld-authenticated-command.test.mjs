@@ -92,6 +92,36 @@ test("runs the exact read-only Coworld status preflight", () => {
   });
 });
 
+test("runs the exact hosted episode and replay lookup used by production", () => {
+  withFakeRuntime(({ env, capture }) => {
+    const episode = "ereq_eb5481f2-9b39-40e8-9365-06d8ab620a10";
+    const episodeResult = spawnSync(
+      process.execPath,
+      [wrapper, "episodes", episode, "--json"],
+      { encoding: "utf8", env },
+    );
+    assert.equal(episodeResult.status, 0, episodeResult.stderr);
+    const replayResult = spawnSync(
+      process.execPath,
+      [wrapper, "replay-open", episode, "--hosted", "--no-open-browser"],
+      { encoding: "utf8", env },
+    );
+    assert.equal(replayResult.status, 0, replayResult.stderr);
+
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      new RegExp(`^coworld\\|episodes ${episode} --json\\|.+\\|$`),
+    );
+    assert.match(
+      lines[3],
+      new RegExp(
+        `^coworld\\|replay-open ${episode} --hosted --no-open-browser\\|.+\\|$`,
+      ),
+    );
+  });
+});
+
 test("keeps the fail-closed Docker guard connected during an exact upload", () => {
   withFakeRuntime(({ env, dockerCapture, root }) => {
     const manifest = path.join(root, "coworld_manifest.json");
@@ -364,6 +394,10 @@ test("rejects unsupported and malformed command modes before authentication", ()
     ["status", "bad", "--json"],
     ["status", "cow_eval_fixture"],
     ["leagues", "bad", "--json"],
+    ["episodes", "bad", "--json"],
+    ["episodes", "ereq_fixture"],
+    ["replay-open", "bad", "--hosted", "--no-open-browser"],
+    ["replay-open", "ereq_fixture", "--no-open-browser", "--hosted"],
     ["list", "--json", "extra"],
     ["next-version", "bad name"],
     ["commander-xp-run-episode", "/etc/outside.json"],

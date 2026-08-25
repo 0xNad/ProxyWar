@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   chooseKeystoneDealMove,
+  chooseKeystoneMessageMove,
   decisionToResponse,
   keystoneAbstentionPartners,
   withKeystoneDeal,
+  withKeystoneMessage,
+  withoutKeystoneSideSlotActions,
   withoutKeystoneTreatyBreaches,
 } from "../../coworld-adapter/src/keystone-player";
 import type {
@@ -79,6 +82,78 @@ const liveRival = (id: string) => ({
 });
 
 describe("keystone structured deals", () => {
+  it("keeps support rejection and a simultaneous reply in side slots while the primary stays ordinary", () => {
+    const supportDealID = "support-rival-1";
+    const offered = [
+      action("deal_accept", `deal_accept:${supportDealID}`, {
+        dealID: supportDealID,
+      }),
+      action("deal_reject", `deal_reject:${supportDealID}`, {
+        dealID: supportDealID,
+      }),
+      action("message", "message:r1", { recipientID: "r1" }),
+      action("attack", "attack:neutral-7", {
+        targetID: "neutral-7",
+        expansion: true,
+      }),
+      action("hold", "hold:wait"),
+    ];
+    const obs = observation({
+      incoming: [
+        {
+          dealID: supportDealID,
+          proposerPlayerID: "r1",
+          template: "support_request",
+        },
+      ],
+      rivals: [liveRival("r1")],
+    });
+    obs.nonCombat = {
+      inboundMessages: [{ senderID: "r1", turnNumber: 121 }],
+    } as AgentObservation["nonCombat"];
+
+    const primaryMenu = withoutKeystoneSideSlotActions(offered);
+    expect(primaryMenu.map((move) => move.id)).toEqual([
+      "attack:neutral-7",
+      "hold:wait",
+    ]);
+
+    // Simulate the legacy Commander choosing from the menu it is actually
+    // given, then compose both independent social slots from the original
+    // offered menu exactly as the Keystone wrapper does.
+    const commanderDecision = {
+      actionID: primaryMenu[0].id,
+      actionIDs: primaryMenu.map((move) => move.id),
+      reason: "ordinary primary",
+    } as AgentDecision;
+    const composed = withKeystoneDeal(
+      withKeystoneMessage(
+        commanderDecision,
+        chooseKeystoneMessageMove(offered, obs, new Set()),
+      ),
+      chooseKeystoneDealMove({
+        observation: obs,
+        legalActions: offered,
+        proposed: new Set(),
+      }),
+    );
+    const response = decisionToResponse("req-side-slots", composed, 5);
+
+    expect(response.selectedLegalActionId).toBe("attack:neutral-7");
+    expect(response.selectedLegalActionIds).toEqual([
+      "attack:neutral-7",
+      "hold:wait",
+    ]);
+    expect(response.selectedDealActionId).toBe(`deal_reject:${supportDealID}`);
+    expect(response.selectedMessageActionId).toBe("message:r1");
+    expect(typeof response.messageText).toBe("string");
+    const offeredIDs = new Set(offered.map((move) => move.id));
+    expect(offeredIDs.has(response.selectedDealActionId as string)).toBe(true);
+    expect(offeredIDs.has(response.selectedMessageActionId as string)).toBe(
+      true,
+    );
+  });
+
   it("answers an incoming proposal rather than letting it expire", () => {
     const move = chooseKeystoneDealMove({
       observation: observation({
@@ -514,6 +589,31 @@ describe("keystone treaty compliance guard", () => {
     expect(
       withoutKeystoneTreatyBreaches(actions, settled).map((a) => a.id),
     ).toEqual(["attack:partner", "hold"]);
+  });
+});
+
+describe("keystone message identity", () => {
+  it("answers the newest event first, then an older unanswered same-rival event", () => {
+    const olderID = "msg_00000000-0000-4000-8000-000000000021";
+    const newerID = "msg_00000000-0000-4000-8000-000000000022";
+    const offered = [
+      action("message", "message:r1", { recipientID: "r1" }),
+    ];
+    const obs = observation({ rivals: [liveRival("r1")] });
+    obs.nonCombat = {
+      inboundMessages: [
+        { messageEventID: olderID, senderID: "r1", turnNumber: 100 },
+        { messageEventID: newerID, senderID: "r1", turnNumber: 101 },
+      ],
+    } as AgentObservation["nonCombat"];
+    const answered = new Set<string>();
+
+    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    expect(answered).toContain(newerID);
+    expect(answered).not.toContain(olderID);
+
+    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    expect(answered).toContain(olderID);
   });
 });
 

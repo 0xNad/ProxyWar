@@ -7,10 +7,13 @@
 // LegalAction.id — the game side re-validates through AgentDecisionValidator.
 // No raw intents, no second validator, no new runner.
 //
-// In-clock guarantee: the executor answers every decision_request from the
-// current Strategic Directive without awaiting any LLM call. Commander (LLM)
-// refreshes run in the background between decisions (DeferredAgentPlanner), so
-// Coworld's max_decision_ms reject-on-timeout is structurally satisfied.
+// In-clock guarantee: hosted Bedrock Commander refreshes are awaited only on
+// the bounded planning cadence, under one <=12s aggregate provider deadline;
+// executor decisions between refreshes remain immediate and provider-free.
+// This makes each actual Bedrock call terminal and response-correlated instead
+// of leaving an unbounded background refresh whose evidence lands on a later
+// request. Local Claude CLI mode retains DeferredAgentPlanner because its
+// subscription transport is not the hosted/cost-accounted lane.
 //
 // Action batching (since the game image advertising protocol.maxActionsPerDecision):
 // the decision_request envelope tells us how many actions the wire will carry.
@@ -52,7 +55,9 @@ import {
   commanderExecutionEnvelope,
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDegradedCause,
+  normalizeProviderEvidence,
   normalizeRuntimeMode,
+  type CoworldProviderEvidence,
 } from "./coworld-decision-wire";
 
 import type {
@@ -89,11 +94,13 @@ export interface KeystoneBrainOptions {
   providerTimeoutMs?: number;
   /** Override the LLM provider (tests / future transports). */
   provider?: LlmProvider;
+  /** Inject the hosted Bedrock handle without bypassing its evidence recorder. */
+  bedrockProviderHandle?: KeystoneBedrockProviderHandle;
   /**
-   * Pure-blocking Commander: run the LLM planner synchronously on the wire
-   * critical path (no DeferredAgentPlanner background refresh), so the bedrock
-   * call's latency is visible and a bedrock failure is LOUD (thrown). Used to
-   * definitively validate the LLM transport. Pair with planEveryDecisionSteps=1.
+   * Force a local Claude-CLI Commander onto the synchronous refresh path.
+   * Hosted Bedrock is always synchronous on refresh decisions so provider
+   * evidence is terminal and correlated to the response that incurred it.
+   * Pair with planEveryDecisionSteps=1 only for a diagnostic.
    */
   blocking?: boolean;
 }
@@ -138,6 +145,56 @@ export function keystoneTunableFlagSummary(
 }
 
 const RESPONSE_REASON_MAX_LENGTH = 500;
+export const KEYSTONE_PROVIDER_BUDGET_MAX_MS = 12_000;
+
+/**
+ * The provider budget is the whole refresh budget, not a per-model timeout.
+ * Candidate fallback and the planner's optional repair call share it. The
+ * 250ms floor matches the direct starter and avoids a zero/negative timeout
+ * silently becoming an SDK default.
+ */
+export function boundedKeystoneProviderBudgetMs(value: unknown): number {
+  const parsed = Number(value ?? KEYSTONE_PROVIDER_BUDGET_MAX_MS);
+  if (!Number.isSafeInteger(parsed)) return KEYSTONE_PROVIDER_BUDGET_MAX_MS;
+  return Math.min(KEYSTONE_PROVIDER_BUDGET_MAX_MS, Math.max(250, parsed));
+}
+
+/**
+ * Private decision-local carrier. Symbols survive the object spreads used by
+ * Keystone's message/deal side-slot decorators, but never leak through JSON by
+ * accident. decisionToResponse is the sole point that turns it into the
+ * bounded Coworld wire envelope.
+ */
+const KEYSTONE_PROVIDER_EVIDENCE = Symbol("keystoneProviderEvidence");
+type KeystoneDecisionWithProviderEvidence = AgentDecision & {
+  [KEYSTONE_PROVIDER_EVIDENCE]?: Record<string, unknown>;
+};
+
+/**
+ * Attach only a strict aggregate. A malformed internally supplied shape is
+ * carried as one tiny invalid sentinel so the game records
+ * `providerEvidenceInvalid`; it is never repaired into fabricated valid call
+ * evidence and never allowed to put arbitrary data on the wire.
+ */
+export function withKeystoneProviderEvidence(
+  decision: AgentDecision,
+  evidence: unknown,
+): AgentDecision {
+  const normalized = normalizeProviderEvidence(evidence);
+  return {
+    ...decision,
+    [KEYSTONE_PROVIDER_EVIDENCE]:
+      normalized ?? ({ invalid: true } satisfies Record<string, unknown>),
+  } as KeystoneDecisionWithProviderEvidence;
+}
+
+function providerEvidenceForDecision(
+  decision: AgentDecision,
+): Record<string, unknown> | undefined {
+  return (decision as KeystoneDecisionWithProviderEvidence)[
+    KEYSTONE_PROVIDER_EVIDENCE
+  ];
+}
 
 export function keystoneModeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -221,7 +278,8 @@ type KeystoneMessageMove = { id: string; text: string };
  *
  * `answered` is MATCH-SCOPED (one Set per connection). Two key families share
  * it, exactly as the starter does, so no extra state is threaded through the
- * brain: `<senderID>:<turnNumber>` prevents answering the same message twice,
+ * brain: the server-owned `messageEventID` prevents answering the same
+ * message twice (with `<senderID>:<turnNumber>` only for legacy observations),
  * and `reply:<senderID>:<n>` counts the lifetime budget for that counterparty.
  */
 export function chooseKeystoneMessageMove(
@@ -237,7 +295,21 @@ export function chooseKeystoneMessageMove(
       ? metadata.recipientID
       : undefined;
   };
-  const inbound = observation.nonCombat?.inboundMessages ?? [];
+  const attributedInbound = (
+    observation.nonCombat?.inboundMessages ?? []
+  ).filter(
+    (message) =>
+      typeof message.senderID === "string" && message.senderID.length > 0,
+  );
+  const inbound = attributedInbound.filter((message) => {
+    const key =
+      typeof message.messageEventID === "string"
+        ? message.messageEventID
+        : `${message.senderID}:${message.turnNumber}`;
+    return !answered.has(key);
+  });
+
+  if (attributedInbound.length > 0 && inbound.length === 0) return null;
 
   if (inbound.length > 0) {
     const newest = [...inbound].sort(
@@ -245,41 +317,42 @@ export function chooseKeystoneMessageMove(
     )[inbound.length - 1];
     const senderID = newest?.senderID;
     if (senderID) {
-      const turnKey = `${senderID}:${newest.turnNumber}`;
-      if (!answered.has(turnKey)) {
-        let repliesSpent = 0;
-        while (
-          repliesSpent < KEYSTONE_MAX_REPLIES_PER_RIVAL &&
-          answered.has(`reply:${senderID}:${repliesSpent}`)
-        ) {
-          repliesSpent += 1;
-        }
-        const offer = offers.find((action) => recipientOf(action) === senderID);
-        if (repliesSpent < KEYSTONE_MAX_REPLIES_PER_RIVAL && offer) {
-          const rival = (observation.visiblePlayers ?? []).find(
-            (player) => player.playerID === senderID,
-          );
-          const hasOpenDeal = [
-            ...(observation.deals?.incomingProposals ?? []),
-            ...(observation.deals?.outgoingProposals ?? []),
-            ...(observation.deals?.activeDeals ?? []),
-          ].some(
-            (view) =>
-              view.proposerPlayerID === senderID ||
-              view.recipientPlayerID === senderID,
-          );
-          const text = rival?.isAllied
-            ? KEYSTONE_REPLIES.ally
-            : hasOpenDeal
-              ? KEYSTONE_REPLIES.dealOpen
-              : KEYSTONE_REPLIES.neutral;
-          answered.add(turnKey);
-          answered.add(`reply:${senderID}:${repliesSpent}`);
-          return {
-            id: offer.id,
-            text: text.slice(0, KEYSTONE_MESSAGE_MAX_CHARS),
-          };
-        }
+      const turnKey =
+        typeof newest.messageEventID === "string"
+          ? newest.messageEventID
+          : `${senderID}:${newest.turnNumber}`;
+      let repliesSpent = 0;
+      while (
+        repliesSpent < KEYSTONE_MAX_REPLIES_PER_RIVAL &&
+        answered.has(`reply:${senderID}:${repliesSpent}`)
+      ) {
+        repliesSpent += 1;
+      }
+      const offer = offers.find((action) => recipientOf(action) === senderID);
+      if (repliesSpent < KEYSTONE_MAX_REPLIES_PER_RIVAL && offer) {
+        const rival = (observation.visiblePlayers ?? []).find(
+          (player) => player.playerID === senderID,
+        );
+        const hasOpenDeal = [
+          ...(observation.deals?.incomingProposals ?? []),
+          ...(observation.deals?.outgoingProposals ?? []),
+          ...(observation.deals?.activeDeals ?? []),
+        ].some(
+          (view) =>
+            view.proposerPlayerID === senderID ||
+            view.recipientPlayerID === senderID,
+        );
+        const text = rival?.isAllied
+          ? KEYSTONE_REPLIES.ally
+          : hasOpenDeal
+            ? KEYSTONE_REPLIES.dealOpen
+            : KEYSTONE_REPLIES.neutral;
+        answered.add(turnKey);
+        answered.add(`reply:${senderID}:${repliesSpent}`);
+        return {
+          id: offer.id,
+          text: text.slice(0, KEYSTONE_MESSAGE_MAX_CHARS),
+        };
       }
       // An unanswerable newest message (budget spent, or no offer for that
       // rival) means silence this decision — never fall through to an opener,
@@ -333,14 +406,13 @@ export function withKeystoneMessage(
  * policies absorbed 94.9% of every expired offer
  * (`2026-08-16-deal-non-response-diagnosis.md`).
  *
- * Residual exposure, stated rather than assumed: deal meta-actions are also
- * scored as ordinary `diplomacy` candidates by the planner
- * (`moduleForActionKind`), and the runner applies one chosen in the PRIMARY
- * slot via `applyDealAction`. So the brain can still play a deal on its own —
- * including accepting a `support_request` obligation this policy would refuse
- * — and when it does while the slot below is also filled, the slot is refused
- * and stamped `dealSlotRejected`. Whether that actually happens in hosted
- * keystone play is UNVERIFIED; it is a known gap, not a claim of "never".
+ * Deal/message actions are removed from the Commander/executor's PRIMARY menu
+ * before it decides. The unfiltered offered menu remains available only to the
+ * two dedicated social-slot choosers below. This separation matters: otherwise
+ * the legacy planner can accept a support request as its primary while this
+ * policy simultaneously rejects the same request in the deal slot, or consume
+ * a message offer without the required body. Primary and side-slot selections
+ * therefore cannot compete or contradict one another.
  *
  * The hard constraint shaping this policy: keystone's brain does not know
  * deals exist, so ACCEPTING an obligation it will not honor is worse than
@@ -373,6 +445,33 @@ type KeystoneDealDeps = {
   legalActions: LegalAction[];
   proposed: Set<string>;
 };
+
+const KEYSTONE_SIDE_SLOT_ACTION_KINDS = new Set<LegalAction["kind"]>([
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
+  "message",
+]);
+
+/**
+ * The legacy Commander/executor understands deal actions as diplomacy-shaped
+ * primary candidates, but Keystone owns those actions through a sibling slot.
+ * Keep the menus structurally separate so the primary is always an ordinary
+ * game action and every deal/message id is handled only by its exact-id slot.
+ *
+ * Real gameplay menus always contain `hold`; returning an empty list here is
+ * deliberate fail-closed behavior for a malformed protocol menu. The caller
+ * then takes the loud transport fallback instead of re-exposing a side-slot id
+ * to the primary planner.
+ */
+export function withoutKeystoneSideSlotActions(
+  legalActions: LegalAction[],
+): LegalAction[] {
+  return legalActions.filter(
+    (action) => !KEYSTONE_SIDE_SLOT_ACTION_KINDS.has(action.kind),
+  );
+}
 
 function keystoneDealMetadata(action: LegalAction): {
   dealID?: string;
@@ -766,6 +865,7 @@ export function decisionToResponse(
   // brain attribution remain unknown instead of inheriting the seat label.
   const runtimeMode = normalizeRuntimeMode(decision.metadata?.runtimeMode);
   const commanderExecution = commanderExecutionEnvelope(decision.metadata);
+  const providerEvidence = providerEvidenceForDecision(decision);
   // The executor's cascade, normalized for the wire: primary first, deduped,
   // then capped to whatever the game advertised it will carry. Emitting more
   // than the advertisement would be silently truncated game-side, so the
@@ -839,6 +939,7 @@ export function decisionToResponse(
     confidence,
     ...(runtimeMode !== undefined ? { runtimeMode } : {}),
     ...(commanderExecution !== undefined ? { commanderExecution } : {}),
+    ...(providerEvidence !== undefined ? { providerEvidence } : {}),
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
     // The cause has to be forwarded EXPLICITLY: this function picks fields rather
@@ -994,13 +1095,17 @@ export function transportFallbackResponse(
   requestID: string,
   request: unknown,
   errorMessage: string,
+  providerEvidence?: unknown,
 ): Record<string, unknown> {
   const actions =
     (request as { legalActions?: Array<{ id?: unknown; kind?: unknown }> })
       ?.legalActions ?? [];
   const holdAction = actions.find((action) => action.kind === "hold");
-  const fallbackActionID = String((holdAction ?? actions[0])?.id ?? "");
-  return decisionToResponse(requestID, {
+  // Fail closed after the primary-menu filter: if a malformed request offers
+  // only deal/message side-slot ids, never resurrect one as the executable
+  // scalar. Empty is intentionally rejected by the game-side validator.
+  const fallbackActionID = String(holdAction?.id ?? "");
+  const decision: AgentDecision = {
     actionID: fallbackActionID,
     reason: `keystone transport fallback: ${errorMessage}`,
     metadata: {
@@ -1014,7 +1119,13 @@ export function transportFallbackResponse(
       // invent a planner diagnosis the code path does not support.
       degradedCause: "policy-error",
     },
-  });
+  };
+  return decisionToResponse(
+    requestID,
+    providerEvidence === undefined
+      ? decision
+      : withKeystoneProviderEvidence(decision, providerEvidence),
+  );
 }
 
 /**
@@ -1205,12 +1316,24 @@ export function isModelUnavailableError(message: unknown): boolean {
   );
 }
 
-type BedrockClientLike = {
+export type BedrockResponseLike = {
+  content?: Array<{ text?: unknown }>;
+  model?: unknown;
+  id?: unknown;
+  usage?: {
+    input_tokens?: unknown;
+    output_tokens?: unknown;
+    inputTokens?: unknown;
+    outputTokens?: unknown;
+  };
+};
+
+export type BedrockClientLike = {
   messages: {
     create: (
       body: Record<string, unknown>,
-      options: { timeout: number },
-    ) => Promise<{ content?: Array<{ text?: unknown }> }>;
+      options: { timeout: number; signal?: AbortSignal },
+    ) => Promise<BedrockResponseLike>;
   };
 };
 
@@ -1219,12 +1342,283 @@ interface BedrockClientOptions {
   baseURL?: string;
 }
 
+type KeystoneProviderAttemptStatus =
+  | "pending"
+  | "completed"
+  | "failed"
+  | "timed-out";
+
+interface KeystoneProviderAttempt {
+  model: string;
+  status: KeystoneProviderAttemptStatus;
+  responseModel?: string;
+  requestID?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  rawOutputPresent: boolean;
+}
+
+interface KeystoneProviderEvidenceState {
+  provider: string;
+  deadlineAt: number;
+  attempts: KeystoneProviderAttempt[];
+}
+
+export interface KeystoneProviderEvidenceRecorder {
+  beginDecision(): void;
+  remainingBudgetMs(): number;
+  startAttempt(model: string): number;
+  completeAttempt(attempt: number, response: BedrockResponseLike): void;
+  failAttempt(attempt: number, timedOut: boolean): void;
+  takeEvidence(): CoworldProviderEvidence | undefined;
+}
+
+function boundedProviderEvidenceLabel(
+  value: unknown,
+  maxLength: number,
+): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    /^[A-Za-z0-9._:/-]+$/.test(value)
+    ? value
+    : undefined;
+}
+
+function boundedProviderTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 1_000_000_000
+    ? value
+    : undefined;
+}
+
+function bedrockResponseText(response: BedrockResponseLike): string {
+  return (response.content ?? [])
+    .map((block) => (typeof block?.text === "string" ? block.text : ""))
+    .join("")
+    .trim();
+}
+
+/**
+ * One decision-scoped terminal aggregate. There is deliberately no global
+ * counter: a call can only be attributed to the exact response whose refresh
+ * awaited it. Every started attempt receives exactly one terminal status.
+ */
+export function createKeystoneProviderEvidenceRecorder(options: {
+  provider: string;
+  budgetMs?: number;
+  now?: () => number;
+}): KeystoneProviderEvidenceRecorder {
+  const provider = boundedProviderEvidenceLabel(options.provider, 64);
+  if (provider === undefined) {
+    throw new Error("invalid Keystone provider attribution");
+  }
+  const budgetMs = boundedKeystoneProviderBudgetMs(options.budgetMs);
+  const now = options.now ?? Date.now;
+  let state: KeystoneProviderEvidenceState | null = null;
+
+  const requireState = (): KeystoneProviderEvidenceState => {
+    state ??= { provider, deadlineAt: now() + budgetMs, attempts: [] };
+    return state;
+  };
+
+  return {
+    beginDecision() {
+      if (state?.attempts.some((attempt) => attempt.status === "pending")) {
+        throw new Error(
+          "cannot start a Keystone provider group while an attempt is pending",
+        );
+      }
+      state = { provider, deadlineAt: now() + budgetMs, attempts: [] };
+    },
+
+    remainingBudgetMs() {
+      return Math.max(0, requireState().deadlineAt - now());
+    },
+
+    startAttempt(model: string) {
+      const active = requireState();
+      const boundedModel = boundedProviderEvidenceLabel(model, 160);
+      if (boundedModel === undefined) {
+        // Fail before invocation. An unattributable call is worse than a loud
+        // no-call fallback because it cannot support honest model/cost proof.
+        throw new Error("invalid Keystone Bedrock model attribution");
+      }
+      if (active.attempts.length >= 8) {
+        throw new Error(
+          "Keystone provider attempt cap reached before invocation",
+        );
+      }
+      if (active.deadlineAt - now() <= 0) {
+        throw new Error("Keystone provider aggregate budget exhausted");
+      }
+      active.attempts.push({
+        model: boundedModel,
+        status: "pending",
+        rawOutputPresent: false,
+      });
+      return active.attempts.length - 1;
+    },
+
+    completeAttempt(attemptIndex, response) {
+      const attempt = requireState().attempts[attemptIndex];
+      if (attempt === undefined || attempt.status !== "pending") {
+        throw new Error("Keystone provider attempt completed out of sequence");
+      }
+      attempt.status = "completed";
+      const responseModel = boundedProviderEvidenceLabel(response.model, 160);
+      const requestID = boundedProviderEvidenceLabel(response.id, 160);
+      const inputTokens = boundedProviderTokenCount(
+        response.usage?.input_tokens ?? response.usage?.inputTokens,
+      );
+      const outputTokens = boundedProviderTokenCount(
+        response.usage?.output_tokens ?? response.usage?.outputTokens,
+      );
+      if (responseModel !== undefined) attempt.responseModel = responseModel;
+      if (requestID !== undefined) attempt.requestID = requestID;
+      if (inputTokens !== undefined) attempt.inputTokens = inputTokens;
+      if (outputTokens !== undefined) attempt.outputTokens = outputTokens;
+      attempt.rawOutputPresent = bedrockResponseText(response).length > 0;
+    },
+
+    failAttempt(attemptIndex, timedOut) {
+      const attempt = requireState().attempts[attemptIndex];
+      if (attempt === undefined || attempt.status !== "pending") {
+        throw new Error("Keystone provider attempt failed out of sequence");
+      }
+      attempt.status = timedOut ? "timed-out" : "failed";
+    },
+
+    takeEvidence() {
+      const completedState = state;
+      state = null;
+      if (completedState === null || completedState.attempts.length === 0) {
+        return undefined;
+      }
+      // A synchronous provider should never leave a pending promise behind.
+      // If a future refactor does, close it as timed out so the aggregate stays
+      // terminal and the defect cannot masquerade as a completed/clean call.
+      for (const attempt of completedState.attempts) {
+        if (attempt.status === "pending") attempt.status = "timed-out";
+      }
+      const completed = completedState.attempts.filter(
+        (attempt) => attempt.status === "completed",
+      );
+      const failedAttemptCount = completedState.attempts.filter(
+        (attempt) => attempt.status === "failed",
+      ).length;
+      const timedOutAttemptCount = completedState.attempts.filter(
+        (attempt) => attempt.status === "timed-out",
+      ).length;
+      const inputTokenValues = completed
+        .map((attempt) => attempt.inputTokens)
+        .filter((value): value is number => value !== undefined);
+      const outputTokenValues = completed
+        .map((attempt) => attempt.outputTokens)
+        .filter((value): value is number => value !== undefined);
+      const inputTokens = inputTokenValues.reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      const outputTokens = outputTokenValues.reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      const soleCompleted = completed.length === 1 ? completed[0] : undefined;
+      const evidence: CoworldProviderEvidence = {
+        callKind: "planner",
+        provider: completedState.provider,
+        requestedModel: completedState.attempts[0].model,
+        attemptedModels: completedState.attempts.map(
+          (attempt) => attempt.model,
+        ),
+        attemptCount: completedState.attempts.length,
+        completedAttemptCount: completed.length,
+        failedAttemptCount,
+        timedOutAttemptCount,
+        // Response identity is only response-correlated when exactly one
+        // provider response completed. Token totals are sums over completed
+        // responses only and are omitted unless every completed response
+        // reported that side of usage.
+        ...(soleCompleted?.responseModel !== undefined
+          ? { responseModel: soleCompleted.responseModel }
+          : {}),
+        ...(soleCompleted?.requestID !== undefined
+          ? { requestID: soleCompleted.requestID }
+          : {}),
+        ...(completed.length > 0 &&
+        inputTokenValues.length === completed.length &&
+        inputTokens <= 1_000_000_000
+          ? { inputTokens }
+          : {}),
+        ...(completed.length > 0 &&
+        outputTokenValues.length === completed.length &&
+        outputTokens <= 1_000_000_000
+          ? { outputTokens }
+          : {}),
+        rawOutputPresent: completed.some((attempt) => attempt.rawOutputPresent),
+      };
+      // This assertion is the writer-side half of the wire contract. It must
+      // never repair or coerce: a locally impossible aggregate is a code bug.
+      if (normalizeProviderEvidence(evidence) === null) {
+        throw new Error("Keystone produced malformed provider evidence");
+      }
+      return evidence;
+    },
+  };
+}
+
+export function isKeystoneProviderTimeoutError(error: unknown): boolean {
+  const value = error as { name?: unknown; code?: unknown; message?: unknown };
+  const name = String(value?.name ?? "").toLowerCase();
+  const code = String(value?.code ?? "").toLowerCase();
+  const message = String(value?.message ?? error ?? "").toLowerCase();
+  return (
+    name.includes("timeout") ||
+    name === "aborterror" ||
+    code === "etimedout" ||
+    code === "aborted" ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("aborted")
+  );
+}
+
+/** Exact hosted-sidecar routing options, kept pure for release verification. */
+export function keystoneBedrockSidecarEndpoint(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const raw = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  if (raw === undefined || raw.length === 0) return undefined;
+  let endpoint: URL;
+  try {
+    endpoint = new URL(raw);
+  } catch {
+    throw new Error("Keystone Bedrock sidecar endpoint is invalid");
+  }
+  if (
+    endpoint.protocol !== "http:" ||
+    !["127.0.0.1", "localhost"].includes(endpoint.hostname) ||
+    endpoint.username !== "" ||
+    endpoint.password !== "" ||
+    endpoint.pathname !== "/" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== "" ||
+    endpoint.port === ""
+  ) {
+    throw new Error("Keystone Bedrock sidecar endpoint is invalid");
+  }
+  return endpoint.toString().replace(/\/$/, "");
+}
+
 /** Exact hosted-sidecar routing options, kept pure for release verification. */
 export function keystoneBedrockClientOptions(
   region: string,
   env: NodeJS.ProcessEnv = process.env,
 ): BedrockClientOptions {
-  const sidecarEndpoint = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  const sidecarEndpoint = keystoneBedrockSidecarEndpoint(env);
   return {
     awsRegion: region,
     ...(sidecarEndpoint !== undefined && sidecarEndpoint.length > 0
@@ -1233,48 +1627,74 @@ export function keystoneBedrockClientOptions(
   };
 }
 
-function createBedrockProvider(
+export interface KeystoneBedrockProviderHandle {
+  provider: LlmProvider;
+  evidence: KeystoneProviderEvidenceRecorder;
+}
+
+export function createKeystoneBedrockProvider(
   env: NodeJS.ProcessEnv = process.env,
-): LlmProvider {
+  deps: {
+    createClient?: () => Promise<BedrockClientLike>;
+    now?: () => number;
+  } = {},
+): KeystoneBedrockProviderHandle {
   const candidates = bedrockModelCandidates(env);
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? "us-west-2";
-  const timeoutMs = Number(env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
+  const budgetMs = boundedKeystoneProviderBudgetMs(env.PROXYWAR_LLM_TIMEOUT_MS);
+  const sidecarEndpoint = keystoneBedrockSidecarEndpoint(env);
+  if (env.USE_BEDROCK === "true" && sidecarEndpoint === undefined) {
+    throw new Error("Keystone Bedrock sidecar endpoint is missing");
+  }
+  const providerName =
+    sidecarEndpoint === undefined ? "aws-bedrock" : "bedrock-sidecar";
+  const evidence = createKeystoneProviderEvidenceRecorder({
+    provider: providerName,
+    budgetMs,
+    now: deps.now,
+  });
   let client: BedrockClientLike | null = null;
   let lockedIndex: number | null = null;
-  return {
-    providerType: "custom",
-    async complete(prompt: string): Promise<string> {
-      if (client === null) {
-        // Resolved at pod runtime only (adapter dependency); kept opaque so
-        // vite/vitest never try to bundle it.
-        const bedrockSpecifier = "@anthropic-ai/bedrock-sdk";
-        const mod = (await import(/* @vite-ignore */ bedrockSpecifier)) as {
-          default?: new (options: BedrockClientOptions) => BedrockClientLike;
-          AnthropicBedrock?: new (
-            options: BedrockClientOptions,
-          ) => BedrockClientLike;
-        };
-        const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
-        if (AnthropicBedrock === undefined) {
-          throw new Error("@anthropic-ai/bedrock-sdk did not export a client");
-        }
-        // SIDECAR ENDPOINT (platform change 2026-07-30). Hosted pods do NOT
-        // reach AWS directly: they get a per-pod proxy at
-        // AWS_ENDPOINT_URL_BEDROCK_RUNTIME plus DELIBERATELY FAKE placeholder
-        // credentials. Calling the real Bedrock host with those placeholders
-        // returns `403 {"Message":"Invalid API Key format: Must start with
-        // pre-defined prefix"}` and the seat silently degrades to the rule
-        // planner — which is what the league has been ranking. Verified in-pod
-        // 2026-08-19 via PROXYWAR_KEYSTONE_BEDROCK_DIAG=1. Absent variable
-        // falls back to the SDK default, so local runs are unchanged.
-        client = new AnthropicBedrock(
-          keystoneBedrockClientOptions(region, env),
-        );
+  const createClient =
+    deps.createClient ??
+    (async (): Promise<BedrockClientLike> => {
+      // Resolved at pod runtime only (adapter dependency); kept opaque so
+      // vite/vitest never try to bundle it.
+      const bedrockSpecifier = "@anthropic-ai/bedrock-sdk";
+      const mod = (await import(/* @vite-ignore */ bedrockSpecifier)) as {
+        default?: new (options: BedrockClientOptions) => BedrockClientLike;
+        AnthropicBedrock?: new (
+          options: BedrockClientOptions,
+        ) => BedrockClientLike;
+      };
+      const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
+      if (AnthropicBedrock === undefined) {
+        throw new Error("@anthropic-ai/bedrock-sdk did not export a client");
       }
+      return new AnthropicBedrock(keystoneBedrockClientOptions(region, env));
+    });
+  const provider: LlmProvider = {
+    providerType: "custom",
+    model: candidates[0] ?? null,
+    async complete(prompt: string): Promise<string> {
+      // SIDECAR ENDPOINT (platform change 2026-07-30). Hosted pods do NOT
+      // reach AWS directly: they get a per-pod proxy at
+      // AWS_ENDPOINT_URL_BEDROCK_RUNTIME plus DELIBERATELY FAKE placeholder
+      // credentials. Calling the real Bedrock host with those placeholders
+      // returns `403 {"Message":"Invalid API Key format: Must start with
+      // pre-defined prefix"}` and the seat silently degrades to the rule
+      // planner — which is what the league has been ranking. Verified in-pod
+      // 2026-08-19 via PROXYWAR_KEYSTONE_BEDROCK_DIAG=1. Absent variable
+      // falls back to the SDK default, so local runs are unchanged.
+      client ??= await createClient();
       const startIndex = lockedIndex ?? 0;
       let lastError: unknown = null;
       for (let i = startIndex; i < candidates.length; i += 1) {
         const candidate = candidates[i];
+        const attempt = evidence.startAttempt(candidate);
+        const remainingMs = evidence.remainingBudgetMs();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), remainingMs);
         try {
           const response = await client.messages.create(
             {
@@ -1282,26 +1702,29 @@ function createBedrockProvider(
               max_tokens: 1024,
               messages: [{ role: "user", content: prompt }],
             },
-            { timeout: timeoutMs },
+            { timeout: remainingMs, signal: controller.signal },
           );
+          evidence.completeAttempt(attempt, response);
           if (lockedIndex !== i) {
             lockedIndex = i;
             console.log(`keystone bedrock model locked: ${candidate}`);
           }
-          return (response?.content ?? [])
-            .map((block) => (typeof block?.text === "string" ? block.text : ""))
-            .join("")
-            .trim();
+          return bedrockResponseText(response);
         } catch (error) {
           lastError = error;
+          const timedOut =
+            controller.signal.aborted || isKeystoneProviderTimeoutError(error);
+          evidence.failAttempt(attempt, timedOut);
           const message = error instanceof Error ? error.message : error;
-          if (isModelUnavailableError(message)) {
+          if (!timedOut && isModelUnavailableError(message)) {
             console.error(
               `keystone bedrock model unavailable, trying next: ${candidate} -> ${String(message).slice(0, 160)}`,
             );
             continue;
           }
           throw error;
+        } finally {
+          clearTimeout(timeout);
         }
       }
       throw new Error(
@@ -1311,6 +1734,44 @@ function createBedrockProvider(
       );
     },
   };
+  return { provider, evidence };
+}
+
+class KeystoneProviderEvidenceAgentBrain implements AgentBrain {
+  readonly brainType: AgentBrain["brainType"];
+
+  constructor(
+    private readonly inner: AgentBrain,
+    private readonly evidence: KeystoneProviderEvidenceRecorder,
+  ) {
+    this.brainType = inner.brainType;
+  }
+
+  async decide(input: AgentBrainInput): Promise<AgentDecision> {
+    this.evidence.beginDecision();
+    try {
+      const decision = await this.inner.decide(input);
+      const providerEvidence = this.evidence.takeEvidence();
+      return providerEvidence === undefined
+        ? decision
+        : withKeystoneProviderEvidence(decision, providerEvidence);
+    } catch (error) {
+      throw new KeystoneProviderDecisionError(
+        error instanceof Error ? error.message : String(error),
+        this.evidence.takeEvidence(),
+      );
+    }
+  }
+}
+
+class KeystoneProviderDecisionError extends Error {
+  constructor(
+    message: string,
+    readonly providerEvidence: CoworldProviderEvidence | undefined,
+  ) {
+    super(message);
+    this.name = "KeystoneProviderDecisionError";
+  }
 }
 
 export function createKeystoneBrain(
@@ -1330,37 +1791,53 @@ export function createKeystoneBrain(
   });
 
   let planner: AgentPlanner;
+  let providerEvidence: KeystoneProviderEvidenceRecorder | null = null;
   if (options.mode === "mock") {
     planner = new MockLlmPlanner(options.profile);
   } else {
-    const provider =
-      options.provider ??
-      (options.mode === "claude-cli"
-        ? modules.claudeCli.createClaudeCliLlmProviderFromEnv()
-        : createBedrockProvider());
+    let provider = options.provider;
+    if (provider === undefined && options.mode === "bedrock") {
+      const bedrock =
+        options.bedrockProviderHandle ?? createKeystoneBedrockProvider();
+      provider = bedrock.provider;
+      providerEvidence = bedrock.evidence;
+    }
+    provider ??= modules.claudeCli.createClaudeCliLlmProviderFromEnv();
     const llmPlanner = new LlmAgentPlanner({
       provider,
       profile: options.profile,
-      providerTimeoutMs: options.providerTimeoutMs,
+      // The Bedrock provider owns the actual <=12s aggregate deadline and
+      // abort. Keep the planner's generic timeout slightly outside it so it
+      // cannot win the race and abandon a still-settling SDK promise.
+      providerTimeoutMs:
+        providerEvidence !== null
+          ? KEYSTONE_PROVIDER_BUDGET_MAX_MS + 500
+          : options.providerTimeoutMs,
       plannerType: "real-llm",
     });
-    // Pure-blocking Commander: await the LLM planner directly so the bedrock call
-    // sits on the wire critical path (visible latency, loud failures). Otherwise
-    // the in-clock DeferredAgentPlanner refreshes it in the background.
-    planner = options.blocking
-      ? llmPlanner
-      : new DeferredAgentPlanner(
-          llmPlanner,
-          new RuleAgentPlanner(options.profile),
-        );
+    // Hosted Bedrock is synchronous ONLY on refresh decisions: this is the
+    // correlation boundary for terminal provider evidence. The plan cadence
+    // still makes intervening executor decisions immediate and no-call. Local
+    // Claude CLI retains the background adapter unless explicitly diagnosed in
+    // blocking mode.
+    planner =
+      options.mode === "bedrock" || options.blocking
+        ? llmPlanner
+        : new DeferredAgentPlanner(
+            llmPlanner,
+            new RuleAgentPlanner(options.profile),
+          );
   }
 
-  return new PlannerExecutorAgentBrain({
+  const brain = new PlannerExecutorAgentBrain({
     profile: options.profile,
     planner,
     executor,
     planEveryDecisionSteps,
   });
+  return providerEvidence === null
+    ? brain
+    : new KeystoneProviderEvidenceAgentBrain(brain, providerEvidence);
 }
 
 function redactPlayerUrl(url: string): string {
@@ -1382,8 +1859,12 @@ async function main(): Promise<void> {
   }
   const repoRoot = process.env.PROXYWAR_REPO ?? "/app/proxywar";
   const mode = keystoneModeFromEnv();
-  const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
-    "aggressive") as AgentStrategyProfile;
+  const configuredProfile = process.env.PROXYWAR_KEYSTONE_PROFILE?.trim();
+  const profile = (
+    configuredProfile === undefined || configuredProfile === ""
+      ? "aggressive"
+      : configuredProfile
+  ) as AgentStrategyProfile;
   const blocking =
     process.env.PROXYWAR_KEYSTONE_BLOCKING === "1" ||
     process.env.PROXYWAR_KEYSTONE_BLOCKING?.trim().toLowerCase() === "true";
@@ -1404,29 +1885,16 @@ async function main(): Promise<void> {
     blocking,
   });
 
-  // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
-  // stderr 403s for us via the Coworld CLI, so this surfaces cred presence + the
-  // real Bedrock error into every wire `reason` (which lands in the readable
-  // decisions.jsonl). Splits "runner injected no creds" from "creds present but
-  // failing" from "our request is malformed".
+  // Optional configuration diagnostic (gated; OFF in production). It no longer
+  // invokes Bedrock at startup: every actual model call must belong to exactly
+  // one decision-scoped terminal providerEvidence aggregate.
   let bedrockDiag = "";
   if (process.env.PROXYWAR_KEYSTONE_BEDROCK_DIAG === "1") {
     const resolvedRegion =
       process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
     const keyState = process.env.AWS_ACCESS_KEY_ID ? "set" : "MISSING";
     const tokenState = process.env.AWS_SESSION_TOKEN ? "set" : "absent";
-    let probe: string;
-    try {
-      const out = await createBedrockProvider().complete(
-        "Reply with the single word OK.",
-      );
-      probe = `OK:${out.slice(0, 24)}`;
-    } catch (error) {
-      probe = (error instanceof Error ? error.message : String(error)).slice(
-        0,
-        260,
-      );
-    }
+    const probe = "disabled:decision-correlated-provider-evidence";
     bedrockDiag = `BEDROCKDIAG[USE_BEDROCK=${process.env.USE_BEDROCK ?? "unset"} key=${keyState} token=${tokenState} AWS_REGION=${process.env.AWS_REGION ?? "unset"} resolved=${resolvedRegion} probe=${probe}]`;
     console.log(bedrockDiag);
   }
@@ -1513,9 +1981,16 @@ async function main(): Promise<void> {
               `keystone treaty guard skipped, menu unfiltered: ${guardError instanceof Error ? guardError.message : String(guardError)}`,
             );
           }
+          const primaryActions =
+            withoutKeystoneSideSlotActions(compliantActions);
+          if (primaryActions.length === 0) {
+            throw new Error(
+              "keystone primary menu has no ordinary action after removing social side slots",
+            );
+          }
           const compliantInput: AgentBrainInput = {
             ...input,
-            legalActions: compliantActions,
+            legalActions: primaryActions,
           };
           const decided = await brain.decide(compliantInput);
           // The social slots are cosmetic relative to the game action: a bug
@@ -1563,6 +2038,9 @@ async function main(): Promise<void> {
           requestID,
           message.request,
           messageText,
+          error instanceof KeystoneProviderDecisionError
+            ? error.providerEvidence
+            : undefined,
         );
       }
       if (bedrockDiag) {

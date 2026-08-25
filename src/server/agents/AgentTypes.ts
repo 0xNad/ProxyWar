@@ -482,6 +482,11 @@ export interface AgentQuickChatOption {
  * the untrusted-data contract.
  */
 export interface AgentInboundMessage {
+  /**
+   * Opaque server-owned replay/decision join. Optional only for archived
+   * observations and fixtures produced before message-event IDs existed.
+   */
+  messageEventID?: string;
   senderID: string;
   senderName: string;
   /** Verbatim as the sender wrote it, already length/character validated. */
@@ -1759,6 +1764,8 @@ export interface AgentDecisionRecord {
   decidedAt: number;
   decisionLatencyMs: number;
   observationSummary: string;
+  /** Exact message events visible in this decision's bounded inbox. */
+  inboundMessageEventIDs?: string[];
   strategicPriority?: AgentStrategicPriority;
   strategicUrgency?: AgentStrategicState["urgency"];
   strategicSummary?: string;

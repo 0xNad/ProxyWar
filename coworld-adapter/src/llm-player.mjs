@@ -70,58 +70,361 @@ export function isModelUnavailableError(message) {
 }
 const REGION =
   process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
-const TIMEOUT_MS = Number(process.env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
+export function boundedLlmTimeoutMs(value) {
+  const parsed = Number(value ?? 12_000);
+  if (!Number.isSafeInteger(parsed)) return 12_000;
+  return Math.min(12_000, Math.max(250, parsed));
+}
+const TIMEOUT_MS = boundedLlmTimeoutMs(process.env.PROXYWAR_LLM_TIMEOUT_MS);
 // Use Bedrock only when the platform provisioned it; otherwise mock so local
 // runs and certification never need real AWS credentials.
 const USE_BEDROCK =
   process.env.USE_BEDROCK === "true" && process.env.PROXYWAR_LLM_MOCK !== "1";
 
+function boundedProviderEvidenceLabel(value, maxLength) {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    /^[A-Za-z0-9._:/-]+$/.test(value)
+    ? value
+    : undefined;
+}
+
+function boundedProviderTokenCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000
+    ? value
+    : undefined;
+}
+
+export function isProviderTimeoutError(error) {
+  const name = String(error?.name ?? "").toUpperCase();
+  const code = String(error?.code ?? "").toUpperCase();
+  const message = String(error?.message ?? error);
+  return (
+    name === "ABORTERROR" ||
+    name === "TIMEOUTERROR" ||
+    code === "ABORT_ERR" ||
+    code === "ETIMEDOUT" ||
+    /timed?\s*out|timeout/i.test(message)
+  );
+}
+
+export function strictBedrockSidecarEndpoint(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw.length === 0) return undefined;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("bedrock-sidecar-endpoint-invalid");
+  }
+  if (
+    parsed.protocol !== "http:" ||
+    (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") ||
+    parsed.port.length === 0 ||
+    parsed.pathname !== "/" ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0 ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0
+  ) {
+    throw new Error("bedrock-sidecar-endpoint-invalid");
+  }
+  return parsed.origin;
+}
+
+/** One decision-scoped aggregate; a no-call decision remains absent. */
+export function createActionProviderEvidenceRecorder() {
+  let group;
+  let decisionSequence = 0;
+  const totals = {
+    decisionsWithProviderCalls: 0,
+    attemptCount: 0,
+    completedAttemptCount: 0,
+    failedAttemptCount: 0,
+    timedOutAttemptCount: 0,
+  };
+  return {
+    beginDecision() {
+      group = undefined;
+      decisionSequence += 1;
+    },
+    decisionID() {
+      return decisionSequence;
+    },
+    start(descriptor) {
+      const provider = boundedProviderEvidenceLabel(descriptor?.provider, 64);
+      const requestedModel = boundedProviderEvidenceLabel(
+        descriptor?.requestedModel,
+        160,
+      );
+      if (group === undefined) {
+        group = {
+          provider: provider ?? "invalid-attribution",
+          requestedModel: requestedModel ?? "invalid-attribution",
+          attemptedModels: [],
+          attemptCount: 0,
+          completedAttemptCount: 0,
+          failedAttemptCount: 0,
+          timedOutAttemptCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          inputTokensObserved: false,
+          outputTokensObserved: false,
+          rawOutputPresent: false,
+          invalidAttribution:
+            provider === undefined || requestedModel === undefined,
+        };
+      }
+      if (group.attemptCount >= 8) {
+        group.attemptOverflow = true;
+        return null;
+      }
+      group.attemptCount += 1;
+      group.attemptedModels.push(requestedModel ?? "invalid-attribution");
+      return group.attemptCount - 1;
+    },
+    complete(attempt, value = {}) {
+      if (group === undefined || attempt === null) return;
+      group.completedAttemptCount += 1;
+      const responseModel = boundedProviderEvidenceLabel(
+        value.responseModel,
+        160,
+      );
+      const requestID = boundedProviderEvidenceLabel(value.requestID, 160);
+      if (responseModel !== undefined) group.responseModel = responseModel;
+      if (group.attemptCount === 1 && requestID !== undefined) {
+        group.requestID = requestID;
+      } else if (group.attemptCount > 1) {
+        delete group.requestID;
+      }
+      const inputTokens = boundedProviderTokenCount(value.inputTokens);
+      const outputTokens = boundedProviderTokenCount(value.outputTokens);
+      if (
+        Number.isSafeInteger(value.inputTokens) &&
+        value.inputTokens > 1_000_000_000
+      ) {
+        group.inputTokensOverflow = true;
+        group.inputTokensObserved = false;
+      } else if (inputTokens !== undefined && !group.inputTokensOverflow) {
+        if (group.inputTokens + inputTokens <= 1_000_000_000) {
+          group.inputTokens += inputTokens;
+          group.inputTokensObserved = true;
+        } else {
+          group.inputTokensOverflow = true;
+          group.inputTokensObserved = false;
+        }
+      }
+      if (
+        Number.isSafeInteger(value.outputTokens) &&
+        value.outputTokens > 1_000_000_000
+      ) {
+        group.outputTokensOverflow = true;
+        group.outputTokensObserved = false;
+      } else if (outputTokens !== undefined && !group.outputTokensOverflow) {
+        if (group.outputTokens + outputTokens <= 1_000_000_000) {
+          group.outputTokens += outputTokens;
+          group.outputTokensObserved = true;
+        } else {
+          group.outputTokensOverflow = true;
+          group.outputTokensObserved = false;
+        }
+      }
+      group.rawOutputPresent ||= value.rawOutputPresent === true;
+    },
+    fail(attempt, error) {
+      if (group === undefined || attempt === null) return;
+      if (isProviderTimeoutError(error)) {
+        group.timedOutAttemptCount += 1;
+      } else {
+        group.failedAttemptCount += 1;
+      }
+    },
+    take() {
+      if (group === undefined || group.attemptCount === 0) return undefined;
+      const result = {
+        callKind: "action",
+        provider: group.provider,
+        requestedModel: group.requestedModel,
+        attemptedModels: group.attemptedModels,
+        attemptCount: group.attemptCount,
+        completedAttemptCount: group.completedAttemptCount,
+        failedAttemptCount: group.failedAttemptCount,
+        timedOutAttemptCount: group.timedOutAttemptCount,
+        ...(group.responseModel !== undefined
+          ? { responseModel: group.responseModel }
+          : {}),
+        ...(group.requestID !== undefined
+          ? { requestID: group.requestID }
+          : {}),
+        ...(group.inputTokensObserved
+          ? { inputTokens: group.inputTokens }
+          : {}),
+        ...(group.outputTokensObserved
+          ? { outputTokens: group.outputTokens }
+          : {}),
+        rawOutputPresent: group.rawOutputPresent,
+        // Preserve a bounded explicit invalid shape: an actual provider call
+        // with bad attribution must not disappear as a clean no-call frame.
+        ...(group.invalidAttribution ? { invalidAttribution: true } : {}),
+        ...(group.attemptOverflow ? { attemptOverflow: true } : {}),
+      };
+      totals.decisionsWithProviderCalls += 1;
+      totals.attemptCount += group.attemptCount;
+      totals.completedAttemptCount += group.completedAttemptCount;
+      totals.failedAttemptCount += group.failedAttemptCount;
+      totals.timedOutAttemptCount += group.timedOutAttemptCount;
+      group = undefined;
+      return result;
+    },
+    summary(reason) {
+      return {
+        schemaVersion: 1,
+        event: "summary",
+        reason,
+        ...totals,
+        inFlightRequests: 0,
+      };
+    },
+  };
+}
+
+/** Track an actual direct completion attempt without changing its text API. */
+export function trackActionComplete(complete, descriptor, recorder) {
+  return async (prompt) => {
+    const attempt = recorder.start(descriptor);
+    if (attempt === null) {
+      throw new Error("provider attempt cap reached before invocation");
+    }
+    try {
+      const output = await complete(prompt);
+      recorder.complete(attempt, {
+        rawOutputPresent: String(output ?? "").length > 0,
+      });
+      return output;
+    } catch (error) {
+      recorder.fail(attempt, error);
+      throw error;
+    }
+  };
+}
+
 /** Exact hosted-sidecar routing options, kept pure for release verification. */
 export function bedrockClientOptions(region = REGION, env = process.env) {
-  const sidecarEndpoint = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  const sidecarEndpoint = strictBedrockSidecarEndpoint(
+    env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
+  );
   return sidecarEndpoint
     ? { awsRegion: region, baseURL: sidecarEndpoint }
     : { awsRegion: region };
 }
 
+function providerDeadlineError(timeoutMs) {
+  const error = new Error(`provider timed out after ${timeoutMs}ms`);
+  error.name = "TimeoutError";
+  error.code = "ETIMEDOUT";
+  return error;
+}
+
+async function invokeBedrockAttempt(client, request, remainingMs) {
+  const controller = new AbortController();
+  const timeoutError = providerDeadlineError(remainingMs);
+  let timeoutHandle;
+  const timeout = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, remainingMs);
+  });
+  let invocation;
+  try {
+    invocation = client.messages.create(request, {
+      timeout: remainingMs,
+      maxRetries: 0,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutHandle);
+    throw error;
+  }
+  return Promise.race([invocation, timeout]).finally(() =>
+    clearTimeout(timeoutHandle),
+  );
+}
+
 // The ONLY provider-specific code: an llmComplete (prompt) => text on Bedrock,
 // with model-id autodetect across MODEL_ID_CANDIDATES (locks onto the first
 // id that answers; loud log either way).
-function createBedrockComplete() {
-  let client = null;
+export function createBedrockCompleteForClient(
+  client,
+  recorder,
+  {
+    modelCandidates = MODEL_ID_CANDIDATES,
+    timeoutMs = TIMEOUT_MS,
+    provider = strictBedrockSidecarEndpoint(
+      process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
+    )
+      ? "bedrock-sidecar"
+      : "aws-bedrock",
+  } = {},
+) {
   let lockedIndex = null;
+  let deadlineDecisionID;
+  let deadlineAt = 0;
   return async (prompt) => {
-    if (!client) {
-      const mod = await import("@anthropic-ai/bedrock-sdk");
-      const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
-      // Same sidecar contract as keystone: hosted pods proxy Bedrock through
-      // AWS_ENDPOINT_URL_BEDROCK_RUNTIME and ship placeholder AWS creds, so a
-      // direct call 403s with "Invalid API Key format". Builders copy this file
-      // as their starter, so the fix belongs here too.
-      client = new AnthropicBedrock(bedrockClientOptions());
+    const boundedTimeoutMs = boundedLlmTimeoutMs(timeoutMs);
+    const decisionID =
+      typeof recorder.decisionID === "function"
+        ? recorder.decisionID()
+        : undefined;
+    if (deadlineAt === 0 || decisionID !== deadlineDecisionID) {
+      deadlineDecisionID = decisionID;
+      deadlineAt = Date.now() + boundedTimeoutMs;
     }
     const startIndex = lockedIndex ?? 0;
     let lastError = null;
-    for (let i = startIndex; i < MODEL_ID_CANDIDATES.length; i += 1) {
-      const candidate = MODEL_ID_CANDIDATES[i];
+    for (let i = startIndex; i < modelCandidates.length; i += 1) {
+      const candidate = modelCandidates[i];
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        lastError = providerDeadlineError(boundedTimeoutMs);
+        break;
+      }
+      const attempt = recorder.start({
+        provider,
+        requestedModel: candidate,
+      });
+      if (attempt === null) break;
       try {
-        const response = await client.messages.create(
+        const response = await invokeBedrockAttempt(
+          client,
           {
             model: candidate,
             max_tokens: 512,
             messages: [{ role: "user", content: prompt }],
           },
-          { timeout: TIMEOUT_MS },
+          remainingMs,
         );
         if (lockedIndex !== i) {
           lockedIndex = i;
           console.log(`bedrock model locked: ${candidate}`);
         }
-        return (response?.content ?? [])
+        const output = (response?.content ?? [])
           .map((block) => (typeof block?.text === "string" ? block.text : ""))
           .join("")
           .trim();
+        recorder.complete(attempt, {
+          responseModel: response?.model,
+          requestID: response?.id,
+          inputTokens:
+            response?.usage?.input_tokens ?? response?.usage?.inputTokens,
+          outputTokens:
+            response?.usage?.output_tokens ?? response?.usage?.outputTokens,
+          rawOutputPresent: output.length > 0,
+        });
+        return output;
       } catch (error) {
+        recorder.fail(attempt, error);
         lastError = error;
         if (isModelUnavailableError(error?.message)) {
           console.error(
@@ -133,9 +436,45 @@ function createBedrockComplete() {
       }
     }
     throw new Error(
-      `No Bedrock model candidate is usable on this account (tried ${MODEL_ID_CANDIDATES.join(", ")}): ${String(lastError?.message ?? lastError).slice(0, 200)}`,
+      `No Bedrock model candidate is usable on this account (tried ${modelCandidates.join(", ")}): ${String(lastError?.message ?? lastError).slice(0, 200)}`,
     );
   };
+}
+
+function createBedrockComplete(recorder) {
+  let complete = null;
+  return async (prompt) => {
+    if (!complete) {
+      const mod = await import("@anthropic-ai/bedrock-sdk");
+      const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
+      // Hosted pods proxy Bedrock through a credential-free loopback sidecar.
+      // Builders copy this file as their starter, so the strict endpoint and
+      // aggregate deadline belong here rather than in platform-only wrapping.
+      const client = new AnthropicBedrock(bedrockClientOptions());
+      complete = createBedrockCompleteForClient(client, recorder);
+    }
+    return complete(prompt);
+  };
+}
+
+function envProviderEvidenceDescriptor() {
+  const configured = String(
+    process.env.PROXYWAR_AGENT_LLM_PROVIDER ??
+      (process.env.OPENROUTER_API_KEY ? "openrouter" : "command"),
+  )
+    .trim()
+    .toLowerCase();
+  const provider =
+    configured === "" || configured === "command"
+      ? "local-command"
+      : configured.replaceAll("_", "-");
+  const requestedModel =
+    process.env.OPENROUTER_MODEL ??
+    process.env.PROXYWAR_AGENT_LLM_MODEL ??
+    (provider === "openrouter"
+      ? "google/gemini-2.5-flash-lite"
+      : "provider-default");
+  return { provider, requestedModel };
 }
 
 // Local-only mock provider: returns the strict JSON the SDK validator expects,
@@ -216,6 +555,157 @@ function spawnPreferenceScore(action) {
   );
 }
 
+export async function decisionResponseForLlmRequest({
+  message,
+  agent,
+  providerEvidenceRecorder,
+}) {
+  const actions = message.request?.legalActions ?? [];
+  const spawnPreferences = spawnPreferenceRanking(message, actions);
+  if (spawnPreferences !== null) {
+    // Spawn allocation is a sealed preference round, not strategic play:
+    // bypass the starter SDK so it creates no provider call or ordinary
+    // decision-history entry for this request.
+    return {
+      type: "decision_response",
+      requestID: message.requestID,
+      selectedLegalActionId: spawnPreferences[0].id,
+      runtimeMode: "llm-action-selector",
+      spawnPreferenceLegalActionIds: spawnPreferences.map(
+        (preference) => preference.id,
+      ),
+      reason: `starter ranked ${spawnPreferences.length} offered spawn actions from metadata`,
+      confidence: 0.7,
+    };
+  }
+
+  providerEvidenceRecorder.beginDecision();
+  let decision;
+  let degraded = false;
+  try {
+    // The full starter brain: prompt, memory, anti-stall, ranking,
+    // strict legal-id validation, and safe fallback all live in here.
+    decision = await agent.decide(message.request);
+  } catch (error) {
+    console.error(`decide failed: ${error?.message ?? error}`);
+    // Last-resort: never stall the match — pick any offered legal action.
+    // This is a DEGRADED decision and must be loud: the flags below travel
+    // on the wire so game-side artifacts record it (the v1 seat played 60+
+    // hosted rounds in this branch while replays reported 0 fallbacks).
+    degraded = true;
+    decision = {
+      selectedLegalActionId: actions[0]?.id,
+      reason: `transport fallback: ${String(error?.message ?? error).slice(0, 200)}`,
+      confidence: 0.3,
+    };
+  }
+  const providerEvidence = providerEvidenceRecorder.take();
+  return {
+    type: "decision_response",
+    requestID: message.requestID,
+    selectedLegalActionId: decision.selectedLegalActionId,
+    runtimeMode: "llm-action-selector",
+    reason: decision.reason ?? "starter-agent",
+    confidence: decision.confidence ?? 0.7,
+    ...(degraded ? { fallbackUsed: true, llmPlannerDegraded: true } : {}),
+    ...(providerEvidence ? { providerEvidence } : {}),
+  };
+}
+
+/**
+ * Attach the direct selector transport to one socket. WebSocket/EventEmitter
+ * does not await async listeners, so an explicit promise tail is the ownership
+ * boundary for the agent memory and the decision-scoped provider recorder.
+ */
+export function attachDirectLlmSocketHandlers({
+  socket,
+  agent,
+  providerEvidenceRecorder,
+}) {
+  let acceptingDecisions = true;
+  let finalReceived = false;
+  let decisionTail = Promise.resolve();
+
+  const sendAcceptedDecision = async (message) => {
+    let response;
+    try {
+      response = await decisionResponseForLlmRequest({
+        message,
+        agent,
+        providerEvidenceRecorder,
+      });
+    } catch (error) {
+      // An accepted request must have a terminal response even if an
+      // unexpected transport-layer exception escapes the starter SDK.
+      console.error(
+        `serialized decide failed for ${String(message.requestID)}: ${error?.message ?? error}`,
+      );
+      const fallbackID = message.request?.legalActions?.find(
+        (action) => typeof action?.id === "string",
+      )?.id;
+      const providerEvidence = providerEvidenceRecorder.take();
+      response = {
+        type: "decision_response",
+        requestID: message.requestID,
+        selectedLegalActionId: fallbackID,
+        runtimeMode: "llm-action-selector",
+        reason: `serialized transport fallback: ${String(error?.message ?? error).slice(0, 160)}`,
+        confidence: 0.3,
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        ...(providerEvidence ? { providerEvidence } : {}),
+      };
+    }
+    socket.send(JSON.stringify(response));
+  };
+
+  socket.on("message", (data) => {
+    let message;
+    try {
+      message = JSON.parse(String(data));
+    } catch {
+      return;
+    }
+    if (message.type === "final") {
+      if (finalReceived) return;
+      finalReceived = true;
+      acceptingDecisions = false;
+      decisionTail = decisionTail
+        .then(() => {
+          try {
+            if (typeof providerEvidenceRecorder.summary === "function") {
+              console.log(
+                `PROXYWAR_LLM_ACTION_USAGE ${JSON.stringify(
+                  providerEvidenceRecorder.summary("final_message"),
+                )}`,
+              );
+            }
+          } finally {
+            socket.close();
+          }
+        })
+        .catch((error) => {
+          console.error(`finalization failed: ${error?.message ?? error}`);
+          socket.close();
+        });
+      return;
+    }
+    if (message.type !== "decision_request" || !acceptingDecisions) return;
+
+    // Promise callbacks run immediately after this synchronous message turn,
+    // preserving ordinary single-request latency while ordering overlaps.
+    decisionTail = decisionTail
+      .then(() => sendAcceptedDecision(message))
+      .catch((error) => {
+        console.error(
+          `serialized response failed for ${String(message.requestID)}: ${error?.message ?? error}`,
+        );
+      });
+  });
+
+  return { settled: () => decisionTail };
+}
+
 async function main() {
   const require = createRequire(import.meta.url);
   const { WebSocket } = require(`${proxyWarRepo}/node_modules/ws`);
@@ -228,15 +718,17 @@ async function main() {
     throw new Error("COWORLD_PLAYER_WS_URL is required");
   }
 
+  const providerEvidenceRecorder = createActionProviderEvidenceRecorder();
   // Provider precedence: explicit mock > Bedrock (platform creds) > any starter
   // SDK provider configured via env (openrouter/codex/claude/command) > mock.
   let llmComplete;
   let providerLabel;
   if (process.env.PROXYWAR_LLM_MOCK === "1") {
+    // The explicit local mock is deterministic plumbing, not a model call.
     llmComplete = createMockComplete();
     providerLabel = "mock";
   } else if (USE_BEDROCK) {
-    llmComplete = createBedrockComplete();
+    llmComplete = createBedrockComplete(providerEvidenceRecorder);
     providerLabel = `bedrock:${MODEL_ID}@${REGION}`;
   } else {
     const envComplete = createLlmCompleteFromEnv();
@@ -250,7 +742,11 @@ async function main() {
           "OPENROUTER_API_KEY), or PROXYWAR_LLM_MOCK=1 for explicit plumbing tests.",
       );
     }
-    llmComplete = envComplete;
+    llmComplete = trackActionComplete(
+      envComplete,
+      envProviderEvidenceDescriptor(),
+      providerEvidenceRecorder,
+    );
     providerLabel = process.env.PROXYWAR_AGENT_LLM_PROVIDER || "env-provider";
   }
   const agent = createStarterAgent({ llmComplete, modelName: MODEL_ID });
@@ -263,74 +759,10 @@ async function main() {
     );
   });
 
-  socket.on("message", async (data) => {
-    let message;
-    try {
-      message = JSON.parse(String(data));
-    } catch {
-      return;
-    }
-    if (message.type === "final") {
-      socket.close();
-      return;
-    }
-    if (message.type !== "decision_request") {
-      return;
-    }
-
-    const actions = message.request?.legalActions ?? [];
-    const spawnPreferences = spawnPreferenceRanking(message, actions);
-    if (spawnPreferences !== null) {
-      socket.send(
-        JSON.stringify({
-          type: "decision_response",
-          requestID: message.requestID,
-          selectedLegalActionId: spawnPreferences[0].id,
-          runtimeMode: "llm-action-selector",
-          spawnPreferenceLegalActionIds: spawnPreferences.map(
-            (preference) => preference.id,
-          ),
-          reason: `starter ranked ${spawnPreferences.length} offered spawn actions from metadata`,
-          confidence: 0.7,
-        }),
-      );
-      // Spawn allocation is a sealed preference round, not strategic play:
-      // bypass the starter SDK so it creates no prompt, planning refresh, or
-      // ordinary decision-history entry for this request.
-      return;
-    }
-
-    let decision;
-    let degraded = false;
-    try {
-      // The full starter brain: prompt, memory, anti-stall, ranking,
-      // strict legal-id validation, and safe fallback all live in here.
-      decision = await agent.decide(message.request);
-    } catch (error) {
-      console.error(`decide failed: ${error?.message ?? error}`);
-      // Last-resort: never stall the match — pick any offered legal action.
-      // This is a DEGRADED decision and must be loud: the flags below travel
-      // on the wire so game-side artifacts record it (the v1 seat played 60+
-      // hosted rounds in this branch while replays reported 0 fallbacks).
-      degraded = true;
-      decision = {
-        selectedLegalActionId: actions[0]?.id,
-        reason: `transport fallback: ${String(error?.message ?? error).slice(0, 200)}`,
-        confidence: 0.3,
-      };
-    }
-
-    socket.send(
-      JSON.stringify({
-        type: "decision_response",
-        requestID: message.requestID,
-        selectedLegalActionId: decision.selectedLegalActionId,
-        runtimeMode: "llm-action-selector",
-        reason: decision.reason ?? "starter-agent",
-        confidence: decision.confidence ?? 0.7,
-        ...(degraded ? { fallbackUsed: true, llmPlannerDegraded: true } : {}),
-      }),
-    );
+  attachDirectLlmSocketHandlers({
+    socket,
+    agent,
+    providerEvidenceRecorder,
   });
 
   socket.on("close", () => process.exit(0));

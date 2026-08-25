@@ -165,7 +165,7 @@ export class PlatformAccountSecurity {
     return this.authorizeAccountCredentials(headers);
   }
 
-  /** GET-appropriate sibling of `authorizeWrite`/`bootstrap` — mints on first visit like `bootstrap`, but relaxes the Origin requirement to accept a same-origin browser GET (no `Origin` header) the way `ReplayPremiereGuestSecurity.bootstrapRead` does; see that method's doc for the Fetch-standard reasoning. */
+  /** GET-appropriate sibling of `authorizeWrite`/`bootstrap`. Explicit cross-origin browser signals are rejected; an ordinary same-origin browser GET or non-browser client with no Fetch Metadata headers is safe because this route is read-only and emits no CORS permission. */
   bootstrapRead(headers: PlatformRequestHeaders): PlatformAccountBootstrap {
     this.assertReadOrigin(headers);
     return this.bootstrap(headers.cookie);
@@ -187,7 +187,7 @@ export class PlatformAccountSecurity {
       return;
     }
     const referer = singleHeader(headers.referer);
-    if (referer === null || !this.refererMatchesExpectedOrigin(referer)) {
+    if (referer !== null && !this.refererMatchesExpectedOrigin(referer)) {
       throw new PlatformSecurityError("origin_rejected", 403);
     }
   }

@@ -14,6 +14,7 @@ import {
 } from "./AgentDealManager";
 import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import {
+  agentDecisionBatchPrimaryMismatch,
   validateAgentDealDecision,
   validateAgentDecision,
   validateAgentMessageDecision,
@@ -560,6 +561,8 @@ export class AgentLeagueMatchRunner {
       const { decision } = input;
       const { actionIDs: requestedActionIDs, droppedByCapActionIDs } =
         requestedDecisionActionIDs(decision);
+      const batchPrimaryMismatch =
+        agentDecisionBatchPrimaryMismatch(decision);
       const rejectedActionIDs: string[] = [];
       const selectedActions: Array<{
         action: LegalAction | null;
@@ -567,7 +570,12 @@ export class AgentLeagueMatchRunner {
         reason: string | null;
       }> = [];
 
-      for (const actionID of requestedActionIDs) {
+      if (batchPrimaryMismatch !== null) {
+        rejectedActionIDs.push(...batchPrimaryMismatch.rejectedActionIDs);
+      }
+
+      for (const actionID of
+        batchPrimaryMismatch === null ? requestedActionIDs : []) {
         const actionDecision: AgentDecision = { ...decision, actionID };
         const validation = this.decisionValidator(
           actionDecision,
@@ -611,21 +619,37 @@ export class AgentLeagueMatchRunner {
 
       let validationFallbackUsed = false;
       if (selectedActions.length === 0) {
-        const validation = this.decisionValidator(
-          decision,
-          submissionLegalActions,
-          { primaryActionPolicy: input.primaryActionPolicy },
-        );
-        const action = actionFromValidation(validation);
-        // The policy's requested action id(s) were all invalid; the validator
-        // substituted a fallback (hold). Record it loudly (below) instead of
-        // letting it read as a healthy hold.
-        validationFallbackUsed = !validation.ok;
-        selectedActions.push({
-          action,
-          requestedActionID: decision.actionID,
-          reason: decisionReason(decision, validation, action),
-        });
+        if (batchPrimaryMismatch !== null) {
+          // A scalar/batch disagreement is an ambiguous authority request:
+          // neither representation may execute. Fail closed to the offered
+          // hold and surface the rejected IDs + validation fallback in batch
+          // metadata; do not leak a technical mismatch string as a public
+          // agent-authored reason.
+          validationFallbackUsed = true;
+          selectedActions.push({
+            action:
+              submissionLegalActions.find((action) => action.kind === "hold") ??
+              null,
+            requestedActionID: decision.actionID,
+            reason: null,
+          });
+        } else {
+          const validation = this.decisionValidator(
+            decision,
+            submissionLegalActions,
+            { primaryActionPolicy: input.primaryActionPolicy },
+          );
+          const action = actionFromValidation(validation);
+          // The policy's requested action id(s) were all invalid; the validator
+          // substituted a fallback (hold). Record it loudly (below) instead of
+          // letting it read as a healthy hold.
+          validationFallbackUsed = !validation.ok;
+          selectedActions.push({
+            action,
+            requestedActionID: decision.actionID,
+            reason: decisionReason(decision, validation, action),
+          });
+        }
       }
 
       // Did the ACTION slot already play a deal meta-action this decision?
@@ -1214,10 +1238,22 @@ export class AgentLeagueMatchRunner {
       recipient: recipientID,
       text: validation.text,
     });
-    if (result.accepted) {
+    const messageEventID =
+      result.accepted &&
+      result.intent?.type === "agent_message" &&
+      typeof result.intent.messageEventID === "string"
+        ? result.intent.messageEventID
+        : null;
+    const accepted = result.accepted && messageEventID !== null;
+    const resultReason =
+      result.accepted && messageEventID === null
+        ? "accepted agent message returned no server-owned event id"
+        : result.reason;
+    if (accepted) {
       this.deliverMessage({
         recipientPlayerID: recipientID,
         message: {
+          messageEventID,
           senderID,
           senderName:
             input.observation.ownState?.name ?? input.participant.spec.username,
@@ -1229,14 +1265,14 @@ export class AgentLeagueMatchRunner {
     return {
       commsSlotActionID: validation.action.id,
       commsSlotRecipientID: recipientID,
+      ...(messageEventID === null
+        ? {}
+        : { commsSlotMessageEventID: messageEventID }),
       // Stamped verbatim: the negotiation evidence rests on the exact wording,
       // and the validator already bounded the length.
       commsSlotText: validation.text,
-      commsSlotAccepted: result.accepted,
-      commsSlotResult: result.reason.slice(
-        0,
-        MAX_STAMPED_DEAL_REJECTION_LENGTH,
-      ),
+      commsSlotAccepted: accepted,
+      commsSlotResult: resultReason.slice(0, MAX_STAMPED_DEAL_REJECTION_LENGTH),
     };
   }
 
@@ -1590,6 +1626,15 @@ export class AgentLeagueMatchRunner {
       decidedAt: Date.now(),
       decisionLatencyMs: input.decisionLatencyMs,
       observationSummary: input.observationSummary,
+      ...(input.observation.nonCombat.inboundMessages?.some(
+        (message) => message.messageEventID !== undefined,
+      )
+        ? {
+            inboundMessageEventIDs: input.observation.nonCombat.inboundMessages
+              .map((message) => message.messageEventID)
+              .filter((id): id is string => id !== undefined),
+          }
+        : {}),
       strategicPriority: input.observation.strategic.priority,
       strategicUrgency: input.observation.strategic.urgency,
       strategicSummary: input.observation.strategic.summary,

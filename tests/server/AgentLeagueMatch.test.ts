@@ -1130,6 +1130,81 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("fails closed when the batch primary disagrees with the scalar action", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "attack:north",
+        kind: "attack",
+        label: "Attack north",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+      },
+      {
+        id: "attack:south",
+        kind: "attack",
+        label: "Attack south",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Ambiguous Batch", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: "attack:north",
+            actionIDs: ["attack:south"],
+            reason: "choose both representations",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENTMIS",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        chosenActionID: "hold",
+        reason: null,
+      });
+      expect(records[0].decisionMetadata).toMatchObject({
+        fallbackUsed: true,
+        validationFallbackUsed: true,
+      });
+      expect(records[0].decisionMetadata?.batchRejectedActionIDs).toBe(
+        "attack:north,attack:south",
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("projects per-action Commander fidelity and never executes support after primary rejection", async () => {
     const log = makeLogger();
     const legalActions: LegalAction[] = [

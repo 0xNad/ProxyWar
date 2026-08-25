@@ -155,6 +155,21 @@ export function appShellFooter(): TemplateResult {
             >${translateText("app_shell.footer_about")}</a
           >
           <a
+            href="/privacy"
+            class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("app_shell.footer_privacy")}</a
+          >
+          <a
+            href="/terms"
+            class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("app_shell.footer_terms")}</a
+          >
+          <a
+            href="/credits"
+            class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("app_shell.footer_credits")}</a
+          >
+          <a
             href="https://t.me/+TeaDXnPwbxk1Mjk8"
             class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             rel="noopener noreferrer"

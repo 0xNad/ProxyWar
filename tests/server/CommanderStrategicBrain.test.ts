@@ -124,6 +124,9 @@ describe("StrategicCommanderBrain — active authority", () => {
       commanderImmediateReplan: false,
       planFollowed: true,
       plannerFallbackUsed: false,
+      externalPlannerCall: true,
+      providerEvidenceSource: "trusted-in-process",
+      providerCallKind: "planner",
     });
     expect(decision.metadata?.planID).toEqual(expect.any(String));
   });

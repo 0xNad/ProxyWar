@@ -59,12 +59,10 @@ describe("Coworld app shell splash", () => {
   it("leaves an already-rebranded title untouched (including i18n attrs)", () => {
     const rebranded = SHELL_HTML.replace(
       "<title>OpenFront</title>",
-      '<title data-i18n="main.title">Proxy War (ALPHA)</title>',
+      '<title data-i18n="main.title">Proxy War</title>',
     );
     const html = injectCoworldSplash(rebranded, "replay");
-    expect(html).toContain(
-      '<title data-i18n="main.title">Proxy War (ALPHA)</title>',
-    );
+    expect(html).toContain('<title data-i18n="main.title">Proxy War</title>');
   });
 
   it("uses a route-specific message for the player surface", () => {
