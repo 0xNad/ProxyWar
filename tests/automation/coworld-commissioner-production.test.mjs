@@ -416,6 +416,23 @@ test("commissioner-only manifest comparison rejects every unrelated mutation", (
       patchedCommissionerImage: patchedImage,
     }),
   );
+  const reverseObjectKeys = (value) => {
+    if (Array.isArray(value)) return value.map(reverseObjectKeys);
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .reverse()
+        .map(([key, entry]) => [key, reverseObjectKeys(entry)]),
+    );
+  };
+  assert.doesNotThrow(() =>
+    validateCommissionerOnlyManifestPatch({
+      sourceManifest,
+      patchedManifest: reverseObjectKeys(patchedManifest),
+      sourceCommissionerImage: sourceImage,
+      patchedCommissionerImage: patchedImage,
+    }),
+  );
   const corruptions = [
     (value) => {
       value.game.runnable.image = "img_33333333-3333-3333-3333-333333333333";
