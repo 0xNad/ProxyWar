@@ -34,6 +34,7 @@ socket.addEventListener("message", (event) => {
       type: "decision_response",
       requestID: message.requestID,
       ...choose({
+        slot: message.slot,
         legalActions: message.request?.legalActions ?? [],
         observation: message.request?.observation ?? {},
       }),

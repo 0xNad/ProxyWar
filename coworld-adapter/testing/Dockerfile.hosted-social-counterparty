@@ -1,10 +1,10 @@
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b
 
 ARG HOSTED_SOCIAL_COUNTERPARTY_PROFILE=deal-blind
 
 WORKDIR /app
 COPY coworld-adapter/testing/hosted-social-counterparty-policy.mjs ./
 COPY coworld-adapter/testing/hosted-social-counterparty-player.mjs ./
-RUN node -e 'const fs=require("node:fs"); const profile=process.argv[1]; const allowed=new Set(["pact-keeper","pact-breaker","mutual-aid","deal-blind"]); if(!allowed.has(profile)) throw new Error("invalid hosted social counterparty profile"); fs.writeFileSync("/app/hosted-social-counterparty-build.json", JSON.stringify({profile}));' "$HOSTED_SOCIAL_COUNTERPARTY_PROFILE"
+RUN node -e 'const fs=require("node:fs"); const profile=process.argv[1]; const allowed=new Set(["pact-keeper","pact-breaker","mutual-aid","deal-blind","nonfriendly-donation-probe"]); if(!allowed.has(profile)) throw new Error("invalid hosted social counterparty profile"); fs.writeFileSync("/app/hosted-social-counterparty-build.json", JSON.stringify({profile}));' "$HOSTED_SOCIAL_COUNTERPARTY_PROFILE"
 
 CMD ["node", "/app/hosted-social-counterparty-player.mjs"]

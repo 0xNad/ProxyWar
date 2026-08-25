@@ -90,7 +90,7 @@ not execution evidence.
 
 ## Meaningful-gameplay counterparties
 
-`Dockerfile.hosted-social-counterparty` builds four immutable eval-only
+`Dockerfile.hosted-social-counterparty` builds five immutable eval-only
 counterparties for the next behavioral gate:
 
 - `pact-keeper` accepts negative covenants and filters exact hostile actions
@@ -101,7 +101,10 @@ counterparties for the next behavioral gate:
   caps itself at two attempts, and accepts/fulfills a reciprocal support request
   only after that partner has a positive terminal same-match reliability record;
 - `deal-blind` uses the same ordinary-action ordering but never selects the
-  diplomacy slot.
+  diplomacy slot;
+- `nonfriendly-donation-probe` uses one immutable policy in both seats: slot
+  zero selects exact offered non-friendly gold and then troop donations, while
+  every other slot holds. It never allies, messages, or selects a deal action.
 
 Build one immutable image per profile with
 `--build-arg HOSTED_SOCIAL_COUNTERPARTY_PROFILE=<profile>`. These controls make

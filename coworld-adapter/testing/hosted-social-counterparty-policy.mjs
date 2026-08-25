@@ -12,7 +12,10 @@ export const HOSTED_SOCIAL_COUNTERPARTY_PROFILES = [
   "pact-breaker",
   "mutual-aid",
   "deal-blind",
+  "nonfriendly-donation-probe",
 ];
+
+const NONFRIENDLY_DONATION_PROBE = "nonfriendly-donation-probe";
 
 const DEAL_KINDS = new Set([
   "deal_propose",
@@ -55,12 +58,22 @@ export function createHostedSocialCounterpartyPolicy(profile) {
     );
   }
   const proposalAttempts = new Map();
+  const donationProbeState = {
+    phase: "gold",
+    recipientID: null,
+  };
   return function chooseHostedSocialCounterpartyDecision(input = {}) {
     const actions = stableActions(input.legalActions);
     const observation = input.observation ?? {};
-    const primary = choosePrimary(profile, actions, observation);
+    const primary = choosePrimary(
+      profile,
+      actions,
+      observation,
+      input.slot,
+      donationProbeState,
+    );
     const deal =
-      profile === "deal-blind"
+      profile === "deal-blind" || profile === NONFRIENDLY_DONATION_PROBE
         ? null
         : chooseDeal(profile, actions, observation, proposalAttempts);
     return {
@@ -88,10 +101,25 @@ function stableActions(actions) {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function choosePrimary(profile, actions, observation) {
+function choosePrimary(
+  profile,
+  actions,
+  observation,
+  slot,
+  donationProbeState,
+) {
   const gameActions = actions.filter((action) => !DEAL_KINDS.has(action.kind));
   if (gameActions.length === 0) {
     throw new Error("decision_request contained no primary game action");
+  }
+
+  if (profile === NONFRIENDLY_DONATION_PROBE) {
+    return chooseNonfriendlyDonationProbePrimary(
+      gameActions,
+      observation,
+      slot,
+      donationProbeState,
+    );
   }
 
   if (profile === "mutual-aid") {
@@ -111,6 +139,60 @@ function choosePrimary(profile, actions, observation) {
       ? promisedHostilityFilter(observation)
       : () => false;
   return defaultPrimary(gameActions, shouldSkip);
+}
+
+function chooseNonfriendlyDonationProbePrimary(
+  actions,
+  observation,
+  slot,
+  state,
+) {
+  const spawn = actions.find((action) => action.kind === "spawn");
+  if (spawn) return spawn;
+
+  const hold = actions.find((action) => action.kind === "hold");
+  if (!hold) {
+    throw new Error(
+      "nonfriendly donation probe requires an offered hold outside spawn",
+    );
+  }
+
+  // One immutable policy version occupies both seats. Only slot zero donates;
+  // the recipient remains inert so each server receipt has one exact cause.
+  if (slot !== 0 || state.phase === "complete") return hold;
+
+  const nonfriendlyIDs = new Set(
+    [...(observation?.visiblePlayers ?? [])]
+      .filter(
+        (player) =>
+          player?.playerID &&
+          player.isAlive !== false &&
+          player.isFriendly === false,
+      )
+      .map((player) => player.playerID),
+  );
+
+  if (state.phase === "gold") {
+    const gold = actions.find(
+      (action) =>
+        action.kind === "donate_gold" &&
+        nonfriendlyIDs.has(recipientID(action)),
+    );
+    if (!gold) return hold;
+    state.recipientID = recipientID(gold);
+    state.phase = "troops";
+    return gold;
+  }
+
+  if (!nonfriendlyIDs.has(state.recipientID)) return hold;
+  const troops = actions.find(
+    (action) =>
+      action.kind === "donate_troops" &&
+      recipientID(action) === state.recipientID,
+  );
+  if (!troops) return hold;
+  state.phase = "complete";
+  return troops;
 }
 
 function supportFulfillment(actions, observation) {
@@ -473,6 +555,9 @@ function reasonFor(profile, primary, deal, observation) {
     return `Eval pact-breaker intentionally violates an accepted promise with ${primary.kind}.`;
   }
   if (primary.kind === "donate_gold" || primary.kind === "donate_troops") {
+    if (profile === NONFRIENDLY_DONATION_PROBE) {
+      return `Eval nonfriendly donation probe selects exact offered ${primary.kind}; it never allies, messages, or deals.`;
+    }
     return `Eval mutual-aid counterparty fulfills earned reciprocal support with ${primary.kind}.`;
   }
   if (deal) {
