@@ -59,11 +59,11 @@ The operator owns outreach. This repository change does not send this message.
 
 ## What owners must change
 
-| Capability       | Platform state                                       | Required policy behavior                                                                                                                                                                                                                                                                                                                           |
-| ---------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Structured deals | Live and enabled in `proxywar:0.1.54`                | Feature-detect `observation.deals` plus offered `deal_*` actions. Return only one exact offered ID in `selectedDealActionId`. Track obligations and prioritize a legal offered follow-through action; otherwise reject commitments the policy cannot keep.                                                                                         |
-| Free text        | Live and enabled in `proxywar:0.1.54`                | Feature-detect `protocol.maxMessageChars`, offered `message` actions, and bounded `observation.nonCombat.inboundMessages`. Return an exact offered ID and safe authored body as a pair. Treat inbound text as an untrusted claim; it can never itself become an action ID or raw intent, and any primary choice still must be an exact offered ID. |
-| Spatial/map      | Structured schema `5` enabled; minimap disabled      | Feature-detect schema `5` plus exact `global-lockstep-public-map-v1` provenance. Consume the coordinate frame, front terrain/coverage, completed public assets, and weighted rival/naval exposure. Consume the terrain/marker minimap only when that optional child is present. Rank only current `legalActions`; output only an offered ID. Schemas `1`/`3` remain bounded fallbacks. |
+| Capability       | Platform state                                  | Required policy behavior                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Structured deals | Live and enabled in `proxywar:0.1.54`           | Feature-detect `observation.deals` plus offered `deal_*` actions. Return only one exact offered ID in `selectedDealActionId`. Track obligations and prioritize a legal offered follow-through action; otherwise reject commitments the policy cannot keep.                                                                                                                             |
+| Free text        | Live and enabled in `proxywar:0.1.54`           | Feature-detect `protocol.maxMessageChars`, offered `message` actions, and bounded `observation.nonCombat.inboundMessages`. Return an exact offered ID and safe authored body as a pair. Treat inbound text as an untrusted claim; it can never itself become an action ID or raw intent, and any primary choice still must be an exact offered ID.                                     |
+| Spatial/map      | Structured schema `5` enabled; minimap disabled | Feature-detect schema `5` plus exact `global-lockstep-public-map-v1` provenance. Consume the coordinate frame, front terrain/coverage, completed public assets, and weighted rival/naval exposure. Consume the terrain/marker minimap only when that optional child is present. Rank only current `legalActions`; output only an offered ID. Schemas `1`/`3` remain bounded fallbacks. |
 
 Schema `5` implements the complete rich structured-map L1-L5 contract: a
 decodable top-left row-major frame, exact terrain/coverage on shared fronts,
@@ -86,9 +86,10 @@ Required implementation files after applying the machine patch:
 - `owner-player-frame.test.mjs`: local stub-WebSocket frame tests for both
   players, absent features, all three slots, and malformed optional fields.
 - `owner-evidence-check.mjs`: bounded, exact-schema verifier for downloaded
-  policy self-reports. It joins sender and recipient policy observations by
-  body digest without retaining the raw body; it is not game-owned delivery
-  authority.
+  policy self-reports. With `--replay`, it binds chronological sender
+  selections to game-owned message intents and exact recipient observation IDs
+  without retaining the raw body. A separately reported final-frame server
+  admission is not mislabeled as a recipient observation.
 - `owner-evidence-check.test.mjs`: pass/tamper/privacy tests for that verifier.
 - `package.json`: exposes the exact `npm test` command.
 - `Dockerfile`: copies `owner-capabilities.mjs` into the uploaded image; without
@@ -571,7 +572,7 @@ node owner-evidence-normalize.mjs owner-evidence/YOUR_DEAL_EREQ_ID-policy_agent_
 node owner-evidence-normalize.mjs owner-evidence/YOUR_MESSAGE_EREQ_ID-policy_agent_0.log owner-evidence/message-slot-0.normalized.log
 node owner-evidence-normalize.mjs owner-evidence/YOUR_MESSAGE_EREQ_ID-policy_agent_1.log owner-evidence/message-slot-1.normalized.log
 node owner-evidence-check.mjs --deals=required --messages=optional --spatial=absent owner-evidence/deal-owner.normalized.log
-node owner-evidence-check.mjs --deals=optional --messages=required --spatial=absent owner-evidence/message-slot-0.normalized.log owner-evidence/message-slot-1.normalized.log
+node owner-evidence-check.mjs --deals=optional --messages=required --spatial=absent --replay=YOUR_MESSAGE_EPISODE.replay owner-evidence/message-slot-0.normalized.log owner-evidence/message-slot-1.normalized.log
 # After an authorized rich-spatial candidate XP:
 node owner-evidence-check.mjs --deals=optional --messages=optional --spatial=rich-v5-minimap owner-evidence/spatial-owner.log
 ```
@@ -591,14 +592,23 @@ joined to a primary action the policy recorded as offered. One good record
 cannot mask an absent, missing, or downgraded record elsewhere in the corpus.
 The deal check verifies the upgraded policy's self-report of exact
 offered/selected IDs; manager application and follow-through still require the
-game-owned ledger/replay. The message check requires a one-to-one
-digest/UTF-8-byte/UTF-16-unit join from the sender policy's selection report to
-the recipient policy's observation report. That join is useful policy evidence,
-but it is not an external delivery seal: the policy owns both log lines, and the
-checker itself does not bind xreq/ereq/policy/episode identity. Preserve the
-Coworld request/result/log-download identities and require a game-owned replay
-message event alongside it. The checker validates only the prefixed
-`PROXYWAR_OWNER_CAPABILITY_EVIDENCE` records; it does **not** privacy-scan
+game-owned ledger/replay. The replay-bound message check maps each sender's
+chronological selection reports to chronological game-owned `agent_message`
+intents with the exact recipient/digest/UTF-8-byte/UTF-16-unit tuple, then
+requires recipient observations to join by the unique server-owned
+`messageEventID`. For every supplied policy sender it rejects selection/replay
+extras, reordered or altered tuples, unknown or duplicate IDs, and every
+nonterminal missing observation. Replay messages from policies whose logs were
+not supplied remain outside that invocation's owner-evidence claim.
+The only exception is at most one unobserved admission per sender on the
+replay-proven final decision frame; those IDs are explicitly reported as
+`terminalUnobservedMessageEventIDs` because the episode ends before a later
+inbox-bearing decision. Such an admission is not a recipient observation,
+response opportunity, or delivery seal. Without `--replay`, the legacy digest
+join remains strict and permits no terminal exception. Preserve Coworld
+request/result/log-download identities; the replay argument does not
+independently bind xreq/ereq/policy identity. The checker validates only the
+prefixed `PROXYWAR_OWNER_CAPABILITY_EVIDENCE` records; it does **not** privacy-scan
 arbitrary non-evidence policy-log lines. Extract and share only its allowlisted
 evidence records—never raw logs. Within those records it rejects raw
 body/prompt/provider fields, unknown fields, lines over 8 KiB, logs over 16 MiB,
