@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const SOURCE_SHA = /^[0-9a-f]{40}$/;
 const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
@@ -431,7 +432,7 @@ export function validateCommissionerOnlyManifestPatch({
     patchedCommissionerImage,
   );
   invariant(
-    JSON.stringify(patchedComparable) === JSON.stringify(sourceComparable),
+    isDeepStrictEqual(patchedComparable, sourceComparable),
     "patched manifest changed outside package version and commissioner image",
   );
 }
