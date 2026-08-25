@@ -2369,6 +2369,10 @@ function verifyPolicyIdentities(
   ) {
     throw new VerificationFailure("POLICY_IDENTITY_INVALID");
   }
+  const uploadReadbacks = {} as Record<
+    CommanderXpArm,
+    PolicyUploadReadbackReceipt
+  >;
   for (const arm of ["A", "B", "C"] as const) {
     const identity = receipt.arms?.[arm];
     exactRecord(
@@ -2396,15 +2400,32 @@ function verifyPolicyIdentities(
     ) {
       throw new VerificationFailure(`POLICY_IDENTITY_${arm}_MISMATCH`);
     }
+    const uploadReadback = parseExactJson<PolicyUploadReadbackReceipt>(
+      inspectTexts[arm],
+      `POLICY_INSPECT_${arm}_JSON_INVALID`,
+    );
+    uploadReadbacks[arm] = uploadReadback;
     verifyPolicyUploadReadback(
       prereg,
       receipt,
       arm,
-      parseExactJson<PolicyUploadReadbackReceipt>(
-        inspectTexts[arm],
-        `POLICY_INSPECT_${arm}_JSON_INVALID`,
-      ),
+      uploadReadback,
     );
+  }
+  const canonicalContainerImage = sha256Canonical(
+    uploadReadbacks.A.containerImage,
+  );
+  const canonicalImageUpload = sha256Canonical(uploadReadbacks.A.imageUpload);
+  if (
+    (["B", "C"] as const).some(
+      (arm) =>
+        sha256Canonical(uploadReadbacks[arm].containerImage) !==
+          canonicalContainerImage ||
+        sha256Canonical(uploadReadbacks[arm].imageUpload) !==
+          canonicalImageUpload,
+    )
+  ) {
+    throw new VerificationFailure("POLICY_IMAGE_AUTHORITY_CROSS_ARM_MISMATCH");
   }
   const argv = receipt.arms;
   if (
@@ -2581,24 +2602,32 @@ function verifyPolicyUploadReadback(
     upload.buildProvenanceDigest !==
       prereg.identities.policyBuildProvenanceDigest ||
     upload.ociImage !== summary.ociImage ||
-    upload.ociDigest !== prereg.identities.imageDigest ||
+    upload.ociDigest !== summary.ociDigest ||
     receiptSha256 !== sha256Canonical(body) ||
     container.id !== summary.policyImageID ||
     container.status !== "ready" ||
-    container.image_digest !== prereg.identities.imageDigest ||
+    !isPrefixedSha256(container.client_hash) ||
+    !isPrefixedSha256(container.image_digest) ||
     completedImage.id !== summary.policyImageID ||
     completedImage.status !== "ready" ||
-    completedImage.image_digest !== prereg.identities.imageDigest ||
-    requestPayload.name !== completedImage.name ||
-    requestPayload.client_hash !== completedImage.client_hash ||
+    sha256Canonical(completedImage) !== sha256Canonical(container) ||
+    requestPayload.name !== container.name ||
+    requestPayload.client_hash !== container.client_hash ||
     imageUpload.requestPayloadSha256 !== sha256Canonical(requestPayload) ||
     !isSha256(imageUpload.responseSha256) ||
     !isPositiveInteger(imageUpload.responseBytes) ||
     typeof responseProjection.uploadRequired !== "boolean" ||
-    projectedImage.id !== summary.policyImageID ||
+    projectedImage.id !== container.id ||
+    projectedImage.name !== requestPayload.name ||
+    projectedImage.client_hash !== requestPayload.client_hash ||
+    (projectedImage.image_digest !== null &&
+      projectedImage.image_digest !== container.image_digest) ||
+    responseProjection.uploadRequired !== (completePayload !== null) ||
+    (responseProjection.uploadRequired === false &&
+      sha256Canonical(projectedImage) !== sha256Canonical(completedImage)) ||
     (completePayload === null
       ? imageUpload.completePayloadSha256 !== null
-      : completePayload.id !== summary.policyImageID ||
+      : completePayload.id !== container.id ||
         imageUpload.completePayloadSha256 !==
           sha256Canonical(completePayload)) ||
     !isSha256(imageUpload.completeResponseSha256) ||
@@ -6139,6 +6168,10 @@ function sameSet(left: Set<string>, right: Set<string>): boolean {
 
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isPrefixedSha256(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function isSafeSourcePath(value: string): boolean {
