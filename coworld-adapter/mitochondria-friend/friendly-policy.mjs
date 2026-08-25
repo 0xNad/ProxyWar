@@ -196,8 +196,17 @@ export function createMitochondriaFriendLlmPolicy() {
         fulfillsSupportPromise(action, observation),
     );
     const protectedIDs = protectedPlayerIDs(observation, responders);
+    const hasPendingOutgoingAlliance = visiblePlayers(observation).some(
+      (player) => player.hasOutgoingAllianceRequest === true,
+    );
     const allowedActions = actions.filter(
-      (action) => !targetsProtectedRelationship(action, protectedIDs),
+      (action) =>
+        !targetsProtectedRelationship(action, protectedIDs) &&
+        !(
+          hasPendingOutgoingAlliance &&
+          action.kind === "alliance_request" &&
+          action.id !== relationshipOverride?.id
+        ),
     );
     const allowedPrimary = allowedActions.filter(
       (action) => !DEAL_KINDS.has(action.kind) && action.kind !== "message",
@@ -426,6 +435,14 @@ function chooseAlliancePrimary(
       decisionNumber,
     );
     return reciprocalAlliance;
+  }
+
+  // One player's simultaneous acceptance can consume the alliance capacity
+  // that made a second request legal in this snapshot. While any earlier
+  // outgoing request is unresolved, wait instead of selecting another offered
+  // alliance_request that can become stale before sequential application.
+  if (players.some((player) => player.hasOutgoingAllianceRequest === true)) {
+    return null;
   }
 
   const responderAlliance = primary.find((action) => {

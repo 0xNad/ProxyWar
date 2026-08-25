@@ -502,6 +502,96 @@ describe("MitochondriaFriend", () => {
     );
   });
 
+  it("does not start a second alliance while an offered request is still pending", async () => {
+    const prepare = await createLlmPolicy();
+    const allyOther = {
+      id: "alliance:P_OTHER",
+      kind: "alliance_request",
+      risk: { level: "none" },
+      metadata: { targetID: "P_OTHER" },
+    };
+    prepare({
+      legalActions: [EXPAND, HOLD, MESSAGE_OTHER],
+      observation: observation({
+        nonCombat: {
+          inboundMessages: [
+            {
+              messageEventID: "msg_other",
+              senderID: "P_OTHER",
+              senderName: "Other",
+              text: "peace",
+              turnNumber: 12,
+            },
+          ],
+        },
+      }),
+      protocol: PROTOCOL,
+    });
+
+    const pending = prepare({
+      legalActions: [allyOther, EXPAND, HOLD, MESSAGE_OTHER],
+      observation: observation({
+        visiblePlayers: [
+          {
+            playerID: "P_AURI",
+            name: "Auri",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: false,
+            hasOutgoingAllianceRequest: true,
+          },
+          {
+            playerID: "P_OTHER",
+            name: "Other",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: false,
+            hasOutgoingAllianceRequest: false,
+          },
+        ],
+      }),
+      protocol: PROTOCOL,
+    });
+
+    expect(pending.primaryOverrideActionId).toBeUndefined();
+    expect(pending.allowedLegalActionIds).not.toContain(allyOther.id);
+  });
+
+  it("still reciprocates an incoming alliance while another request is pending", async () => {
+    const prepare = await createLlmPolicy();
+    const reciprocal = prepare({
+      legalActions: [ALLY_AURI, EXPAND, HOLD],
+      observation: observation({
+        visiblePlayers: [
+          {
+            playerID: "P_AURI",
+            name: "Auri",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: true,
+            hasOutgoingAllianceRequest: false,
+          },
+          {
+            playerID: "P_OTHER",
+            name: "Other",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: false,
+            hasOutgoingAllianceRequest: true,
+          },
+        ],
+      }),
+      protocol: PROTOCOL,
+    });
+
+    expect(reciprocal.primaryOverrideActionId).toBe(ALLY_AURI.id);
+    expect(reciprocal.allowedLegalActionIds).toContain(ALLY_AURI.id);
+  });
+
   it("turns LLM output plus social preparation into exact independent slots", async () => {
     const decision = withMitoDiplomacy(
       {
