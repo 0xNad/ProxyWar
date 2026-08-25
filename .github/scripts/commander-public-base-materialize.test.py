@@ -227,14 +227,44 @@ class PublicBaseMaterializeTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "recovery authority"):
                     MODULE.materialize(args)
 
-    def test_discovery_rejects_name_or_hash_collision(self) -> None:
+    def test_discovery_allows_historical_versions_of_the_same_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             args = fixture_args(Path(temporary) / "output")
             image = fixture_image(args)
             image["client_hash"] = "sha256:" + "9" * 64
-            with self.assertRaisesRegex(RuntimeError, "collision"):
+            self.assertIsNone(
                 MODULE.discover_exact_image(
                     FakeUploadClient([ModelValue(image)]), args
+                )
+            )
+
+    def test_discovery_selects_only_the_exact_name_and_hash_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = fixture_args(Path(temporary) / "output")
+            exact = fixture_image(args)
+            historical = {**exact, "client_hash": "sha256:" + "9" * 64}
+            other_name = {**exact, "name": "another-public-base"}
+            exact["version"] = 2
+            discovered = MODULE.discover_exact_image(
+                FakeUploadClient(
+                    [
+                        ModelValue(historical),
+                        ModelValue(other_name),
+                        ModelValue(exact),
+                    ]
+                ),
+                args,
+            )
+            self.assertEqual(discovered, exact)
+
+    def test_discovery_rejects_duplicate_exact_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = fixture_args(Path(temporary) / "output")
+            exact = fixture_image(args)
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                MODULE.discover_exact_image(
+                    FakeUploadClient([ModelValue(exact), ModelValue(exact)]),
+                    args,
                 )
 
     def test_policy_name_commits_exact_provenance(self) -> None:

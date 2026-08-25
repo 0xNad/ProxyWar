@@ -277,13 +277,10 @@ def discover_exact_image(
         )
         for row in rows:
             image = safe_image(row)
-            same_name = image.get("name") == expected["name"]
-            same_hash = image.get("client_hash") == expected["client_hash"]
-            if same_name != same_hash:
-                raise RuntimeError(
-                    "Commander public base Coworld image name/hash collision"
-                )
-            if same_name and same_hash:
+            if (
+                image.get("name") == expected["name"]
+                and image.get("client_hash") == expected["client_hash"]
+            ):
                 exact.append(image)
         if len(rows) < IMAGE_PAGE_SIZE:
             break
