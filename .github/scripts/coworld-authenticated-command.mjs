@@ -260,7 +260,7 @@ if (command === "commander-public-base-materialize") {
   const [mode, ...options] = args;
   const parsed = new Map(
     options.map((entry) => {
-      const match = entry.match(/^--([a-z][a-z-]*)=(.+)$/);
+      const match = entry.match(/^--([a-z][a-z0-9-]*)=(.+)$/);
       if (!match) return ["", ""];
       return [match[1], match[2]];
     }),
@@ -269,11 +269,12 @@ if (command === "commander-public-base-materialize") {
     "build-provenance-digest",
     "image",
     "oci-digest",
+    "policy-identity-sha256",
     "policy-name",
     "source-provenance-digest",
     "source-sha",
     "source-tree-sha",
-    ...(mode === "upload" ? ["output"] : []),
+    ...(mode === "upload" ? ["allow-remote-adoption", "output"] : []),
     ...(mode === "upload" && parsed.has("recovery") ? ["recovery"] : []),
   ]);
   if (
@@ -284,9 +285,13 @@ if (command === "commander-public-base-materialize") {
     !/^ghcr\.io\/0xnad\/proxywar-commander-public-base@sha256:[0-9a-f]{64}$/.test(
       parsed.get("image") ?? "",
     ) ||
-    !/^proxywar-commander-public-base-[0-9a-f]{20}$/.test(
+    !/^proxywar-commander-public-base-v2-[0-9a-f]{64}$/.test(
       parsed.get("policy-name") ?? "",
     ) ||
+    !/^[0-9a-f]{64}$/.test(parsed.get("policy-identity-sha256") ?? "") ||
+    !parsed
+      .get("policy-name")
+      ?.endsWith(`-${parsed.get("policy-identity-sha256")}`) ||
     !/^[0-9a-f]{40}$/.test(parsed.get("source-sha") ?? "") ||
     !/^[0-9a-f]{40}$/.test(parsed.get("source-tree-sha") ?? "") ||
     [
@@ -294,6 +299,10 @@ if (command === "commander-public-base-materialize") {
       parsed.get("source-provenance-digest"),
       parsed.get("build-provenance-digest"),
     ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
+    (mode === "upload" &&
+      !new Set(["true", "false"]).has(
+        parsed.get("allow-remote-adoption") ?? "",
+      )) ||
     (mode === "upload" && !exactRunnerTempOutput(parsed.get("output"))) ||
     (parsed.has("recovery") &&
       !exactRunnerTempDirectoryInput(parsed.get("recovery")))

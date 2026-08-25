@@ -10,13 +10,24 @@ export function inspectSinglePlatformManifest({
   expectedConfigDigest,
   rawBytes,
 }) {
+  const discovered = discoverSinglePlatformManifest({ tag, rawBytes });
+  if (
+    !/^sha256:[0-9a-f]{64}$/.test(expectedConfigDigest) ||
+    discovered.configDigest !== expectedConfigDigest
+  ) {
+    throw new Error("Commander XP GHCR manifest identity mismatch");
+  }
+  return discovered;
+}
+
+export function discoverSinglePlatformManifest({ tag, rawBytes }) {
   if (
     !/^ghcr\.io\/0xnad\/proxywar-commander-(?:xp-(?:policy|game)|public-base):[0-9a-f]{40}$/.test(
       tag,
     ) ||
-    !/^sha256:[0-9a-f]{64}$/.test(expectedConfigDigest) ||
     !Buffer.isBuffer(rawBytes) ||
-    rawBytes.length === 0
+    rawBytes.length === 0 ||
+    rawBytes.length > 1024 * 1024
   ) {
     throw new Error("Commander XP GHCR adoption input is invalid");
   }
@@ -37,7 +48,7 @@ export function inspectSinglePlatformManifest({
     manifest.config === null ||
     typeof manifest.config !== "object" ||
     Array.isArray(manifest.config) ||
-    manifest.config.digest !== expectedConfigDigest ||
+    !/^sha256:[0-9a-f]{64}$/.test(manifest.config.digest) ||
     !Array.isArray(manifest.layers)
   ) {
     throw new Error("Commander XP GHCR manifest identity mismatch");
@@ -46,19 +57,28 @@ export function inspectSinglePlatformManifest({
     schemaVersion: 1,
     authority: "ghcr-single-platform-config-adoption-v1",
     tag,
-    configDigest: expectedConfigDigest,
+    configDigest: manifest.config.digest,
     manifestDigest: `sha256:${sha256(rawBytes)}`,
     manifestBytes: rawBytes.length,
     manifestSha256: sha256(rawBytes),
   };
 }
 
-const [command, tag, expectedConfigDigest, rawPath] = process.argv.slice(2);
+const [command, tag, digestOrPath, rawPath] = process.argv.slice(2);
 if (command === "inspect") {
   const result = inspectSinglePlatformManifest({
     tag,
-    expectedConfigDigest,
+    expectedConfigDigest: digestOrPath,
     rawBytes: fs.readFileSync(rawPath),
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+} else if (command === "discover") {
+  if (rawPath !== undefined) {
+    throw new Error("Commander XP GHCR discovery command is invalid");
+  }
+  const result = discoverSinglePlatformManifest({
+    tag,
+    rawBytes: fs.readFileSync(digestOrPath),
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } else if (import.meta.url === `file://${process.argv[1]}`) {

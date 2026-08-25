@@ -1,0 +1,40 @@
+# Public ProxyWar Strategic Commander base image. Build from repository root.
+# This is a production runtime, not a Commander XP arm or evaluation image.
+ARG COMMANDER_PUBLIC_BASE_BUILD_PLATFORM=linux/amd64
+FROM --platform=${COMMANDER_PUBLIC_BASE_BUILD_PLATFORM} node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848
+
+ARG COMMANDER_PUBLIC_BASE_SOURCE_SHA
+ARG COMMANDER_PUBLIC_BASE_SOURCE_TREE_SHA
+ARG COMMANDER_PUBLIC_BASE_SOURCE_PROVENANCE_SHA256
+
+LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
+      org.opencontainers.image.revision="${COMMANDER_PUBLIC_BASE_SOURCE_SHA}" \
+      org.opencontainers.image.description="ProxyWar public Strategic Commander base" \
+      com.proxywar.commander-public-base.source-sha="${COMMANDER_PUBLIC_BASE_SOURCE_SHA}" \
+      com.proxywar.commander-public-base.source-tree-sha="${COMMANDER_PUBLIC_BASE_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-public-base.behavior-source-sha="${COMMANDER_PUBLIC_BASE_SOURCE_SHA}" \
+      com.proxywar.commander-public-base.behavior-source-tree-sha="${COMMANDER_PUBLIC_BASE_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-public-base.adapter-source-sha="${COMMANDER_PUBLIC_BASE_SOURCE_SHA}" \
+      com.proxywar.commander-public-base.adapter-source-tree-sha="${COMMANDER_PUBLIC_BASE_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-public-base.source-provenance-sha256="${COMMANDER_PUBLIC_BASE_SOURCE_PROVENANCE_SHA256}"
+
+ENV PROXYWAR_REPO=/app/proxywar \
+    AWS_REGION=us-west-2
+
+WORKDIR /app/proxywar
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY tsconfig.json ./
+COPY src ./src
+
+WORKDIR /app/proxywar/coworld-adapter
+COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev && npm cache clean --force
+COPY coworld-adapter/src ./src
+COPY coworld-adapter/commander-starter/commander-player.ts ./src/commander-player.ts
+COPY coworld-adapter/commander-starter/commander-production-runtime.ts ./src/commander-production-runtime.ts
+
+WORKDIR /app/proxywar
+ENV NODE_ENV=production
+
+CMD ["node", "--import", "tsx", "/app/proxywar/coworld-adapter/src/commander-player.ts"]

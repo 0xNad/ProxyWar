@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { inspectSinglePlatformManifest } from "./commander-xp-ghcr-adoption.mjs";
+import {
+  discoverSinglePlatformManifest,
+  inspectSinglePlatformManifest,
+} from "./commander-xp-ghcr-adoption.mjs";
 
 const tag = `ghcr.io/0xnad/proxywar-commander-xp-policy:${"1".repeat(40)}`;
 const configDigest = `sha256:${"2".repeat(64)}`;
@@ -57,4 +60,20 @@ test("GHCR adoption accepts the isolated public-base package", () => {
     rawBytes: manifest(),
   });
   assert.equal(result.tag, publicTag);
+});
+
+test("GHCR output-loss recovery discovers the remote config without rebuild equality", () => {
+  const publicTag = `ghcr.io/0xnad/proxywar-commander-public-base:${"5".repeat(40)}`;
+  const result = discoverSinglePlatformManifest({
+    tag: publicTag,
+    rawBytes: manifest(),
+  });
+  assert.equal(result.configDigest, configDigest);
+  assert.match(result.manifestDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.throws(() =>
+    discoverSinglePlatformManifest({
+      tag: publicTag,
+      rawBytes: Buffer.alloc(1024 * 1024 + 1),
+    }),
+  );
 });

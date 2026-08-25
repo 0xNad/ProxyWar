@@ -88,12 +88,10 @@ jobs:
             .event == "push"
           ' "$RUNNER_TEMP/source-ci.json" >/dev/null
           SOURCE_TREE_SHA=$(git rev-parse HEAD^{tree})
-          POLICY_NAME="proxywar-commander-public-base-${SOURCE_SHA:0:20}"
           FENCE_HASH=$(printf '%s\n%s\n' "$SOURCE_SHA" commander-public-base-v1 | sha256sum | cut -d' ' -f1)
           FENCE_REF="refs/tags/commander-public-base-v1/$FENCE_HASH"
           {
             echo "SOURCE_TREE_SHA=$SOURCE_TREE_SHA"
-            echo "POLICY_NAME=$POLICY_NAME"
             echo "FENCE_HASH=$FENCE_HASH"
             echo "FENCE_REF=$FENCE_REF"
           } >> "$GITHUB_ENV"
@@ -166,6 +164,7 @@ jobs:
           npm exec -- tsc --noEmit --pretty false
           npm run typecheck --prefix coworld-adapter
           "$COWORLD_PYTHON" .github/scripts/commander-public-base-materialize.test.py
+          "$COWORLD_PYTHON" .github/scripts/commander-public-base-recovery-archive.test.py
           node --test \
             .github/scripts/commander-public-base-provenance.test.mjs \
             .github/scripts/commander-public-base-recovery.test.mjs \
@@ -186,12 +185,10 @@ jobs:
           set -euo pipefail
           POLICY_TAG="ghcr.io/0xnad/proxywar-commander-public-base:$SOURCE_SHA"
           docker build --platform linux/amd64 \
-            --build-arg "COMMANDER_XP_BEHAVIOR_SOURCE_SHA=$SOURCE_SHA" \
-            --build-arg "COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA=$SOURCE_TREE_SHA" \
-            --build-arg "COMMANDER_XP_ADAPTER_SOURCE_SHA=$SOURCE_SHA" \
-            --build-arg "COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA=$SOURCE_TREE_SHA" \
-            --build-arg "COMMANDER_XP_SOURCE_PROVENANCE_SHA256=$SOURCE_PROVENANCE_SHA256" \
-            -f "$BUILD_SOURCE/coworld-adapter/Dockerfile.commander-xp" \
+            --build-arg "COMMANDER_PUBLIC_BASE_SOURCE_SHA=$SOURCE_SHA" \
+            --build-arg "COMMANDER_PUBLIC_BASE_SOURCE_TREE_SHA=$SOURCE_TREE_SHA" \
+            --build-arg "COMMANDER_PUBLIC_BASE_SOURCE_PROVENANCE_SHA256=$SOURCE_PROVENANCE_SHA256" \
+            -f "$BUILD_SOURCE/coworld-adapter/Dockerfile.commander-public-base" \
             -t "$POLICY_TAG" "$BUILD_SOURCE"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$POLICY_TAG")" = linux/amd64
           POLICY_CONFIG_DIGEST=$(docker image inspect --format '{{.Id}}' "$POLICY_TAG")
@@ -201,29 +198,41 @@ jobs:
             length == 1 and .[0].Architecture == "amd64" and .[0].Os == "linux" and
             .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/0xNad/ProxyWar" and
             .[0].Config.Labels["org.opencontainers.image.revision"] == $source and
-            .[0].Config.Labels["com.proxywar.commander-xp.behavior-source-sha"] == $source and
-            .[0].Config.Labels["com.proxywar.commander-xp.behavior-source-tree-sha"] == $tree and
-            .[0].Config.Labels["com.proxywar.commander-xp.source-tree-sha"] == $tree and
-            .[0].Config.Labels["com.proxywar.commander-xp.source-provenance-sha256"] == $provenance
+            .[0].Config.Labels["com.proxywar.commander-public-base.source-sha"] == $source and
+            .[0].Config.Labels["com.proxywar.commander-public-base.source-tree-sha"] == $tree and
+            .[0].Config.Labels["com.proxywar.commander-public-base.behavior-source-sha"] == $source and
+            .[0].Config.Labels["com.proxywar.commander-public-base.behavior-source-tree-sha"] == $tree and
+            .[0].Config.Labels["com.proxywar.commander-public-base.adapter-source-sha"] == $source and
+            .[0].Config.Labels["com.proxywar.commander-public-base.adapter-source-tree-sha"] == $tree and
+            .[0].Config.Labels["com.proxywar.commander-public-base.source-provenance-sha256"] == $provenance and
+            .[0].Config.Cmd == ["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"] and
+            ((.[0].Config.Env | join("\n")) | test("COMMANDER_XP|--arm|PROXYWAR_TUNE_SPATIAL") | not)
           ' "$RUNNER_TEMP/policy-image-inspect.json" >/dev/null
           POLICY_ROOTFS_BYTES=$(docker run --rm --entrypoint /usr/bin/du "$POLICY_TAG" -sx -B1 / | awk '{print $1}')
           [[ "$POLICY_ROOTFS_BYTES" =~ ^[0-9]+$ ]]
           test "$POLICY_ROOTFS_BYTES" -lt $((512 * 1024 * 1024))
           docker run --rm --entrypoint /bin/sh "$POLICY_TAG" -ec '
-            test -f /app/proxywar/coworld-adapter/src/commander-xp-player.ts
-            test -f /app/proxywar/coworld-adapter/src/starter-player.mjs
+            test -f /app/proxywar/coworld-adapter/src/commander-player.ts
+            test -f /app/proxywar/coworld-adapter/src/commander-production-runtime.ts
             test -f /app/proxywar/src/server/agents/CommanderPromptBuilder.ts
             test -f /app/proxywar/src/server/agents/CommanderStateBuilder.ts
             test -f /app/proxywar/src/server/agents/StrategicCommanderTypes.ts
             test ! -e /app/proxywar/resources
-            node --import tsx -e '\''Promise.all([import("/app/proxywar/src/server/agents/CommanderPromptBuilder.ts"),import("/app/proxywar/src/server/agents/CommanderStateBuilder.ts"),import("/app/proxywar/src/server/agents/StrategicCommanderTypes.ts")])'\''
+            node --import tsx -e '\''Promise.all([import("/app/proxywar/coworld-adapter/src/commander-player.ts"),import("/app/proxywar/coworld-adapter/src/commander-production-runtime.ts"),import("/app/proxywar/src/server/agents/CommanderPromptBuilder.ts"),import("/app/proxywar/src/server/agents/CommanderStateBuilder.ts"),import("/app/proxywar/src/server/agents/StrategicCommanderTypes.ts")])'\''
           '
           for RELATIVE in \
+            coworld-adapter/commander-starter/commander-player.ts \
+            coworld-adapter/commander-starter/commander-production-runtime.ts \
             src/server/agents/CommanderPromptBuilder.ts \
             src/server/agents/CommanderStateBuilder.ts \
             src/server/agents/StrategicCommanderTypes.ts; do
             HOST_SHA=$(sha256sum "$BUILD_SOURCE/$RELATIVE" | cut -d' ' -f1)
-            IMAGE_SHA=$(docker run --rm --entrypoint sha256sum "$POLICY_TAG" "/app/proxywar/$RELATIVE" | cut -d' ' -f1)
+            case "$RELATIVE" in
+              coworld-adapter/commander-starter/commander-player.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-player.ts ;;
+              coworld-adapter/commander-starter/commander-production-runtime.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-production-runtime.ts ;;
+              *) IMAGE_RELATIVE="$RELATIVE" ;;
+            esac
+            IMAGE_SHA=$(docker run --rm --entrypoint sha256sum "$POLICY_TAG" "/app/proxywar/$IMAGE_RELATIVE" | cut -d' ' -f1)
             test "$IMAGE_SHA" = "$HOST_SHA"
           done
           {
@@ -243,12 +252,19 @@ jobs:
           if test -n "$RECOVERY_ARTIFACT_ID"; then
             METADATA="$RUNNER_TEMP/recovery-artifact.json"
             ARCHIVE="$RUNNER_TEMP/recovery-artifact.zip"
-            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_ARTIFACT_ID" > "$METADATA"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_ARTIFACT_ID" \
+              | "$COWORLD_PYTHON" .github/scripts/commander-public-base-recovery-archive.py \
+                copy metadata "$METADATA" > "$RUNNER_TEMP/recovery-metadata-size.txt"
             test "$(jq -r .id "$METADATA")" = "$RECOVERY_ARTIFACT_ID"
             test "$(jq -r .expired "$METADATA")" = false
+            RECOVERY_DECLARED_BYTES=$(jq -r .size_in_bytes "$METADATA")
+            [[ "$RECOVERY_DECLARED_BYTES" =~ ^[1-9][0-9]*$ ]]
+            test "$RECOVERY_DECLARED_BYTES" -le $((32 * 1024 * 1024))
             RECOVERY_RUN_ID=$(jq -r .workflow_run.id "$METADATA")
             [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/recovery-run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" \
+              | "$COWORLD_PYTHON" .github/scripts/commander-public-base-recovery-archive.py \
+                copy metadata "$RUNNER_TEMP/recovery-run.json" > "$RUNNER_TEMP/recovery-run-size.txt"
             RECOVERY_RUN_ATTEMPT=$(jq -r .run_attempt "$RUNNER_TEMP/recovery-run.json")
             jq -e --arg source "$SOURCE_SHA" '
               .status == "completed" and .conclusion != "success" and
@@ -261,30 +277,13 @@ jobs:
             ' "$RUNNER_TEMP/recovery-run.json" >/dev/null
             gh api -H "Accept: application/vnd.github+json" \
               "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_ARTIFACT_ID/zip" \
-              > "$ARCHIVE"
-            python - "$ARCHIVE" "$STATE_ROOT" <<'PY'
-          import pathlib, stat, sys, zipfile
-          archive = pathlib.Path(sys.argv[1])
-          destination = pathlib.Path(sys.argv[2]).resolve()
-          seen = set()
-          with zipfile.ZipFile(archive) as bundle:
-              for member in bundle.infolist():
-                  candidate = pathlib.PurePosixPath(member.filename)
-                  folded = member.filename.casefold()
-                  mode = member.external_attr >> 16
-                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
-                      raise SystemExit(f"unsafe public-base recovery member: {member.filename}")
-                  seen.add(folded)
-                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
-                      raise SystemExit(f"special public-base recovery member: {member.filename}")
-                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
-                  if destination not in resolved.parents and resolved != destination:
-                      raise SystemExit(f"public-base recovery path escape: {member.filename}")
-              bundle.extractall(destination)
-          PY
+              | "$COWORLD_PYTHON" .github/scripts/commander-public-base-recovery-archive.py \
+                copy archive "$ARCHIVE" > "$RUNNER_TEMP/recovery-archive-size.txt"
+            "$COWORLD_PYTHON" .github/scripts/commander-public-base-recovery-archive.py \
+              extract "$ARCHIVE" "$STATE_ROOT" > "$RUNNER_TEMP/recovery-extraction.txt"
             test "$(find "$STATE_ROOT" -type l | wc -l | tr -d ' ')" = 0
             RECOVERY_RESULT=$(node .github/scripts/commander-public-base-recovery.mjs validate \
-              "$STATE_ROOT" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$POLICY_NAME" "$FENCE_REF")
+              "$STATE_ROOT" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF")
             RECOVERY_STAGE=$(jq -r .stage <<< "$RECOVERY_RESULT")
             cmp "$STATE_ROOT/source-provenance.json" \
               "$RUNNER_TEMP/commander-public-base-provenance-v1.json"
@@ -292,44 +291,84 @@ jobs:
             test "$(jq -r .name "$METADATA")" = "$EXPECTED_NAME"
           fi
           case "$RECOVERY_STAGE" in
-            ghcr|coworld-image|coworld-policy|complete) RECOVERED_GHCR=true ;;
-            *) RECOVERED_GHCR=false ;;
+            ghcr|coworld-intent|coworld-image|coworld-policy|complete) RECOVERED_GHCR_BOUNDARY=true ;;
+            *) RECOVERED_GHCR_BOUNDARY=false ;;
           esac
           test "$RECOVERY_STAGE" != complete || test -f "$STATE_ROOT/materialization/summary.json"
           {
             echo "STATE_ROOT=$STATE_ROOT"
             echo "RECOVERY_STAGE=$RECOVERY_STAGE"
-            echo "RECOVERED_GHCR=$RECOVERED_GHCR"
+            echo "RECOVERED_GHCR_BOUNDARY=$RECOVERED_GHCR_BOUNDARY"
           } >> "$GITHUB_ENV"
 
-      - name: Authenticated no-mutation cardinality preflight
+      - name: Resolve exact GHCR recovery state
         env:
-          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if test "$RECOVERED_GHCR" = true; then
-            docker buildx imagetools inspect --raw "$POLICY_TAG" > "$RUNNER_TEMP/remote-policy-manifest.json"
-            node .github/scripts/commander-xp-ghcr-adoption.mjs inspect \
-              "$POLICY_TAG" "$POLICY_CONFIG_DIGEST" "$RUNNER_TEMP/remote-policy-manifest.json" \
+          REMOTE_GHCR_AVAILABLE=false
+          REMOTE_GHCR_ADOPTED=false
+          if docker buildx imagetools inspect --raw "$POLICY_TAG" \
+            > "$RUNNER_TEMP/remote-policy-manifest.json" 2>/dev/null; then
+            node .github/scripts/commander-xp-ghcr-adoption.mjs discover \
+              "$POLICY_TAG" "$RUNNER_TEMP/remote-policy-manifest.json" \
               > "$RUNNER_TEMP/remote-policy-identity.json"
-            test "$(jq -r .manifestDigest "$RUNNER_TEMP/remote-policy-identity.json")" = "$(jq -r .policyDigest "$STATE_ROOT/ghcr.json")"
-          else
-            if docker buildx imagetools inspect --raw "$POLICY_TAG" > "$RUNNER_TEMP/unexpected-policy-manifest.json" 2>/dev/null; then
+            POLICY_DIGEST=$(jq -r .manifestDigest "$RUNNER_TEMP/remote-policy-identity.json")
+            REMOTE_CONFIG_DIGEST=$(jq -r .configDigest "$RUNNER_TEMP/remote-policy-identity.json")
+            POLICY_REPO_DIGEST="${POLICY_TAG%:*}@$POLICY_DIGEST"
+            if test "$RECOVERED_GHCR_BOUNDARY" = true; then
+              test "$POLICY_DIGEST" = "$(jq -r .policyDigest "$STATE_ROOT/ghcr.json")"
+              test "$REMOTE_CONFIG_DIGEST" = "$(jq -r .policyConfigDigest "$STATE_ROOT/ghcr.json")"
+            elif test "$RECOVERY_STAGE" = intent; then
+              REMOTE_GHCR_ADOPTED=true
+            else
               echo "Commander public-base GHCR tag exists without retained recovery authority" >&2
               exit 1
             fi
+            printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            docker pull "$POLICY_REPO_DIGEST" > "$RUNNER_TEMP/remote-policy-pull.txt"
+            docker image inspect "$POLICY_REPO_DIGEST" > "$RUNNER_TEMP/remote-policy-inspect.json"
+            test "$(docker image inspect --format '{{.Id}}' "$POLICY_REPO_DIGEST")" = "$REMOTE_CONFIG_DIGEST"
+            jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg provenance "$SOURCE_PROVENANCE_SHA256" '
+              length == 1 and .[0].Architecture == "amd64" and .[0].Os == "linux" and
+              .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/0xNad/ProxyWar" and
+              .[0].Config.Labels["org.opencontainers.image.revision"] == $source and
+              .[0].Config.Labels["com.proxywar.commander-public-base.source-sha"] == $source and
+              .[0].Config.Labels["com.proxywar.commander-public-base.source-tree-sha"] == $tree and
+              .[0].Config.Labels["com.proxywar.commander-public-base.behavior-source-sha"] == $source and
+              .[0].Config.Labels["com.proxywar.commander-public-base.behavior-source-tree-sha"] == $tree and
+              .[0].Config.Labels["com.proxywar.commander-public-base.adapter-source-sha"] == $source and
+              .[0].Config.Labels["com.proxywar.commander-public-base.adapter-source-tree-sha"] == $tree and
+              .[0].Config.Labels["com.proxywar.commander-public-base.source-provenance-sha256"] == $provenance and
+              .[0].Config.Cmd == ["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"]
+            ' "$RUNNER_TEMP/remote-policy-inspect.json" >/dev/null
+            for SOURCE_RELATIVE in \
+              coworld-adapter/commander-starter/commander-player.ts \
+              coworld-adapter/commander-starter/commander-production-runtime.ts \
+              src/server/agents/CommanderPromptBuilder.ts \
+              src/server/agents/CommanderStateBuilder.ts \
+              src/server/agents/StrategicCommanderTypes.ts; do
+              case "$SOURCE_RELATIVE" in
+                coworld-adapter/commander-starter/commander-player.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-player.ts ;;
+                coworld-adapter/commander-starter/commander-production-runtime.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-production-runtime.ts ;;
+                *) IMAGE_RELATIVE="$SOURCE_RELATIVE" ;;
+              esac
+              HOST_SHA=$(sha256sum "$BUILD_SOURCE/$SOURCE_RELATIVE" | cut -d' ' -f1)
+              IMAGE_SHA=$(docker run --rm --entrypoint sha256sum "$POLICY_REPO_DIGEST" "/app/proxywar/$IMAGE_RELATIVE" | cut -d' ' -f1)
+              test "$IMAGE_SHA" = "$HOST_SHA"
+            done
+            POLICY_CONFIG_DIGEST="$REMOTE_CONFIG_DIGEST"
+            REMOTE_GHCR_AVAILABLE=true
+          else
+            test "$RECOVERED_GHCR_BOUNDARY" = false
           fi
-          if test "$RECOVERY_STAGE" != coworld-policy && test "$RECOVERY_STAGE" != complete; then
-            PLACEHOLDER="sha256:$(printf '0%.0s' {1..64})"
-            node .github/scripts/coworld-authenticated-command.mjs commander-public-base-materialize check \
-              --image="ghcr.io/0xnad/proxywar-commander-public-base@$PLACEHOLDER" \
-              --policy-name="$POLICY_NAME" --source-sha="$SOURCE_SHA" \
-              --source-tree-sha="$SOURCE_TREE_SHA" \
-              --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
-              --build-provenance-digest="$PLACEHOLDER" --oci-digest="$PLACEHOLDER" \
-              > "$RUNNER_TEMP/materialization-preflight.json"
-            jq -e '.ok == true and .namesAvailable == 1' "$RUNNER_TEMP/materialization-preflight.json" >/dev/null
-          fi
+          {
+            echo "POLICY_CONFIG_DIGEST=$POLICY_CONFIG_DIGEST"
+            echo "POLICY_DIGEST=${POLICY_DIGEST:-}"
+            echo "POLICY_REPO_DIGEST=${POLICY_REPO_DIGEST:-}"
+            echo "REMOTE_GHCR_AVAILABLE=$REMOTE_GHCR_AVAILABLE"
+            echo "REMOTE_GHCR_ADOPTED=$REMOTE_GHCR_ADOPTED"
+          } >> "$GITHUB_ENV"
 
       - name: Build immutable public-base intent
         if: inputs.recovery_artifact_id == ''
@@ -340,13 +379,12 @@ jobs:
             "$STATE_ROOT/source-provenance.json"
           jq -cS -n \
             --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
-            --arg policyName "$POLICY_NAME" --arg fenceRef "$FENCE_REF" \
-            --arg policyTag "$POLICY_TAG" --arg config "$POLICY_CONFIG_DIGEST" \
+            --arg fenceRef "$FENCE_REF" --arg policyTag "$POLICY_TAG" \
             --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" --arg createdAt "$CREATED_AT" \
-            '{schemaVersion:1,authority:"github-actions-commander-public-base-intent-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-public-base.yml",sourceSha:$source,sourceTreeSha:$tree,behaviorSourceSha:$source,behaviorSourceTreeSha:$tree,adapterSourceSha:$source,adapterSourceTreeSha:$tree,policyName:$policyName,fenceRef:$fenceRef,platform:"linux/amd64",ghcr:{tag:$policyTag,configDigest:$config},sourceProvenanceDigest:$provenance,plan:{imageCount:1,policyCount:1,bedrockEnvironmentCount:0,evalCoworldCount:0,xpRequestCount:0},createdAt:$createdAt}' \
+            '{schemaVersion:2,authority:"github-actions-commander-public-base-intent-v2",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-public-base.yml",sourceSha:$source,sourceTreeSha:$tree,behaviorSourceSha:$source,behaviorSourceTreeSha:$tree,adapterSourceSha:$source,adapterSourceTreeSha:$tree,fenceRef:$fenceRef,platform:"linux/amd64",ghcr:{tag:$policyTag},sourceProvenanceDigest:$provenance,runtimeEntrypoint:["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"],plan:{imageCount:1,policyCount:1,bedrockEnvironmentCount:0,evalCoworldCount:0,xpRequestCount:0},createdAt:$createdAt}' \
             > "$STATE_ROOT/intent.json"
           node .github/scripts/commander-public-base-recovery.mjs build \
-            "$STATE_ROOT" intent "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$POLICY_NAME" "$FENCE_REF" \
+            "$STATE_ROOT" intent "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF" \
             > "$RUNNER_TEMP/intent-boundary.json"
 
       - name: Retain immutable intent before mutation
@@ -368,17 +406,18 @@ jobs:
           set -euo pipefail
           node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" \
             > "$RUNNER_TEMP/fence-main-authorization.json"
-          if test -z "$RECOVERY_ARTIFACT_ID"; then
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/${FENCE_REF#refs/}" \
+            > "$RUNNER_TEMP/fence.json" 2>/dev/null; then
+            :
+          else
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="$FENCE_REF" -f sha="$SOURCE_SHA" > "$RUNNER_TEMP/fence.json"
-          else
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/${FENCE_REF#refs/}" > "$RUNNER_TEMP/fence.json"
           fi
           test "$(jq -r .ref "$RUNNER_TEMP/fence.json")" = "$FENCE_REF"
           test "$(jq -r .object.sha "$RUNNER_TEMP/fence.json")" = "$SOURCE_SHA"
 
       - name: Push one exact immutable GHCR image
-        if: env.RECOVERED_GHCR != 'true'
+        if: env.REMOTE_GHCR_AVAILABLE != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -401,7 +440,7 @@ jobs:
 
       - name: Attest public-base image provenance
         id: policy_provenance
-        if: env.RECOVERED_GHCR != 'true'
+        if: env.RECOVERED_GHCR_BOUNDARY != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-name: ghcr.io/0xnad/proxywar-commander-public-base
@@ -415,7 +454,7 @@ jobs:
           POLICY_BUNDLE: ${{ steps.policy_provenance.outputs.bundle-path }}
         run: |
           set -euo pipefail
-          if test "$RECOVERED_GHCR" = true; then
+          if test "$RECOVERED_GHCR_BOUNDARY" = true; then
             jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg config "$POLICY_CONFIG_DIGEST" --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" --arg inventory "$COWORLD_RUNTIME_INVENTORY_SHA256" '
               .schemaVersion == 1 and .authority == "github-actions-attested-commander-public-base-v1" and
               .sourceSha == $source and .sourceTreeSha == $tree and
@@ -459,15 +498,15 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build immutable GHCR boundary
-        if: env.RECOVERED_GHCR != 'true'
+        if: env.RECOVERED_GHCR_BOUNDARY != 'true'
         run: |
           set -euo pipefail
           node .github/scripts/commander-public-base-recovery.mjs build \
-            "$STATE_ROOT" ghcr "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$POLICY_NAME" "$FENCE_REF" \
+            "$STATE_ROOT" ghcr "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF" \
             > "$RUNNER_TEMP/ghcr-boundary.json"
 
       - name: Retain immutable GHCR boundary
-        if: env.RECOVERED_GHCR != 'true'
+        if: env.RECOVERED_GHCR_BOUNDARY != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: commander-public-base-boundary-ghcr-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -478,8 +517,77 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
-      - name: Materialize exactly one Coworld policy image
-        id: materialize_policy
+      - name: Build exact Coworld materialization intent
+        id: coworld_intent
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          POLICY_IDENTITY_JSON=$(jq -cS -n --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
+            --arg image "${POLICY_REPO_DIGEST%%@*}" --arg digest "$POLICY_DIGEST" \
+            --arg build "$POLICY_BUILD_PROVENANCE_DIGEST" \
+            --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" \
+            '{sourceSha:$source,sourceTreeSha:$tree,sourceProvenanceDigest:$provenance,buildProvenanceDigest:$build,ociImage:$image,ociDigest:$digest,runtimeEntrypoint:["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"],purpose:"commander-public-base-materialization-v2"}')
+          POLICY_IDENTITY_SHA256=$(printf '%s' "$POLICY_IDENTITY_JSON" | sha256sum | cut -d' ' -f1)
+          POLICY_NAME="proxywar-commander-public-base-v2-$POLICY_IDENTITY_SHA256"
+          {
+            echo "POLICY_IDENTITY_SHA256=$POLICY_IDENTITY_SHA256"
+            echo "POLICY_NAME=$POLICY_NAME"
+          } >> "$GITHUB_ENV"
+          if test -f "$STATE_ROOT/coworld-intent.json"; then
+            jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
+              --arg image "$POLICY_REPO_DIGEST" --arg digest "$POLICY_DIGEST" \
+              --arg build "$POLICY_BUILD_PROVENANCE_DIGEST" \
+              --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" \
+              --arg policy "$POLICY_NAME" --arg identity "$POLICY_IDENTITY_SHA256" '
+              .schemaVersion == 1 and .authority == "github-actions-commander-public-base-coworld-intent-v1" and
+              .sourceSha == $source and .sourceTreeSha == $tree and
+              .behaviorSourceSha == $source and .adapterSourceSha == $source and
+              .ociImage == $image and .ociDigest == $digest and
+              .buildProvenanceDigest == $build and .sourceProvenanceDigest == $provenance and
+              .policyName == $policy and .policyIdentitySha256 == $identity and
+              .runtimeEntrypoint == ["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"] and
+              .plan == {imageCount:1,policyCount:1,bedrockEnvironmentCount:0}
+            ' "$STATE_ROOT/coworld-intent.json" >/dev/null
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node .github/scripts/coworld-authenticated-command.mjs commander-public-base-materialize check \
+            --image="$POLICY_REPO_DIGEST" --policy-name="$POLICY_NAME" \
+            --policy-identity-sha256="$POLICY_IDENTITY_SHA256" --source-sha="$SOURCE_SHA" \
+            --source-tree-sha="$SOURCE_TREE_SHA" \
+            --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
+            --build-provenance-digest="$POLICY_BUILD_PROVENANCE_DIGEST" \
+            --oci-digest="$POLICY_DIGEST" \
+            > "$RUNNER_TEMP/materialization-preflight.json"
+          jq -e '.ok == true and .namesAvailable == 1' "$RUNNER_TEMP/materialization-preflight.json" >/dev/null
+          CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          jq -cS -n --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
+            --arg image "$POLICY_REPO_DIGEST" --arg digest "$POLICY_DIGEST" \
+            --arg build "$POLICY_BUILD_PROVENANCE_DIGEST" \
+            --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" --arg createdAt "$CREATED_AT" \
+            --arg policy "$POLICY_NAME" --arg identity "$POLICY_IDENTITY_SHA256" \
+            '{schemaVersion:1,authority:"github-actions-commander-public-base-coworld-intent-v1",sourceSha:$source,sourceTreeSha:$tree,behaviorSourceSha:$source,behaviorSourceTreeSha:$tree,adapterSourceSha:$source,adapterSourceTreeSha:$tree,ociImage:$image,ociDigest:$digest,buildProvenanceDigest:$build,sourceProvenanceDigest:$provenance,policyName:$policy,policyIdentitySha256:$identity,runtimeEntrypoint:["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"],plan:{imageCount:1,policyCount:1,bedrockEnvironmentCount:0},allowExactRemoteAdoptionAfterFailure:true,createdAt:$createdAt}' \
+            > "$STATE_ROOT/coworld-intent.json"
+          node .github/scripts/commander-public-base-recovery.mjs build \
+            "$STATE_ROOT" coworld-intent "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF" \
+            > "$RUNNER_TEMP/coworld-intent-boundary.json"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Retain immutable Coworld intent before materialization
+        if: steps.coworld_intent.outputs.created == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-public-base-boundary-coworld-intent-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-public-base-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Materialize exactly one Coworld image
+        id: materialize_image
         if: env.RECOVERY_STAGE != 'complete'
         continue-on-error: true
         env:
@@ -496,13 +604,19 @@ jobs:
           if test -d "$STATE_ROOT/materialization"; then
             RECOVERY_ARGS+=("--recovery=$STATE_ROOT/materialization")
           fi
+          case "$RECOVERY_STAGE" in
+            coworld-intent|coworld-image|coworld-policy) ALLOW_REMOTE_ADOPTION=true ;;
+            *) ALLOW_REMOTE_ADOPTION=false ;;
+          esac
           set +e
           node .github/scripts/coworld-authenticated-command.mjs commander-public-base-materialize upload \
             --image="$POLICY_REPO_DIGEST" --policy-name="$POLICY_NAME" \
+            --policy-identity-sha256="$POLICY_IDENTITY_SHA256" \
             --source-sha="$SOURCE_SHA" --source-tree-sha="$SOURCE_TREE_SHA" \
             --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
             --build-provenance-digest="$POLICY_BUILD_PROVENANCE_DIGEST" \
-            --oci-digest="$POLICY_DIGEST" --output="$OUTPUT" \
+            --oci-digest="$POLICY_DIGEST" --allow-remote-adoption="$ALLOW_REMOTE_ADOPTION" \
+            --output="$OUTPUT" \
             "${RECOVERY_ARGS[@]}" > "$RUNNER_TEMP/materialization-result.json"
           STATUS=$?
           set -e
@@ -511,11 +625,11 @@ jobs:
             cp -R "$OUTPUT"/. "$STATE_ROOT/materialization"/
           fi
           test "$STATUS" = 0 || exit "$STATUS"
-          jq -e '.ok == true and .policyCount == 1' "$RUNNER_TEMP/materialization-result.json" >/dev/null
+          jq -e '.ok == true and .imageCount == 1 and .policyCount == 1' "$RUNNER_TEMP/materialization-result.json" >/dev/null
 
       - name: Build exact complete or partial Coworld boundary
         id: materialization_boundary
-        if: always() && steps.materialize_policy.outcome != 'skipped'
+        if: always() && steps.materialize_image.outcome != 'skipped'
         run: |
           set -euo pipefail
           if test -f "$STATE_ROOT/materialization/summary.json"; then
@@ -529,16 +643,16 @@ jobs:
             exit 0
           fi
           if test "$STAGE" = complete; then
-            jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg policy "$POLICY_NAME" '
+            jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" '
               .sourceSha == $source and .sourceTreeSha == $tree and
               .behaviorSourceSha == $source and .behaviorSourceTreeSha == $tree and
               .adapterSourceSha == $source and .adapterSourceTreeSha == $tree and
-              .policyName == $policy and .policyCount == 1 and
+              .imageCount == 1 and .policyCount == 1 and
               .bedrockEnvironmentCount == 0
             ' "$STATE_ROOT/materialization/summary.json" >/dev/null
           fi
           node .github/scripts/commander-public-base-recovery.mjs build \
-            "$STATE_ROOT" "$STAGE" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$POLICY_NAME" "$FENCE_REF" \
+            "$STATE_ROOT" "$STAGE" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF" \
             > "$RUNNER_TEMP/materialization-boundary.json"
           {
             echo "ready=true"
@@ -558,7 +672,7 @@ jobs:
           include-hidden-files: false
 
       - name: Stop after retaining a partial Coworld boundary
-        if: steps.materialize_policy.outcome == 'failure'
+        if: steps.materialize_image.outcome == 'failure'
         run: exit 1
 
       - name: Verify terminal single-image handoff
@@ -569,18 +683,46 @@ jobs:
           node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" \
             > "$RUNNER_TEMP/terminal-main-authorization.json"
           node .github/scripts/commander-public-base-recovery.mjs validate \
-            "$STATE_ROOT" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$POLICY_NAME" "$FENCE_REF" \
+            "$STATE_ROOT" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$FENCE_REF" \
             > "$RUNNER_TEMP/terminal-boundary.json"
           test "$(jq -r .stage "$RUNNER_TEMP/terminal-boundary.json")" = complete
           jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg digest "$POLICY_DIGEST" --arg repoDigest "$POLICY_REPO_DIGEST" '
             .sourceSha == $source and .sourceTreeSha == $tree and
             .behaviorSourceSha == $source and .adapterSourceSha == $source and
-            .policyCount == 1 and .bedrockEnvironmentCount == 0 and
+            .imageCount == 1 and .policyCount == 1 and .bedrockEnvironmentCount == 0 and
             .ociDigest == $digest and .ociImage == ($repoDigest | split("@")[0]) and
             (.containerImage.image_digest | test("^sha256:[0-9a-f]{64}$")) and
-            (.containerImage.public_image_uri | type == "string") and
-            (.policyVersion.id | type == "string")
+            (.containerImage.public_image_uri | test("^public\\.ecr\\.aws/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")) and
+            (.policyVersion.id | type == "string") and .policyVersion.name == .policyName and
+            .runtimeEntrypoint == ["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"]
           ' "$STATE_ROOT/materialization/summary.json" >/dev/null
+          PUBLIC_IMAGE_URI=$(jq -r .containerImage.public_image_uri "$STATE_ROOT/materialization/summary.json")
+          docker pull "$PUBLIC_IMAGE_URI" > "$RUNNER_TEMP/public-image-pull.txt"
+          docker image inspect "$PUBLIC_IMAGE_URI" > "$RUNNER_TEMP/public-image-inspect.json"
+          jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg provenance "$SOURCE_PROVENANCE_SHA256" '
+            length == 1 and .[0].Architecture == "amd64" and .[0].Os == "linux" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $source and
+            .[0].Config.Labels["com.proxywar.commander-public-base.source-tree-sha"] == $tree and
+            .[0].Config.Labels["com.proxywar.commander-public-base.source-provenance-sha256"] == $provenance and
+            .[0].Config.Cmd == ["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"]
+          ' "$RUNNER_TEMP/public-image-inspect.json" >/dev/null
+          docker run --rm --entrypoint node "$PUBLIC_IMAGE_URI" --import tsx -e \
+            'Promise.all([import("/app/proxywar/coworld-adapter/src/commander-player.ts"),import("/app/proxywar/coworld-adapter/src/commander-production-runtime.ts")])'
+          for SOURCE_RELATIVE in \
+            coworld-adapter/commander-starter/commander-player.ts \
+            coworld-adapter/commander-starter/commander-production-runtime.ts \
+            src/server/agents/CommanderPromptBuilder.ts \
+            src/server/agents/CommanderStateBuilder.ts \
+            src/server/agents/StrategicCommanderTypes.ts; do
+            case "$SOURCE_RELATIVE" in
+              coworld-adapter/commander-starter/commander-player.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-player.ts ;;
+              coworld-adapter/commander-starter/commander-production-runtime.ts) IMAGE_RELATIVE=coworld-adapter/src/commander-production-runtime.ts ;;
+              *) IMAGE_RELATIVE="$SOURCE_RELATIVE" ;;
+            esac
+            HOST_SHA=$(sha256sum "$BUILD_SOURCE/$SOURCE_RELATIVE" | cut -d' ' -f1)
+            PUBLIC_SHA=$(docker run --rm --entrypoint sha256sum "$PUBLIC_IMAGE_URI" "/app/proxywar/$IMAGE_RELATIVE" | cut -d' ' -f1)
+            test "$PUBLIC_SHA" = "$HOST_SHA"
+          done
           {
             echo "### Commander public base"
             echo "- Source: \`$SOURCE_SHA\`"
@@ -588,7 +730,8 @@ jobs:
             echo "- GHCR: \`$POLICY_REPO_DIGEST\`"
             echo "- Coworld image: \`$(jq -r .containerImage.public_image_uri "$STATE_ROOT/materialization/summary.json")\`"
             echo "- Materialization policy: \`$(jq -r .policyVersion.id "$STATE_ROOT/materialization/summary.json")\`"
-            echo "- Cardinality: one image, one policy, zero eval Coworlds, zero XP requests"
+            echo "- Runtime: \`node --import tsx /app/proxywar/coworld-adapter/src/commander-player.ts\`"
+            echo "- Cardinality: one image, one exact-entrypoint materialization policy, zero environments, zero eval Coworlds, zero XP requests"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove residual ephemeral Coworld credential homes

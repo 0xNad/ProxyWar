@@ -8,6 +8,7 @@ const STATE_FILE = "commander-public-base-recovery-v1.json";
 const stages = new Set([
   "intent",
   "ghcr",
+  "coworld-intent",
   "coworld-image",
   "coworld-policy",
   "complete",
@@ -30,6 +31,7 @@ function exactRelativeFile(relative) {
     relative === "source-provenance.json" ||
     relative === "intent.json" ||
     relative === "ghcr.json" ||
+    relative === "coworld-intent.json" ||
     relative === "attestations/policy.jsonl" ||
     /^materialization\/(?:image|policy|summary)\.json$/.test(relative)
   );
@@ -66,6 +68,7 @@ function inventory(root) {
 function assertStage(stage, paths) {
   const intent = ["source-provenance.json", "intent.json"];
   const ghcr = ["ghcr.json", "attestations/policy.jsonl"];
+  const coworldIntent = ["coworld-intent.json"];
   const image = ["materialization/image.json"];
   const policy = ["materialization/policy.json"];
   const summary = ["materialization/summary.json"];
@@ -80,18 +83,32 @@ function assertStage(stage, paths) {
   };
   if (stage === "intent") return requireExact(intent);
   if (stage === "ghcr") return requireExact([...intent, ...ghcr]);
+  if (stage === "coworld-intent")
+    return requireExact([...intent, ...ghcr, ...coworldIntent]);
   if (stage === "coworld-image")
-    return requireExact([...intent, ...ghcr, ...image]);
+    return requireExact([...intent, ...ghcr, ...coworldIntent, ...image]);
   if (stage === "coworld-policy")
-    return requireExact([...intent, ...ghcr, ...image, ...policy]);
-  return requireExact([...intent, ...ghcr, ...image, ...policy, ...summary]);
+    return requireExact([
+      ...intent,
+      ...ghcr,
+      ...coworldIntent,
+      ...image,
+      ...policy,
+    ]);
+  return requireExact([
+    ...intent,
+    ...ghcr,
+    ...coworldIntent,
+    ...image,
+    ...policy,
+    ...summary,
+  ]);
 }
 
-function exactIdentity(sourceSha, sourceTreeSha, policyName, fenceRef) {
+function exactIdentity(sourceSha, sourceTreeSha, fenceRef) {
   if (
     !/^[0-9a-f]{40}$/.test(sourceSha) ||
     !/^[0-9a-f]{40}$/.test(sourceTreeSha) ||
-    !/^proxywar-commander-public-base-[0-9a-f]{20}$/.test(policyName) ||
     !/^refs\/tags\/commander-public-base-v1\/[0-9a-f]{64}$/.test(fenceRef)
   ) {
     throw new Error("Commander public-base recovery identity is invalid");
@@ -109,7 +126,6 @@ function validate(root, identity) {
     "workflowPath",
     "sourceSha",
     "sourceTreeSha",
-    "policyName",
     "fenceRef",
     "stage",
     "createdAt",
@@ -127,7 +143,6 @@ function validate(root, identity) {
     state.workflowPath !== ".github/workflows/commander-public-base.yml" ||
     state.sourceSha !== identity.sourceSha ||
     state.sourceTreeSha !== identity.sourceTreeSha ||
-    state.policyName !== identity.policyName ||
     state.fenceRef !== identity.fenceRef ||
     !stages.has(state.stage) ||
     !Array.isArray(state.priorStateSha256s) ||
@@ -154,11 +169,11 @@ if (!rootInput || !fs.statSync(root).isDirectory()) {
 
 if (command === "build") {
   const stage = stageOrSource;
-  const [sourceSha, sourceTreeSha, policyName, fenceRef] = tail;
+  const [sourceSha, sourceTreeSha, fenceRef] = tail;
   if (!stages.has(stage)) {
     throw new Error("Commander public-base recovery stage is invalid");
   }
-  exactIdentity(sourceSha, sourceTreeSha, policyName, fenceRef);
+  exactIdentity(sourceSha, sourceTreeSha, fenceRef);
   const priorPath = path.join(root, STATE_FILE);
   let priorStateSha256 = null;
   let priorStateSha256s = [];
@@ -184,7 +199,6 @@ if (command === "build") {
     workflowPath: ".github/workflows/commander-public-base.yml",
     sourceSha,
     sourceTreeSha,
-    policyName,
     fenceRef,
     stage,
     createdAt: new Date().toISOString(),
@@ -201,12 +215,11 @@ if (command === "build") {
   );
 } else if (command === "validate") {
   const sourceSha = stageOrSource;
-  const [sourceTreeSha, policyName, fenceRef] = tail;
-  exactIdentity(sourceSha, sourceTreeSha, policyName, fenceRef);
+  const [sourceTreeSha, fenceRef] = tail;
+  exactIdentity(sourceSha, sourceTreeSha, fenceRef);
   const state = validate(root, {
     sourceSha,
     sourceTreeSha,
-    policyName,
     fenceRef,
   });
   process.stdout.write(

@@ -11,7 +11,6 @@ const helper = fileURLToPath(
 );
 const source = "1".repeat(40);
 const tree = "2".repeat(40);
-const policyName = `proxywar-commander-public-base-${"3".repeat(20)}`;
 const fenceRef = `refs/tags/commander-public-base-v1/${"4".repeat(64)}`;
 
 function write(root, relative, body = {}) {
@@ -24,7 +23,7 @@ function build(root, stage) {
   return JSON.parse(
     execFileSync(
       process.execPath,
-      [helper, "build", root, stage, source, tree, policyName, fenceRef],
+      [helper, "build", root, stage, source, tree, fenceRef],
       { encoding: "utf8" },
     ),
   );
@@ -34,13 +33,13 @@ function validate(root) {
   return JSON.parse(
     execFileSync(
       process.execPath,
-      [helper, "validate", root, source, tree, policyName, fenceRef],
+      [helper, "validate", root, source, tree, fenceRef],
       { encoding: "utf8" },
     ),
   );
 }
 
-test("public-base recovery advances through one image and one policy only", () => {
+test("public-base recovery advances through one image and one exact policy", () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "commander-public-base-recovery-"),
   );
@@ -55,6 +54,8 @@ test("public-base recovery advances through one image and one policy only", () =
     const ghcr = build(root, "ghcr");
     assert.deepEqual(ghcr.priorStateSha256s, [intent.stateSha256]);
 
+    write(root, "coworld-intent.json");
+    assert.equal(build(root, "coworld-intent").stage, "coworld-intent");
     write(root, "materialization/image.json");
     assert.equal(build(root, "coworld-image").stage, "coworld-image");
     write(root, "materialization/policy.json");
@@ -83,10 +84,10 @@ test("public-base recovery rejects extra policies, tamper, and links", () => {
     write(root, "intent.json");
     write(root, "ghcr.json");
     write(root, "attestations/policy.jsonl");
+    write(root, "coworld-intent.json");
     write(root, "materialization/image.json");
-    write(root, "materialization/policy.json");
     write(root, "materialization/second-policy.json");
-    assert.throws(() => build(root, "coworld-policy"));
+    assert.throws(() => build(root, "coworld-image"));
 
     fs.rmSync(root, { recursive: true, force: true });
     write(root, "source-provenance.json");
@@ -98,7 +99,7 @@ test("public-base recovery rejects extra policies, tamper, and links", () => {
   }
 });
 
-test("public-base recovery binds exact source, policy name, and workflow", () => {
+test("public-base recovery binds exact source and workflow", () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "commander-public-base-recovery-"),
   );
@@ -109,7 +110,7 @@ test("public-base recovery binds exact source, policy name, and workflow", () =>
     assert.throws(() =>
       execFileSync(
         process.execPath,
-        [helper, "validate", root, "9".repeat(40), tree, policyName, fenceRef],
+        [helper, "validate", root, "9".repeat(40), tree, fenceRef],
         { encoding: "utf8" },
       ),
     );
