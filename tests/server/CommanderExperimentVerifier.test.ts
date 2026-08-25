@@ -23,6 +23,7 @@ vi.mock("../../src/core/configuration/ConfigLoader", async (importOriginal) => {
 import { runCommanderArmGate } from "../../src/scripts/ai-agent-commander-arm-gate";
 import { runCommanderExperimentVerifierCli } from "../../src/scripts/ai-agent-commander-experiment-verify";
 import {
+  captureCommanderSourceIdentity,
   commanderConfirmatoryAnalysisSpecification,
   sha256Canonical,
   sha256File,
@@ -44,10 +45,16 @@ describe("Commander experiment post-hoc seal verifier", () => {
       path.join(os.tmpdir(), "proxywar-commander-verifier-"),
     );
     sealedFixture = path.join(temporaryRoot, "sealed-fixture");
+    const fixtureSourceIdentity = await captureCommanderSourceIdentity();
     await runCommanderArmGate({
       outputDirectory: sealedFixture,
       maxSteps: 1,
       turnsPerDecisionStep: 25,
+      sourceSha: fixtureSourceIdentity.sourceSha,
+      sourceTreeDirty: !fixtureSourceIdentity.clean,
+      verificationHooks: {
+        captureSourceIdentity: async () => fixtureSourceIdentity,
+      },
     });
   }, 60_000);
 
