@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const allowedCommands = new Set([
+  "commander-public-base-materialize",
   "commander-xp-episode-bundle",
   "commander-xp-policy-provision",
   "commander-xp-run-episode",
@@ -257,6 +258,62 @@ if (command === "commander-xp-policy-provision") {
     );
   }
 }
+if (command === "commander-public-base-materialize") {
+  const [mode, ...options] = args;
+  const parsed = new Map(
+    options.map((entry) => {
+      const match = entry.match(/^--([a-z][a-z0-9-]*)=(.+)$/);
+      if (!match) return ["", ""];
+      return [match[1], match[2]];
+    }),
+  );
+  const expectedKeys = new Set([
+    "build-provenance-digest",
+    "image",
+    "oci-digest",
+    "policy-identity-sha256",
+    "policy-name",
+    "source-provenance-digest",
+    "source-sha",
+    "source-tree-sha",
+    ...(mode === "upload" ? ["allow-remote-adoption", "output"] : []),
+    ...(mode === "upload" && parsed.has("recovery") ? ["recovery"] : []),
+  ]);
+  if (
+    !new Set(["check", "upload"]).has(mode) ||
+    parsed.size !== options.length ||
+    parsed.size !== expectedKeys.size ||
+    [...parsed.keys()].some((key) => !expectedKeys.has(key)) ||
+    !/^ghcr\.io\/0xnad\/proxywar-commander-public-base@sha256:[0-9a-f]{64}$/.test(
+      parsed.get("image") ?? "",
+    ) ||
+    !/^proxywar-commander-public-base-v2-[0-9a-f]{64}$/.test(
+      parsed.get("policy-name") ?? "",
+    ) ||
+    !/^[0-9a-f]{64}$/.test(parsed.get("policy-identity-sha256") ?? "") ||
+    !parsed
+      .get("policy-name")
+      ?.endsWith(`-${parsed.get("policy-identity-sha256")}`) ||
+    !/^[0-9a-f]{40}$/.test(parsed.get("source-sha") ?? "") ||
+    !/^[0-9a-f]{40}$/.test(parsed.get("source-tree-sha") ?? "") ||
+    [
+      parsed.get("oci-digest"),
+      parsed.get("source-provenance-digest"),
+      parsed.get("build-provenance-digest"),
+    ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
+    (mode === "upload" &&
+      !new Set(["true", "false"]).has(
+        parsed.get("allow-remote-adoption") ?? "",
+      )) ||
+    (mode === "upload" && !exactRunnerTempOutput(parsed.get("output"))) ||
+    (parsed.has("recovery") &&
+      !exactRunnerTempDirectoryInput(parsed.get("recovery")))
+  ) {
+    throw new Error(
+      "authenticated Coworld Commander public-base materialization mode is malformed",
+    );
+  }
+}
 if (
   command === "episodes" &&
   !(
@@ -422,32 +479,38 @@ try {
   }
 
   const executable =
+    command === "commander-public-base-materialize" ||
     command === "commander-xp-episode-bundle" ||
     command === "commander-xp-policy-provision"
       ? python
       : coworld;
   const executableArgs =
-    command === "commander-xp-episode-bundle"
+    command === "commander-public-base-materialize"
       ? [
-          resolve(
-            import.meta.dirname,
-            "../../coworld-adapter/scripts/fetch-commander-xp-episode-bundle.py",
-          ),
+          resolve(import.meta.dirname, "commander-public-base-materialize.py"),
           ...args,
         ]
-      : command === "commander-xp-policy-provision"
+      : command === "commander-xp-episode-bundle"
         ? [
             resolve(
               import.meta.dirname,
-              "../../coworld-adapter/scripts/provision-commander-xp-policies.py",
+              "../../coworld-adapter/scripts/fetch-commander-xp-episode-bundle.py",
             ),
             ...args,
           ]
-        : command === "commander-xp-run-episode"
-          ? ["run-episode", ...args]
-          : command === "commander-xp-certify"
-            ? ["certify", ...args]
-            : [command, ...args];
+        : command === "commander-xp-policy-provision"
+          ? [
+              resolve(
+                import.meta.dirname,
+                "../../coworld-adapter/scripts/provision-commander-xp-policies.py",
+              ),
+              ...args,
+            ]
+          : command === "commander-xp-run-episode"
+            ? ["run-episode", ...args]
+            : command === "commander-xp-certify"
+              ? ["certify", ...args]
+              : [command, ...args];
   const result = spawnSync(executable, executableArgs, {
     env: childEnv,
     // Hosted `coworld list --json` grows with immutable release history and is
