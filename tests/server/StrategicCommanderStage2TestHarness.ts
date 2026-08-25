@@ -46,6 +46,7 @@ export function makeCommanderStage2Fixture(
     reverseSources?: boolean;
     decisionSequence?: number;
     validSpatial?: boolean;
+    absentSpatial?: boolean;
   } = {},
 ): CommanderStage2Fixture {
   const rivals = makeRivals();
@@ -116,7 +117,9 @@ export function makeCommanderStage2Fixture(
     } as unknown as AgentObservation["recentDecisions"][number],
   ];
   observation.notes = [RAW_MENU_CANARY];
-  if (input.validSpatial) {
+  if (input.absentSpatial) {
+    observation.spatial = undefined;
+  } else if (input.validSpatial) {
     addValidCommanderOrientation(observation);
   }
 
