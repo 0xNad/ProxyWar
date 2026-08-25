@@ -1,11 +1,14 @@
 import { z } from "zod";
-import { GameConfigSchema } from "./Schemas";
+import {
+  ExternalGameConfigSchema,
+  ExternalGameConfigUpdateSchema,
+} from "./Schemas";
 
-export const CreateGameInputSchema = GameConfigSchema.or(
+export const CreateGameInputSchema = ExternalGameConfigSchema.or(
   z
     .object({})
     .strict()
     .transform((val) => undefined),
 );
 
-export const GameInputSchema = GameConfigSchema.partial();
+export const GameInputSchema = ExternalGameConfigUpdateSchema;

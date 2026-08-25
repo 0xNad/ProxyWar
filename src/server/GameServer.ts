@@ -137,6 +137,11 @@ export class GameServer {
   }
 
   public updateGameConfig(gameConfig: Partial<GameConfig>): void {
+    if (gameConfig.donateToNonFriendly === true) {
+      throw new Error(
+        "non-friendly donations are reserved for internal Coworld games",
+      );
+    }
     if (gameConfig.gameMap !== undefined) {
       this.gameConfig.gameMap = gameConfig.gameMap;
     }

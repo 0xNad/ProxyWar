@@ -14,9 +14,8 @@ import { setup } from "./util/Setup";
 // executions.
 //
 // Base facts under test (verified against current source):
-// - donations require isFriendly (ally OR team) and are refused when the
-//   recipient is disconnected (isFriendly returns false for disconnected
-//   players)
+// - donations require isFriendly (ally OR team) under the default-false
+//   audience configuration and always refuse disconnected players
 // - per-recipient cooldown donateCooldown() = 100 ticks
 // - troop donation defaults to 1/3 of the sender's troops
 //   (defaultDonationAmount) capped by the recipient's headroom
@@ -88,13 +87,13 @@ describe("Donation rules", () => {
     while (teamGame.inSpawnPhase()) {
       teamGame.executeNextTick();
     }
+    mateA.addGold(10_000n);
 
     expect(mateA.isOnSameTeam(mateB)).toBe(true);
     expect(mateA.isAlliedWith(mateB)).toBe(false);
     expect(mateA.canDonateGold(mateB)).toBe(true);
     expect(mateA.canDonateTroops(mateB)).toBe(true);
 
-    mateA.addGold(10_000n);
     const donorBefore = mateA.gold();
     const recipientBefore = mateB.gold();
     teamGame.addExecution(new DonateGoldExecution(mateA, mateB.id(), 1_234));

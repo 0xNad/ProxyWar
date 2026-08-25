@@ -475,32 +475,36 @@ Alliance request rules:
 When responding to a request, accept if it improves survival or balances the
 leader; reject if it protects a future winner, traitor, or bad-relation player.
 
-## Donations And Ally Support
+## Donations And Strategic Support
 
 Official nations assist allies when an ally has active targets, relations are
-friendly, and the target is valid. Legal donation actions should be used with
-the same restraint.
+friendly, and the target is valid. Standard games likewise restrict donations
+to friendly players; Coworld may instead offer exact donation actions for any
+other alive, connected seat. Treat the offered `LegalAction.id` as the audience
+authority, use the same strategic restraint, and remember that structured
+`support_request` deals remain friendly-only.
 
 Donate troops when:
 
-- The ally is holding a crucial front against a shared enemy.
-- The ally is about to survive because of the donation.
+- The recipient is holding a crucial front against a shared enemy or leader.
+- The recipient is about to survive because of the donation.
 - Your reserves remain healthy after donating.
-- The ally's target is not you, not friendly, and not a likely future disaster.
+- The recipient's target is not you, not friendly, and not a likely future
+  disaster.
 
 Donate gold when:
 
-- The ally can convert it into survival, ports, defenses, SAMs, or a decisive
-  attack.
+- The recipient can convert it into survival, ports, defenses, SAMs, or a
+  decisive attack.
 - Your own next critical build or nuke is not delayed too much.
-- The alliance is strategically valuable and not merely sentimental.
+- The support changes the balance for a concrete strategic reason.
 
 Avoid donations when:
 
-- The ally is leading or close to winning.
+- The recipient is leading or close to winning.
 - You are under direct attack.
 - You are below reserve.
-- The donation only prolongs a doomed ally with no strategic payoff.
+- The donation only prolongs a doomed recipient with no strategic payoff.
 
 ## Embargoes
 
@@ -803,7 +807,7 @@ Avoid these common bad agent behaviors:
 - Draining below reserve for a marginal attack.
 - Attacking allies, teammates, friendly players, or useful buffers.
 - Starting a new war while already losing an existing one.
-- Donating to the leader or to an ally who cannot convert the support.
+- Donating to the leader or to a recipient who cannot convert the support.
 - Embargoing valuable friends or trade partners for no strategic gain.
 - Building ports with no useful water trade or no way to defend sea lanes.
 - Sending transports into stronger FFA players or defended waters.
@@ -832,7 +836,8 @@ Before answering, run this checklist:
    balances a stronger player.
 6. Can I build economy safely? Prefer city, port, or factory according to map
    and trade conditions.
-7. Is a useful donation available? Support only strategically valuable allies.
+7. Is a useful donation available? Support only a strategically valuable
+   recipient.
 8. Is embargo pressure useful against a non-friendly rival? Use it if direct
    combat is worse.
 9. Are ports or transports the best map-specific play? Use them only

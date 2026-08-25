@@ -1254,10 +1254,11 @@ export class AgentDealManager {
    * Enumerated (recipient, template) offers this agent currently has capacity
    * for. Template preconditions: joint_attack only when the PROPOSER (the
    * obligor) has a plausible attack path against a deterministic strongest
-   * target (borders it or has boat options against it); support_request only
-   * when donation is currently legal (isFriendly), always with explicit
-   * amounts. Stable order: recipients by playerID, templates in declaration
-   * order; capped.
+   * target (borders it or has boat options against it); support_request stays
+   * restricted to an isFriendly recipient even when the game separately
+   * permits direct non-friendly donations, always with explicit amounts.
+   * Stable order: recipients by playerID, templates in declaration order;
+   * capped.
    *
    * Nothing is offered at all while the agent is inside the proposal cooldown
    * (DEAL_ACTION_COOLDOWN_STEPS): a model must never be shown a move it

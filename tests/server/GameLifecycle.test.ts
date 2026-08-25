@@ -76,6 +76,28 @@ describe("GameLifecycle", () => {
     expect(game.gameConfig.disabledUnits).toEqual([UnitType.Warship]);
   });
 
+  it("rejects non-friendly donation enablement at the lobby update handler", () => {
+    const game = new GameServer(
+      "DONATE01",
+      mockLogger,
+      Date.now(),
+      mockConfig,
+      {
+        gameType: GameType.Private,
+        donateToNonFriendly: false,
+      } as any,
+    );
+    const before = { ...game.gameConfig };
+
+    game.updateGameConfig({});
+    game.updateGameConfig({ donateToNonFriendly: false });
+    expect(game.gameConfig).toEqual(before);
+    expect(() => game.updateGameConfig({ donateToNonFriendly: true })).toThrow(
+      "non-friendly donations are reserved for internal Coworld games",
+    );
+    expect(game.gameConfig).toEqual(before);
+  });
+
   it("should not start turn interval if game has ended", async () => {
     const game = new GameServer(
       "TESTGAME",

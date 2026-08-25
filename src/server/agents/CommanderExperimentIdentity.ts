@@ -36,6 +36,8 @@ export interface CommanderCanonicalGameConfig {
   difficulty: string;
   donateGold: boolean;
   donateTroops: boolean;
+  /** Present only when enabled; absence is the byte-stable default false. */
+  donateToNonFriendly?: true;
   gameType: string;
   gameMode: string;
   rankedType: string | null;
@@ -75,6 +77,9 @@ export function normalizeCommanderGameConfig(
     difficulty: String(config.difficulty),
     donateGold: config.donateGold,
     donateTroops: config.donateTroops,
+    ...(config.donateToNonFriendly === true
+      ? { donateToNonFriendly: true as const }
+      : {}),
     gameType: String(config.gameType),
     gameMode: String(config.gameMode),
     rankedType:
@@ -129,7 +134,17 @@ export function normalizeCommanderGameConfig(
 export function parseCommanderCanonicalGameConfig(
   value: unknown,
 ): CommanderCanonicalGameConfig {
-  const config = exactRecord(value, canonicalGameConfigKeys);
+  const hasDonationAudience =
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, "donateToNonFriendly");
+  const config = exactRecord(
+    value,
+    hasDonationAudience
+      ? canonicalGameConfigKeys
+      : legacyCanonicalGameConfigKeys,
+  );
   const publicGameModifiers =
     config.publicGameModifiers === null
       ? null
@@ -170,6 +185,9 @@ export function parseCommanderCanonicalGameConfig(
     difficulty: requiredString(config.difficulty),
     donateGold: requiredBoolean(config.donateGold),
     donateTroops: requiredBoolean(config.donateTroops),
+    ...(hasDonationAudience
+      ? { donateToNonFriendly: requiredEnabled(config.donateToNonFriendly) }
+      : {}),
     gameType: requiredString(config.gameType),
     gameMode: requiredString(config.gameMode),
     rankedType: nullableString(config.rankedType),
@@ -214,6 +232,7 @@ function canonicalGameConfigSource(
     difficulty: config.difficulty,
     donateGold: config.donateGold,
     donateTroops: config.donateTroops,
+    donateToNonFriendly: config.donateToNonFriendly ?? false,
     gameType: config.gameType,
     gameMode: config.gameMode,
     gameMapSize: config.gameMapSize,
@@ -315,6 +334,7 @@ const canonicalGameConfigKeys = [
   "difficulty",
   "donateGold",
   "donateTroops",
+  "donateToNonFriendly",
   "gameType",
   "gameMode",
   "rankedType",
@@ -338,6 +358,10 @@ const canonicalGameConfigKeys = [
   "startingGold",
   "hostCheats",
 ] as const;
+
+const legacyCanonicalGameConfigKeys = canonicalGameConfigKeys.filter(
+  (key) => key !== "donateToNonFriendly",
+);
 
 const publicGameModifierKeys = [
   "isCompact",
@@ -427,6 +451,13 @@ function requiredBoolean(value: unknown): boolean {
     throw new Error("Commander selected game configuration is malformed");
   }
   return value;
+}
+
+function requiredEnabled(value: unknown): true {
+  if (requiredBoolean(value) !== true) {
+    throw new Error("Commander selected game configuration is malformed");
+  }
+  return true;
 }
 
 function nullableBoolean(value: unknown): boolean | null {

@@ -1791,11 +1791,11 @@ function choose(actions, obs) {
     (action) => !violatesPact(action),
   );
   if (obligationMove) return obligationMove;
-  // Support can be offered only to a core-friendly player because donation
-  // must already be legal. Open one bounded relationship using an exact
-  // offered alliance id even before the planner happens to nominate support;
-  // otherwise the public default can leave the support branch unreachable.
-  // Fulfilment of accepted obligations remains above this prerequisite.
+  // Structured support_request offers remain restricted to core-friendly
+  // players even when the Coworld game separately offers direct donations to
+  // other live seats. Open one bounded relationship using an exact offered
+  // alliance id before proposing support; fulfilment of accepted obligations
+  // remains above this prerequisite.
   if (
     obs?.deals &&
     (obs.deals.incomingProposals || []).length === 0 &&

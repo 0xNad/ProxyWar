@@ -115,7 +115,15 @@ export class LegalActionBuilder {
     }
 
     const ownTroops = input.observation.ownState?.troops ?? 0;
-    const capActions = input.maxPostSpawnActions ?? 96;
+    const supportLaneEnabled =
+      input.observation.nonCombat.donateToNonFriendly === true;
+    const requestedMenuCap = input.maxPostSpawnActions ?? 96;
+    // `build()` appends hold after this method. The Coworld-only support lane
+    // reserves that final slot so the complete menu, including hold, remains
+    // within the advertised 96-action boundary.
+    const capActions = supportLaneEnabled
+      ? Math.max(0, requestedMenuCap - 1)
+      : requestedMenuCap;
     // With reserved diplomacy slots ON, assemble with headroom so the
     // late-emitted diplomacy categories actually get built, then apply the
     // reserved-quota truncation at the end (total stays <= capActions).
@@ -135,11 +143,28 @@ export class LegalActionBuilder {
     const diplomacySlots =
       diplomacySlotsEnabled() ||
       structuredDealsEnabled() ||
-      freeTextMessagesEnabled();
+      freeTextMessagesEnabled() ||
+      supportLaneEnabled;
     const maxActions = diplomacySlots ? capActions + 32 : capActions;
     const actions: LegalAction[] = [];
     // Built up front, independent of the assembly budget; appended below.
     const commsActions = messageActions(input.observation);
+    const supportActions = supportLaneEnabled
+      ? donationActions(input.observation, NON_FRIENDLY_SUPPORT_ACTION_CAP)
+      : [];
+    // Incoming deal responses are another bounded side lane while Coworld's
+    // all-recipient support menu is active. Otherwise an attack-heavy board
+    // can exhaust the ordinary assembly headroom before the late deal pass and
+    // silently erase an answerable proposal. The manager exposes at most six
+    // incoming proposals, so the 12-action cap retains every accept/reject
+    // pair without creating an unbounded menu source.
+    const earlyDealActions = supportLaneEnabled
+      ? dealMetaActions(
+          input.observation,
+          NON_FRIENDLY_DEAL_META_ACTION_CAP,
+          supportActions,
+        )
+      : [];
 
     for (const attack of input.observation.combat.outgoingAttacks ?? []) {
       if (actions.length >= maxActions) {
@@ -437,51 +462,12 @@ export class LegalActionBuilder {
       });
     }
 
-    for (const support of input.observation.nonCombat.supportOptions) {
-      if (actions.length >= maxActions) {
-        break;
-      }
-      if (support.canDonateTroops && support.suggestedTroops !== null) {
-        actions.push({
-          id: `donate_troops:${support.recipientID}`,
-          kind: "donate_troops",
-          label: `Donate troops to ${support.recipientName}`,
-          intent: {
-            type: "donate_troops",
-            recipient: support.recipientID,
-            troops: support.suggestedTroops,
-          },
-          risk: { level: "medium", score: 0.4 },
-          metadata: {
-            recipientID: support.recipientID,
-            recipientName: support.recipientName,
-            troops: support.suggestedTroops,
-            legalReason: "core canDonateTroops returned true",
-          },
-        });
-      }
-      if (
-        actions.length < maxActions &&
-        support.canDonateGold &&
-        support.suggestedGold !== null
-      ) {
-        actions.push({
-          id: `donate_gold:${support.recipientID}`,
-          kind: "donate_gold",
-          label: `Donate gold to ${support.recipientName}`,
-          intent: {
-            type: "donate_gold",
-            recipient: support.recipientID,
-            gold: support.suggestedGold,
-          },
-          risk: { level: "low", score: 0.25 },
-          metadata: {
-            recipientID: support.recipientID,
-            recipientName: support.recipientName,
-            gold: support.suggestedGold,
-            legalReason: "core canDonateGold returned true",
-          },
-        });
+    if (!supportLaneEnabled) {
+      for (const action of donationActions(input.observation)) {
+        if (actions.length >= maxActions) {
+          break;
+        }
+        actions.push(action);
       }
     }
 
@@ -590,13 +576,20 @@ export class LegalActionBuilder {
       }
     }
 
-    for (const action of dealMetaActions(
-      input.observation,
-      maxActions - actions.length,
-      actions,
-    )) {
+    for (const action of supportLaneEnabled
+      ? earlyDealActions
+      : dealMetaActions(
+          input.observation,
+          maxActions - actions.length,
+          actions,
+        )) {
       actions.push(action);
     }
+
+    // Coworld's all-recipient support options are assembled outside the
+    // ordinary action budget, then protected by their own bounded lane. At 16
+    // seats this is exactly two resource actions for each of 15 recipients.
+    actions.push(...supportActions);
 
     // Comms actions are appended from a side list built OUTSIDE the assembly
     // budget. Every other kind stops at `maxActions`, so on a crowded map
@@ -706,11 +699,16 @@ export class LegalActionBuilder {
     }
 
     if (diplomacySlots && actions.length > capActions) {
+      const dealResponseReserve = earlyDealActions.filter(
+        (action) =>
+          action.kind === "deal_accept" || action.kind === "deal_reject",
+      ).length;
       return reservedQuotaTruncate(
         actions,
         capActions,
-        diplomacyReservedSlots(),
+        diplomacyReservedSlots() + dealResponseReserve,
         commsReservedSlots(),
+        supportActions.length,
       );
     }
     return actions.slice(0, capActions);
@@ -1271,7 +1269,11 @@ function messageActions(observation: AgentObservation): LegalAction[] {
       if (other.sharesBorder) score += 100;
       if (other.incomingAttack || other.outgoingAttack) score += 50;
       if (other.underSiege) score += 25;
-      return { other, score, lastHeard: lastHeardFrom.get(other.playerID) ?? -1 };
+      return {
+        other,
+        score,
+        lastHeard: lastHeardFrom.get(other.playerID) ?? -1,
+      };
     })
     // Deterministic total order: score, then most recent inbound, then a
     // stable id tiebreak so the same observation always yields the same menu.
@@ -1300,6 +1302,86 @@ function messageActions(observation: AgentObservation): LegalAction[] {
       legalReason: "free-text negotiation enabled and rival is visible",
     },
   }));
+}
+
+/** Two exact transfer choices for every other seat in a 16-player match. */
+export const NON_FRIENDLY_SUPPORT_ACTION_CAP = 30;
+/** Six bounded incoming proposals, each with an atomic accept/reject pair. */
+const NON_FRIENDLY_DEAL_META_ACTION_CAP = 32;
+
+function donationActions(
+  observation: AgentObservation,
+  limit: number = Number.POSITIVE_INFINITY,
+): LegalAction[] {
+  const actions: LegalAction[] = [];
+  const nonFriendlyAudience =
+    observation.nonCombat.donateToNonFriendly === true;
+  const push = (action: LegalAction): boolean => {
+    if (actions.length >= limit) {
+      return false;
+    }
+    actions.push(action);
+    return true;
+  };
+  for (const support of observation.nonCombat.supportOptions) {
+    if (support.canDonateTroops && support.suggestedTroops !== null) {
+      if (
+        !push({
+          id: `donate_troops:${support.recipientID}`,
+          kind: "donate_troops",
+          label: `Donate troops to ${support.recipientName}`,
+          intent: {
+            type: "donate_troops",
+            recipient: support.recipientID,
+            troops: support.suggestedTroops,
+          },
+          risk: { level: "medium", score: 0.4 },
+          metadata: {
+            recipientID: support.recipientID,
+            recipientName: support.recipientName,
+            troops: support.suggestedTroops,
+            legalReason:
+              (nonFriendlyAudience
+                ? support.legalReasons.find((reason) =>
+                    reason.includes("canDonateTroops"),
+                  )
+                : undefined) ?? "core canDonateTroops returned true",
+          },
+        })
+      ) {
+        return actions;
+      }
+    }
+    if (support.canDonateGold && support.suggestedGold !== null) {
+      if (
+        !push({
+          id: `donate_gold:${support.recipientID}`,
+          kind: "donate_gold",
+          label: `Donate gold to ${support.recipientName}`,
+          intent: {
+            type: "donate_gold",
+            recipient: support.recipientID,
+            gold: support.suggestedGold,
+          },
+          risk: { level: "low", score: 0.25 },
+          metadata: {
+            recipientID: support.recipientID,
+            recipientName: support.recipientName,
+            gold: support.suggestedGold,
+            legalReason:
+              (nonFriendlyAudience
+                ? support.legalReasons.find((reason) =>
+                    reason.includes("canDonateGold"),
+                  )
+                : undefined) ?? "core canDonateGold returned true",
+          },
+        })
+      ) {
+        return actions;
+      }
+    }
+  }
+  return actions;
 }
 
 function deterministicFraction(value: number): number {
@@ -1337,6 +1419,7 @@ const DIPLOMACY_KINDS = new Set([
  * map can never silently remove the channel.
  */
 const COMMS_KINDS = new Set(["message"]);
+const SUPPORT_KINDS = new Set(["donate_gold", "donate_troops"]);
 
 function supportAcceptanceFeasible(
   observation: AgentObservation,
@@ -1535,33 +1618,66 @@ function dealMetaActions(
 }
 
 /**
- * Truncate to `cap` total entries while guaranteeing diplomacy actions up to
- * `reserve` slots. Relative order within each group is preserved, and the
- * final list keeps the original assembly order (non-diplomacy first where it
- * appeared first). If there are fewer diplomacy actions than the reserve, the
- * unused reserve goes back to the other kinds.
+ * Truncate to `cap` total entries while guaranteeing bounded diplomacy,
+ * communication, and optional Coworld support lanes. Relative order within
+ * each group is preserved, and the final list keeps the original assembly
+ * order. Unused reserve always returns to the other kinds.
  */
 export function reservedQuotaTruncate(
   actions: readonly LegalAction[],
   cap: number,
   reserve: number,
   commsReserve: number = 0,
+  supportReserve: number = 0,
 ): LegalAction[] {
+  // When the Coworld-only donation audience is active, support actions leave
+  // the general diplomacy pool and receive their own exact bounded lane.
+  // `supportReserve=0` preserves the historical classification and behavior.
+  const support =
+    supportReserve > 0
+      ? actions.filter((action) => SUPPORT_KINDS.has(action.kind))
+      : [];
+  const keepSupport = Math.min(support.length, supportReserve, cap);
+  const keptSupportIds = new Set(
+    support.slice(0, keepSupport).map((action) => action.id),
+  );
+  const supportCap = cap - keepSupport;
+
   // Free-text messages are taken off the top into their own lane before the
   // diplomacy maths, so the two reserves never compete. `commsReserve` is 0
   // for every caller that predates the feature, making this identical to the
   // previous two-way split.
   const comms = actions.filter((action) => COMMS_KINDS.has(action.kind));
-  const keepComms = Math.min(comms.length, commsReserve, cap);
+  const keepComms = Math.min(comms.length, commsReserve, supportCap);
   const keptCommsIds = new Set(
     comms.slice(0, keepComms).map((action) => action.id),
   );
-  const commsCap = cap - keepComms;
+  const commsCap = supportCap - keepComms;
 
-  const diplomacy = actions.filter((action) =>
-    DIPLOMACY_KINDS.has(action.kind),
+  const allDiplomacy = actions.filter(
+    (action) =>
+      DIPLOMACY_KINDS.has(action.kind) &&
+      !(supportReserve > 0 && SUPPORT_KINDS.has(action.kind)),
   );
-  const othersCount = actions.length - diplomacy.length - comms.length;
+  // The Coworld support lane has an explicit deal-response reserve. Put those
+  // bounded response pairs first for selection while retaining original
+  // assembly order in the returned menu. The ordinary path remains byte-for-
+  // byte classified in its historical order when `supportReserve=0`.
+  const diplomacy =
+    supportReserve > 0
+      ? [
+          ...allDiplomacy.filter(
+            (action) =>
+              action.kind === "deal_accept" || action.kind === "deal_reject",
+          ),
+          ...allDiplomacy.filter(
+            (action) =>
+              action.kind !== "deal_accept" && action.kind !== "deal_reject",
+          ),
+        ]
+      : allDiplomacy;
+  const othersCount =
+    actions.length - diplomacy.length - comms.length - support.length;
   // Diplomacy gets its reserve PLUS any budget the other kinds cannot use, so
   // the menu always fills to cap when enough actions exist (reviewer finding:
   // without the top-up, 85 others + 20 diplomacy at cap 96/reserve 8 wasted
@@ -1594,11 +1710,16 @@ export function reservedQuotaTruncate(
   const result: LegalAction[] = [];
   let othersKept = 0;
   for (const action of actions) {
-    if (keptCommsIds.has(action.id) || keptDiplomacyIds.has(action.id)) {
+    if (
+      keptSupportIds.has(action.id) ||
+      keptCommsIds.has(action.id) ||
+      keptDiplomacyIds.has(action.id)
+    ) {
       result.push(action);
     } else if (
       !DIPLOMACY_KINDS.has(action.kind) &&
       !COMMS_KINDS.has(action.kind) &&
+      !(supportReserve > 0 && SUPPORT_KINDS.has(action.kind)) &&
       othersKept < keepOthers
     ) {
       result.push(action);
