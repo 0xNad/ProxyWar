@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { withOpenEndedMessageFailure } from "../../coworld-adapter/commander-starter/open-ended-message";
 import {
   chooseKeystoneMessageIntent,
   decisionToResponse,
@@ -224,5 +225,22 @@ describe("keystone free-text voice", () => {
       messageActionID: "message:rival-a",
     } as unknown as AgentDecision);
     expect(idOnly).not.toHaveProperty("selectedMessageActionId");
+  });
+
+  it("makes rejected LLM social generation loud without inventing a body", () => {
+    const response = decisionToResponse(
+      "req-social-failure",
+      withOpenEndedMessageFailure(
+        { actionID: "hold", reason: "primary remains valid" },
+        true,
+      ),
+    );
+    expect(response).toMatchObject({
+      selectedLegalActionId: "hold",
+      llmPlannerDegraded: true,
+      degradedCause: "policy-error",
+    });
+    expect(response).not.toHaveProperty("selectedMessageActionId");
+    expect(response).not.toHaveProperty("messageText");
   });
 });

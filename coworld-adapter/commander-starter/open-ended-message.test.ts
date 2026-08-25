@@ -100,6 +100,8 @@ describe("open-ended social generation", () => {
     expect(prompt).toContain('"reason":"secure neutral land"');
     expect(prompt).not.toContain('"actionID"');
     expect(prompt).not.toContain("message:P_A");
+    expect(prompt).not.toContain("P_A");
+    expect(prompt).not.toContain("msg_1");
   });
 
   it("preserves different provider-authored bodies exactly under one offered binding", async () => {

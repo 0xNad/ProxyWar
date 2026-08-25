@@ -218,7 +218,6 @@ export function buildOpenEndedMessagePrompt(
     .filter((message) => message.senderID === input.intent.recipientID)
     .slice(-4)
     .map((message) => ({
-      eventID: message.messageEventID ?? null,
       turn: message.turnNumber,
       sender: message.senderName,
       text: message.text.slice(0, OPEN_ENDED_MESSAGE_MAX_CHARS),
@@ -235,10 +234,11 @@ export function buildOpenEndedMessagePrompt(
     )
     .slice(-4)
     .map((deal) => ({
-      dealID: deal.dealID,
       template: "template" in deal ? deal.template : deal.terms.template,
-      proposerPlayerID: deal.proposerPlayerID,
-      recipientPlayerID: deal.recipientPlayerID,
+      direction:
+        deal.proposerPlayerID === input.intent.recipientID
+          ? "from_recipient"
+          : "to_recipient",
       status: "stepsRemaining" in deal ? "active" : "open",
     }));
   const context = {
@@ -252,7 +252,6 @@ export function buildOpenEndedMessagePrompt(
     },
     recipient: rival
       ? {
-          playerID: rival.playerID,
           name: rival.name,
           isAllied: rival.isAllied,
           isFriendly: rival.isFriendly,
@@ -263,7 +262,7 @@ export function buildOpenEndedMessagePrompt(
           hasIncomingAllianceRequest: rival.hasIncomingAllianceRequest,
           hasOutgoingAllianceRequest: rival.hasOutgoingAllianceRequest,
         }
-      : { playerID: input.intent.recipientID },
+      : { name: null },
     bilateralDeals,
     conversation,
     gameplayContext: {

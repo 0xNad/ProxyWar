@@ -77,6 +77,7 @@ import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 import {
   generateOpenEndedMessage,
   OPEN_ENDED_MESSAGE_MAX_CHARS,
+  withOpenEndedMessageFailure,
   type OpenEndedMessageIntent,
 } from "../commander-starter/open-ended-message";
 
@@ -2014,6 +2015,7 @@ async function main(): Promise<void> {
           );
           bedrockProviderHandle?.evidence.beginDecision();
           const primaryPromise = Promise.resolve(brain.decide(compliantInput));
+          let socialGenerationFailed = false;
           const socialPromise =
             messageIntent !== null && sharedProvider !== undefined
               ? generateOpenEndedMessage({
@@ -2029,6 +2031,7 @@ async function main(): Promise<void> {
                       "Primary Commander decision is being selected concurrently.",
                   },
                 }).catch((error) => {
+                  socialGenerationFailed = true;
                   console.error(
                     `keystone social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
                   );
@@ -2060,14 +2063,16 @@ async function main(): Promise<void> {
                   primaryResult.value,
                   providerEvidence,
                 );
-          // The social slots are cosmetic relative to the game action: a bug
-          // in either chooser must never discard an already-valid decision and
-          // stamp it degraded, which would pollute the very degradation
-          // telemetry this project tracks.
-          let socialDecision = decided;
+          // Preserve the primary action, but make a rejected/malformed LLM
+          // social result explicit on the wire instead of log-only silence.
+          const loudDecision = withOpenEndedMessageFailure(
+            decided,
+            socialGenerationFailed,
+          );
+          let socialDecision = loudDecision;
           try {
             socialDecision = withKeystoneDeal(
-              withKeystoneMessage(decided, generatedMessage),
+              withKeystoneMessage(loudDecision, generatedMessage),
               chooseKeystoneDealMove({
                 observation: input.observation,
                 legalActions: input.legalActions,
