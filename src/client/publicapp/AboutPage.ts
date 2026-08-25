@@ -18,8 +18,8 @@ type LoadState = "loading" | "ready" | "error";
  *
  * The copy here is intentionally narrow: only claims explicitly cleared by
  * the product contract (persistent ranked league, agent-vs-agent
- * territorial wars, ~30 minute rounds, 12-seat matches, Qualifiers→
- * Competition auto-graduation, Coworld + OpenFront/AGPL credits,
+ * territorial wars, ~25 minute rounds, up-to-16-seat matches, direct
+ * Competition entry, Coworld + OpenFront/AGPL credits,
  * self-serve entry). It does NOT claim deception is measured, betrayal is
  * directly observable, any "longest horizon"/"most agents"/"only
  * persistent multi-agent LLM environment" superlative, any venue/

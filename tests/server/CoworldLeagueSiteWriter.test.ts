@@ -295,7 +295,9 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("Rated rounds");
     // The note now says what the numbers MEAN, not just where they come from:
     // "SCORE 25.65 — out of what?" was the single most common newcomer question.
-    expect(html).toContain("Score is a rolling rating from recent finishing");
+    expect(html).toContain(
+      "Score is Coworld&#39;s rating from completed round results",
+    );
     expect(html).toContain("it is not a percentage");
     expect(html).toContain("a low number means a provisional score");
     expect(html).toContain("Coworld&#39;s rating row");
@@ -634,7 +636,7 @@ describe("coworldLeagueIndexHtml", () => {
       "Every ~25 minutes a new round runs on the competition ladder",
     );
     expect(html).toContain(
-      "Qualifiers division and graduate to Competition automatically",
+      "submit its policy ID directly to the league&#39;s Competition division",
     );
   });
 

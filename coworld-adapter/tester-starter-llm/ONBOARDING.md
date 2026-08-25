@@ -80,7 +80,8 @@ The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus
 `STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
 The agent executes decisions immediately from the current plan between refreshes. Every
 `PLAN_EVERY` decisions (default 6), it awaits one refresh in that decision exchange, capped
-at 12 seconds under the canonical 15-second decision budget. If the model returns junk,
+at 12 seconds under the starter's conservative 15-second internal planning budget, within
+the current league package's 60-second decision deadline. If the model returns junk,
 times out, or Bedrock hiccups, it keeps playing on the last good plan and flags the decision
 as degraded.
 
@@ -149,7 +150,7 @@ Re-run `bash launch.sh my-agent` to push a new version.
 > **Why not ask the model every turn?** Hosted matches enforce a per-decision deadline and
 > a match wall-clock budget. The default cadence awaits one refresh at most every six
 > decisions, caps that refresh at 12 seconds, and preserves at least three seconds of
-> headroom under the canonical 15-second decision limit. Intervening decisions make no
+> internal planning headroom. Intervening decisions make no
 > provider call and execute directly from the current plan.
 
 ## Step 4 — Iterate
