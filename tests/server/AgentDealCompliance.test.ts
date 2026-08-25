@@ -814,7 +814,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     }
   });
 
-  it("refuses the second acceptance of crossed proposals and emits exactly one verdict", () => {
+  it("terminally supersedes a recorded redundant accept and emits one verdict", () => {
     const harness = complianceHarness([A, B]);
     // Crossed open NAPs: A→B and B→A in the same step.
     const aToB = harness.propose(A, B, "non_aggression_pact");
@@ -824,18 +824,47 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     const second = harness.respond("deal_accept", B, aToB);
     expect(second.accepted).toBe(false);
     expect(second.reason).toBe(
-      "an active non_aggression_pact already exists between these players",
+      `redundant accept superseded by equivalent accepted deal: ${bToA}`,
     );
     const ledger = harness.manager.ledgerSnapshot();
     expect(
       ledger.deals.filter((deal) => deal.status === "accepted"),
     ).toHaveLength(1);
-    expect(ledger.deals.find((deal) => deal.dealID === aToB)!.status).toBe(
-      "open",
+    expect(ledger.deals.find((deal) => deal.dealID === aToB)).toEqual(
+      expect.objectContaining({
+        status: "superseded",
+        respondedAtStep: 1,
+        respondedAtTurn: 0,
+        supersededByDealID: bToA,
+      }),
     );
+    expect(ledger.events.map((event) => event.event)).toEqual([
+      "deal_proposed",
+      "deal_proposed",
+      "deal_accepted",
+      "deal_superseded",
+    ]);
 
     // A betrayal against the single surviving pact yields exactly ONE verdict.
     harness.beginStep(); // 2 — active window opens
+    const recipientView = harness.manager.observationFor({
+      agentID: B.agentID,
+      observation: stubObservation({
+        seat: B,
+        others: [stubVisiblePlayer(A)],
+        turnNumber: 50,
+      }),
+    });
+    expect(recipientView?.incomingProposals).toEqual([]);
+    const proposerView = harness.manager.observationFor({
+      agentID: A.agentID,
+      observation: stubObservation({
+        seat: A,
+        others: [stubVisiblePlayer(B)],
+        turnNumber: 50,
+      }),
+    });
+    expect(proposerView?.outgoingProposals).toEqual([]);
     harness.push(
       fabricatedRecord({
         sequence: 0,

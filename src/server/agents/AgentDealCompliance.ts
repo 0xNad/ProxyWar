@@ -155,6 +155,8 @@ export interface AgentDealState {
   answerableThroughStep: number;
   respondedAtStep: number | null;
   respondedAtTurn: number | null;
+  /** Engine-authored terminal link for a redundant exact accept response. */
+  supersededByDealID?: string;
   activeFromStep: number | null;
   expiresAfterStep: number | null;
   targetPlayerID?: string;
@@ -184,6 +186,7 @@ export type AgentDealEventKind =
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
+  | "deal_superseded"
   | "deal_expired"
   | "deal_fulfilled"
   | "deal_violated";
@@ -205,6 +208,8 @@ export interface AgentDealLedgerEvent {
   tone: "info" | "pact" | "trade" | "threat" | "betrayal" | "war";
   importance: number;
   publicText: string;
+  /** Present only when this proposal terminally yielded to an equivalent deal. */
+  supersededByDealID?: string;
   /**
    * VIEWER-ONLY. The acting agent's OWN stated reason, sanitized and capped —
    * a CLAIM, kept in its own field so it is never confused with the
@@ -1167,6 +1172,11 @@ export function dealAcceptedPublicText(deal: AgentDealState): string {
 /** Server-authored one-sentence publicText for a rejection. */
 export function dealRejectedPublicText(deal: AgentDealState): string {
   return `${deal.recipientName} rejected ${deal.proposerName}'s ${DEAL_TEMPLATE_LABELS[deal.template]}.`;
+}
+
+/** Server-authored narration for a validated accept made redundant in-pass. */
+export function dealSupersededPublicText(deal: AgentDealState): string {
+  return `${deal.recipientName}'s acceptance of ${deal.proposerName}'s ${DEAL_TEMPLATE_LABELS[deal.template]} was redundant; their equivalent deal was already accepted.`;
 }
 
 /** deal_expired event for an open proposal that lapsed unanswered. */

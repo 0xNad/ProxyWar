@@ -2121,6 +2121,7 @@
     "war_room_kind_deal_proposed": "Deal proposed",
     "war_room_kind_deal_accepted": "Deal accepted",
     "war_room_kind_deal_rejected": "Deal rejected",
+    "war_room_kind_deal_superseded": "Deal superseded",
     "war_room_kind_deal_expired": "Deal expired",
     "war_room_kind_deal_fulfilled": "Promise fulfilled",
     "war_room_kind_deal_violated": "Promise violated",

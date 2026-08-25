@@ -340,6 +340,7 @@ export type CuratedWarRoomEventKind =
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
+  | "deal_superseded"
   | "deal_expired"
   | "deal_fulfilled"
   | "deal_violated"
@@ -362,6 +363,7 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   deal_proposed: "\u225F", // ≟ questioned equality / proposed terms
   deal_accepted: "\u2713", // ✓ check mark
   deal_rejected: "\u2715", // ✕ multiplication x
+  deal_superseded: "\u21A6", // ↦ mapsto / replaced by linked deal
   deal_expired: "\u2205", // ∅ empty set / no live agreement
   deal_fulfilled: "\u2261", // ≡ agreement held
   deal_violated: "\u2020", // † dagger, matching betrayal
@@ -586,6 +588,7 @@ export type TimelineMarkerKind =
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
+  | "deal_superseded"
   | "deal_expired"
   | "deal_fulfilled"
   | "deal_violated"

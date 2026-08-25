@@ -4773,6 +4773,7 @@ const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   deal_proposed: "info",
   deal_accepted: "pact",
   deal_rejected: "info",
+  deal_superseded: "info",
   deal_expired: "info",
   deal_fulfilled: "pact",
   deal_violated: "betrayal",

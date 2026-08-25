@@ -227,6 +227,51 @@ describe("message war-room beats", () => {
   });
 });
 
+describe("superseded deal replay join", () => {
+  it("preserves the server narration in the War Room and timeline", () => {
+    const publicText =
+      "Calc's acceptance of Auri's non-aggression pact was redundant; their equivalent deal was already accepted.";
+    const telemetry: AiLeagueSpectatorTelemetry = {
+      ...ROSTER,
+      events: [
+        {
+          id: "superseded-1",
+          sequence: 4,
+          turnNumber: 250,
+          kind: "deal_superseded",
+          tone: "info",
+          actorAgentID: "a2",
+          actorName: "Calc",
+          targetAgentID: "a1",
+          targetName: "Auri",
+          message: publicText,
+          publicText,
+          supersededByDealID: "deal:p2:p1:non_aggression_pact:0",
+          evidenceLevel: "state_derived",
+          importance: 42,
+        },
+      ],
+    };
+
+    expect(curatedWarRoomEvents(telemetry, [], null)).toEqual([
+      expect.objectContaining({
+        id: "superseded-1",
+        kind: "deal_superseded",
+        headline: publicText,
+        tier: 3,
+      }),
+    ]);
+    expect(matchTimelineEventMarkers(telemetry, null)).toEqual([
+      {
+        kind: "deal_superseded",
+        turn: 250,
+        sequence: 4,
+        label: publicText,
+      },
+    ]);
+  });
+});
+
 describe("plan-change public rationale", () => {
   it("never quotes policy/debug codes as an agent-stated reason", () => {
     const beats = curatedWarRoomEvents(

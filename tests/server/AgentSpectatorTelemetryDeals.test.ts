@@ -214,6 +214,75 @@ describe("spectator telemetry — structured-deal events", () => {
     });
   });
 
+  it("carries a linked redundant-accept supersession into public telemetry", () => {
+    const supersedingDealID = "deal:P_B:P_A:non_aggression_pact:0";
+    const publicText =
+      "Sefirot's acceptance of Auri's non-aggression pact was redundant; their equivalent deal was already accepted.";
+    const record = stampedRecord(2, B, {
+      dealAction: "accept",
+      dealID: DEAL_ID,
+      dealApplyAccepted: false,
+      dealTerminalCause: "redundant_accept_superseded",
+      dealSupersededByDealID: supersedingDealID,
+      dealComplianceEvent: JSON.stringify([
+        {
+          event: "deal_superseded",
+          dealID: DEAL_ID,
+          template: "non_aggression_pact",
+          actorPlayerID: B.playerID,
+          actorName: B.username,
+          targetPlayerID: A.playerID,
+          targetName: A.username,
+          tone: "info",
+          importance: 42,
+          publicText,
+          supersededByDealID: supersedingDealID,
+          step: 1,
+        },
+      ]),
+    });
+
+    const records = [
+      stampedRecord(1, A, {}),
+      record,
+      stampedRecord(3, B, {
+        dealComplianceEvent: JSON.stringify([
+          {
+            event: "deal_superseded",
+            dealID: `${DEAL_ID}:malformed`,
+            template: "non_aggression_pact",
+            actorPlayerID: B.playerID,
+            actorName: B.username,
+            targetPlayerID: A.playerID,
+            targetName: A.username,
+            tone: "info",
+            importance: 42,
+            publicText: "must not be narrated without the terminal link",
+            step: 1,
+          },
+        ]),
+      }),
+    ];
+    const events = telemetryFor(records).events.filter((event) =>
+      event.kind.startsWith("deal_"),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "deal_superseded",
+        actorAgentID: B.agentID,
+        targetAgentID: A.agentID,
+        actionKind: "none",
+        evidenceLevel: "state_derived",
+        supersededByDealID: supersedingDealID,
+        publicText,
+        message: publicText,
+      }),
+    ]);
+    expect(telemetryFor(records).communicationThreads[0]?.messages).toEqual(
+      events,
+    );
+  });
+
   it("bounds deal events per agent per match", () => {
     const records: AgentDecisionRecord[] = [];
     for (let index = 0; index < 30; index += 1) {
