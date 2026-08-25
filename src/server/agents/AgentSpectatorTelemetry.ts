@@ -1727,6 +1727,13 @@ function addDealEvents(input: {
     }
   }
 
+  // Preserve the legacy byte contract when the feature is enabled but no
+  // structured-deal evidence exists. Coverage is meaningful only after the
+  // fallback actually observed at least one deal event; new finalized-ledger
+  // artifacts still emit an exact zero-event coverage record above.
+  if (sourceEventCount === 0) {
+    return undefined;
+  }
   return {
     authority: "decision_records",
     // A decisions.jsonl projection cannot prove that final force-resolution
