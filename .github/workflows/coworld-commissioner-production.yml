@@ -1,0 +1,642 @@
+name: Coworld commissioner production
+run-name: Coworld commissioner production ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact protected-main SHA of a successful certified Coworld release
+        required: true
+        type: string
+      resume_run_id:
+        description: Previous failed commissioner workflow run ID; requires its pre-mutation authority artifact
+        required: false
+        type: string
+      resume_artifact_id:
+        description: Exact unexpired pre-mutation authority artifact ID from resume_run_id
+        required: false
+        type: string
+
+# Commissioner migration and package release mutate the same canonical Coworld.
+# The shared lock prevents either operation from overlapping the other.
+concurrency:
+  group: proxywar-coworld-production
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+env:
+  COWORLD_CLI_VERSION: "0.1.42"
+  COWORLD_NAME: proxywar
+  EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
+  COMMISSIONER_RUNNABLE_ID: proxywar-ladder-commissioner
+
+jobs:
+  admission:
+    name: Resolve exact protected release evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      migration_mode: ${{ steps.release.outputs.migration_mode }}
+      control_sha: ${{ steps.release.outputs.control_sha }}
+      main_ci_run_id: ${{ steps.release.outputs.main_ci_run_id }}
+      release_run_id: ${{ steps.release.outputs.release_run_id }}
+      release_artifact_id: ${{ steps.release.outputs.release_artifact_id }}
+      release_artifact_name: ${{ steps.release.outputs.release_artifact_name }}
+      release_artifact_bytes: ${{ steps.release.outputs.release_artifact_bytes }}
+      resume_run_id: ${{ steps.release.outputs.resume_run_id }}
+      resume_artifact_id: ${{ steps.release.outputs.resume_artifact_id }}
+    steps:
+      - name: Checkout protected control code from current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Require operator, protected-main ancestry, successful CI, and immutable release artifact
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          RESUME_ARTIFACT_ID: ${{ inputs.resume_artifact_id }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          CONTROL_SHA=$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)
+          [[ "$CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          RELATION=$(gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_SHA...$CONTROL_SHA" --jq .status)
+          case "$RELATION" in ahead|identical) ;; *) exit 1 ;; esac
+
+          if [ -z "$RESUME_RUN_ID" ] && [ -z "$RESUME_ARTIFACT_ID" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=100" > "$RUNNER_TEMP/ci-runs.json"
+            node .github/scripts/coworld-commissioner-production.mjs resolve-ci "$SOURCE_SHA" "$RUNNER_TEMP/ci-runs.json" > "$RUNNER_TEMP/ci.json"
+
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/coworld-production.yml/runs?branch=main&status=completed&per_page=100" > "$RUNNER_TEMP/release-runs.json"
+            node .github/scripts/coworld-commissioner-production.mjs resolve-release-candidates "$SOURCE_SHA" \
+              "$RUNNER_TEMP/release-runs.json" > "$RUNNER_TEMP/release-candidates.json"
+            : > "$RUNNER_TEMP/release-artifacts-by-run.ndjson"
+            while IFS= read -r CANDIDATE_RUN_ID; do
+              [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" \
+                > "$RUNNER_TEMP/release-artifacts-$CANDIDATE_RUN_ID.json"
+              jq -cn --argjson runId "$CANDIDATE_RUN_ID" \
+                --slurpfile payload "$RUNNER_TEMP/release-artifacts-$CANDIDATE_RUN_ID.json" \
+                '{runId:$runId,artifacts:($payload[0].artifacts//[])}' \
+                >> "$RUNNER_TEMP/release-artifacts-by-run.ndjson"
+            done < <(jq -r '.releaseRunIds[]' "$RUNNER_TEMP/release-candidates.json")
+            jq -s '{runs:.}' "$RUNNER_TEMP/release-artifacts-by-run.ndjson" \
+              > "$RUNNER_TEMP/release-artifacts-by-run.json"
+            node .github/scripts/coworld-commissioner-production.mjs resolve-release "$SOURCE_SHA" \
+              "$RUNNER_TEMP/release-runs.json" "$RUNNER_TEMP/release-artifacts-by-run.json" \
+              > "$RUNNER_TEMP/release.json"
+            {
+              echo "migration_mode=new"
+              echo "control_sha=$CONTROL_SHA"
+              echo "main_ci_run_id=$(jq -r .mainCiRunId "$RUNNER_TEMP/ci.json")"
+              echo "release_run_id=$(jq -r .releaseRunId "$RUNNER_TEMP/release.json")"
+              echo "release_artifact_id=$(jq -r .releaseArtifactId "$RUNNER_TEMP/release.json")"
+              echo "release_artifact_name=$(jq -r .releaseArtifactName "$RUNNER_TEMP/release.json")"
+              echo "release_artifact_bytes=$(jq -r .releaseArtifactBytes "$RUNNER_TEMP/release.json")"
+            } >> "$GITHUB_OUTPUT"
+          else
+            [[ "$RESUME_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$RESUME_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN_ID" > "$RUNNER_TEMP/resume-run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESUME_ARTIFACT_ID" > "$RUNNER_TEMP/resume-artifact.json"
+            node .github/scripts/coworld-commissioner-production.mjs validate-resume-reference "$SOURCE_SHA" \
+              "$RESUME_RUN_ID" "$RESUME_ARTIFACT_ID" "$RUNNER_TEMP/resume-run.json" \
+              "$RUNNER_TEMP/resume-artifact.json" > "$RUNNER_TEMP/resume-reference.json"
+            {
+              echo "migration_mode=resume"
+              echo "control_sha=$CONTROL_SHA"
+              echo "resume_run_id=$RESUME_RUN_ID"
+              echo "resume_artifact_id=$RESUME_ARTIFACT_ID"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  migrate:
+    name: Patch, certify, canonicalize, and bind commissioner
+    needs: admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment:
+      name: coworld-production
+      deployment: false
+    outputs:
+      deployment_id: ${{ steps.audit.outputs.deployment_id }}
+    env:
+      MIGRATION_MODE: ${{ needs.admission.outputs.migration_mode }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CONTROL_SHA: ${{ needs.admission.outputs.control_sha }}
+      MAIN_CI_RUN_ID: ${{ needs.admission.outputs.main_ci_run_id }}
+      RELEASE_RUN_ID: ${{ needs.admission.outputs.release_run_id }}
+      RELEASE_ARTIFACT_ID: ${{ needs.admission.outputs.release_artifact_id }}
+      RELEASE_ARTIFACT_NAME: ${{ needs.admission.outputs.release_artifact_name }}
+      RELEASE_ARTIFACT_BYTES: ${{ needs.admission.outputs.release_artifact_bytes }}
+      RESUME_RUN_ID: ${{ needs.admission.outputs.resume_run_id }}
+      RESUME_ARTIFACT_ID: ${{ needs.admission.outputs.resume_artifact_id }}
+    steps:
+      - name: Checkout exact protected-main deployment controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.admission.outputs.control_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Prove immutable control checkout
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTROL_SHA"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+      - name: Install the pinned Coworld toolchain without credentials
+        run: |
+          set -euo pipefail
+          export UV_NO_CACHE=1
+          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
+          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          {
+            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
+            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+          } >> "$GITHUB_ENV"
+      - name: Create durable in-progress deployment evidence
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_ID=$(jq -n --arg ref "$SOURCE_SHA" --arg mode "$MIGRATION_MODE" \
+            '{ref:$ref,environment:"coworld-production",description:("ProxyWar commissioner migration "+$mode+" from "+$ref),auto_merge:false,required_contexts:[],production_environment:true}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id)
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=in_progress -f environment=coworld-production -F auto_inactive=false \
+            -f description="Resolving exact certified commissioner image" >/dev/null
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+      - name: Recover the exact allocated mutation from its immutable authority
+        if: ${{ needs.admission.outputs.migration_mode == 'resume' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$COWORLD_API_TOKEN"
+          [[ "$RESUME_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RESUME_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN_ID" > "$RUNNER_TEMP/resume-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESUME_ARTIFACT_ID" > "$RUNNER_TEMP/resume-artifact.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-resume-reference "$SOURCE_SHA" \
+            "$RESUME_RUN_ID" "$RESUME_ARTIFACT_ID" "$RUNNER_TEMP/resume-run.json" \
+            "$RUNNER_TEMP/resume-artifact.json" > "$RUNNER_TEMP/resume-reference-recheck.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESUME_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/resume-authority.zip"
+          mkdir -m 700 "$RUNNER_TEMP/resume-authority"
+          "$COWORLD_PYTHON" - <<'PY'
+          import os, pathlib, stat, zipfile
+          source = pathlib.Path(os.environ["RUNNER_TEMP"]) / "resume-authority.zip"
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "resume-authority"
+          expected = "coworld-commissioner-mutation-intent.json"
+          with zipfile.ZipFile(source) as bundle:
+              members = bundle.infolist()
+              if len(members) != 1 or members[0].filename != expected:
+                  raise SystemExit("resume artifact must contain only the mutation intent")
+              member = members[0]
+              mode = member.external_attr >> 16
+              if member.file_size > 64 * 1024 or member.compress_size > 64 * 1024:
+                  raise SystemExit("mutation authority artifact exceeds its byte bound")
+              if stat.S_ISLNK(mode) or not pathlib.PurePosixPath(member.filename).name == expected:
+                  raise SystemExit("unsafe mutation authority artifact member")
+              bundle.extractall(target)
+          PY
+          INTENT="$RUNNER_TEMP/resume-authority/coworld-commissioner-mutation-intent.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-resume-intent "$SOURCE_SHA" \
+            "$RESUME_RUN_ID" "$RESUME_ARTIFACT_ID" "$RUNNER_TEMP/resume-run.json" \
+            "$RUNNER_TEMP/resume-artifact.json" "$INTENT" > "$RUNNER_TEMP/resume-validation.json"
+          INTENT_CONTROL_SHA=$(jq -r .releaseContext.controlSha "$RUNNER_TEMP/resume-validation.json")
+          RELATION=$(gh api "repos/$GITHUB_REPOSITORY/compare/$INTENT_CONTROL_SHA...$CONTROL_SHA" --jq .status)
+          case "$RELATION" in ahead|identical) ;; *) exit 1 ;; esac
+          jq '.source' "$RUNNER_TEMP/resume-validation.json" > "$RUNNER_TEMP/source-preflight-recheck.json"
+          jq '.image' "$RUNNER_TEMP/resume-validation.json" > "$RUNNER_TEMP/image-validation.json"
+          jq '.releaseContext' "$RUNNER_TEMP/resume-validation.json" > "$RUNNER_TEMP/release-context.json"
+          SOURCE_COWORLD_ID=$(jq -r .sourceCoworldId "$RUNNER_TEMP/source-preflight-recheck.json")
+          node .github/scripts/coworld-authenticated-command.mjs status "$SOURCE_COWORLD_ID" --json \
+            > "$RUNNER_TEMP/source-status-recheck.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-resume-source "$SOURCE_SHA" \
+            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            > "$RUNNER_TEMP/resume-source-validation.json"
+          node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/resume-coworld-list.json"
+          node .github/scripts/coworld-commissioner-production.mjs select-resume-candidate "$SOURCE_SHA" \
+            "$INTENT" "$RUNNER_TEMP/resume-coworld-list.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            > "$RUNNER_TEMP/resume-candidate.json"
+          RESUME_COMMISSIONER_IMAGE_ID=$(jq -r .patchedCommissionerImageId "$RUNNER_TEMP/resume-candidate.json")
+          node .github/scripts/coworld-authenticated-command.mjs images "$RESUME_COMMISSIONER_IMAGE_ID" --json \
+            > "$RUNNER_TEMP/resume-hosted-image.json"
+          node .github/scripts/coworld-commissioner-production.mjs discover-resume-patch "$SOURCE_SHA" \
+            "$INTENT" "$RUNNER_TEMP/resume-coworld-list.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            "$RUNNER_TEMP/resume-hosted-image.json" \
+            > "$RUNNER_TEMP/patch.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-commissioner-image-binding "$SOURCE_SHA" \
+            "$INTENT" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/resume-hosted-image.json" \
+            > "$RUNNER_TEMP/hosted-image-binding.json"
+          {
+            echo "SOURCE_COWORLD_ID=$SOURCE_COWORLD_ID"
+            echo "SOURCE_VERSION=$(jq -r .sourceCoworldVersion "$RUNNER_TEMP/source-preflight-recheck.json")"
+            echo "MIGRATION_BEFORE=$(jq -r .previousCommissionerMigrationVersion "$RUNNER_TEMP/source-preflight-recheck.json")"
+            echo "PATCH_VERSION=$(jq -r .patchedCoworldVersion "$RUNNER_TEMP/patch.json")"
+            echo "PATCHED_COWORLD_ID=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")"
+            echo "MUTATION_WORKFLOW_RUN_ID=$RESUME_RUN_ID"
+            echo "MUTATION_AUTHORITY_ARTIFACT_ID=$RESUME_ARTIFACT_ID"
+            echo "MUTATION_INTENT_PATH=$INTENT"
+          } >> "$GITHUB_ENV"
+      - name: Verify certified canonical source and current league binding
+        id: source
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$COWORLD_API_TOKEN"
+          node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/coworld-list.json"
+          SOURCE_COWORLD_ID=$(jq -r --arg name "$COWORLD_NAME" --arg sha "$SOURCE_SHA" \
+            '[.[] | select(.name==$name and .canonical==true and any(.manifest.game.docs.pages[]?; .id=="proxywar-release-provenance" and (.content.value | contains("source_sha="+$sha))))] | if length==1 then .[0].id else "" end' \
+            "$RUNNER_TEMP/coworld-list.json")
+          [[ "$SOURCE_COWORLD_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          node .github/scripts/coworld-authenticated-command.mjs status "$SOURCE_COWORLD_ID" --json > "$RUNNER_TEMP/source-status.json"
+          node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$RUNNER_TEMP/source-league.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-source "$SOURCE_SHA" \
+            "$RUNNER_TEMP/coworld-list.json" "$RUNNER_TEMP/source-status.json" "$RUNNER_TEMP/source-league.json" \
+            > "$RUNNER_TEMP/source-preflight.json"
+          {
+            echo "source_coworld_id=$(jq -r .sourceCoworldId "$RUNNER_TEMP/source-preflight.json")"
+            echo "source_version=$(jq -r .sourceCoworldVersion "$RUNNER_TEMP/source-preflight.json")"
+            echo "migration_before=$(jq -r .previousCommissionerMigrationVersion "$RUNNER_TEMP/source-preflight.json")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "SOURCE_COWORLD_ID=$(jq -r .sourceCoworldId "$RUNNER_TEMP/source-preflight.json")"
+            echo "SOURCE_VERSION=$(jq -r .sourceCoworldVersion "$RUNNER_TEMP/source-preflight.json")"
+            echo "MIGRATION_BEFORE=$(jq -r .previousCommissionerMigrationVersion "$RUNNER_TEMP/source-preflight.json")"
+          } >> "$GITHUB_ENV"
+      - name: Download the exact immutable release artifact by ID
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$RELEASE_ARTIFACT_NAME" = "coworld-release-$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RELEASE_ARTIFACT_ID/zip" > "$RUNNER_TEMP/release-artifact.zip"
+          test -s "$RUNNER_TEMP/release-artifact.zip"
+      - name: Verify checksums and safely extract inert release content
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/release-artifact" "$RUNNER_TEMP/release"
+          "$COWORLD_PYTHON" - <<'PY'
+          import os, pathlib, stat, zipfile
+          source = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-artifact.zip"
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-artifact"
+          with zipfile.ZipFile(source) as bundle:
+              for member in bundle.infolist():
+                  path = pathlib.PurePosixPath(member.filename)
+                  mode = member.external_attr >> 16
+                  if path.is_absolute() or ".." in path.parts or stat.S_ISLNK(mode):
+                      raise SystemExit(f"unsafe release artifact member: {member.filename}")
+              bundle.extractall(target)
+          PY
+          cd "$RUNNER_TEMP/release-artifact"
+          test "$(wc -l < coworld-release.sha256 | tr -d ' ')" = 5
+          sha256sum --check coworld-release.sha256
+          "$COWORLD_PYTHON" - <<'PY'
+          import os, pathlib, tarfile
+          source = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-artifact" / "coworld-release.tgz"
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release"
+          with tarfile.open(source, "r:gz") as bundle:
+              for member in bundle.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+                      raise SystemExit(f"unsafe release archive member: {member.name}")
+              bundle.extractall(target, filter="data")
+          PY
+          node "$GITHUB_WORKSPACE/.github/scripts/coworld-commissioner-production.mjs" validate-artifact \
+            "$SOURCE_SHA" "$SOURCE_VERSION" coworld-release.json "$RUNNER_TEMP/release/coworld_manifest.json" coworld-images.txt \
+            > "$RUNNER_TEMP/release-validation.json"
+      - name: Load and verify the exact linux-amd64 commissioner image without executing it
+        id: image
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        run: |
+          set -euo pipefail
+          gzip -dc "$RUNNER_TEMP/release-artifact/coworld-images.tar.gz" | docker image load >/dev/null
+          LOCAL_IMAGE=$(jq -r .localCommissionerImage "$RUNNER_TEMP/release-validation.json")
+          docker image inspect "$LOCAL_IMAGE" > "$RUNNER_TEMP/commissioner-inspection.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-image "$LOCAL_IMAGE" \
+            "$RUNNER_TEMP/commissioner-inspection.json" > "$RUNNER_TEMP/image-validation.json"
+          REAL_DOCKER=$(command -v docker)
+          [[ "$REAL_DOCKER" = /* ]]
+          GUARD_DIR="$RUNNER_TEMP/coworld-docker-guard"
+          mkdir -m 700 "$GUARD_DIR"
+          install -m 755 .github/scripts/coworld-docker-guard.mjs "$GUARD_DIR/docker"
+          {
+            echo "COWORLD_REAL_DOCKER=$REAL_DOCKER"
+            echo "LOCAL_COMMISSIONER_IMAGE=$LOCAL_IMAGE"
+          } >> "$GITHUB_ENV"
+          echo "$GUARD_DIR" >> "$GITHUB_PATH"
+          if COWORLD_REAL_DOCKER="$REAL_DOCKER" "$GUARD_DIR/docker" run --rm invalid-image; then
+            echo "::error::Commissioner Docker guard allowed container execution"
+            exit 1
+          else
+            test "$?" -eq 126
+          fi
+          echo "local_image=$LOCAL_IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Recheck source, CI, release identity, canonicality, and version immediately before mutation
+        id: allocation
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$CONTROL_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+          RELATION=$(gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_SHA...$CONTROL_SHA" --jq .status)
+          case "$RELATION" in ahead|identical) ;; *) exit 1 ;; esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=100" > "$RUNNER_TEMP/ci-runs-recheck.json"
+          node .github/scripts/coworld-commissioner-production.mjs resolve-ci "$SOURCE_SHA" "$RUNNER_TEMP/ci-runs-recheck.json" > "$RUNNER_TEMP/ci-recheck.json"
+          test "$(jq -r .mainCiRunId "$RUNNER_TEMP/ci-recheck.json")" = "$MAIN_CI_RUN_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" \
+            | jq '{workflow_runs:[.]}' > "$RUNNER_TEMP/release-run-recheck.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/artifacts-recheck.json"
+          jq -n --argjson runId "$RELEASE_RUN_ID" --slurpfile payload "$RUNNER_TEMP/artifacts-recheck.json" \
+            '{runs:[{runId:$runId,artifacts:($payload[0].artifacts//[])}]}' \
+            > "$RUNNER_TEMP/release-evidence-recheck.json"
+          node .github/scripts/coworld-commissioner-production.mjs resolve-release "$SOURCE_SHA" \
+            "$RUNNER_TEMP/release-run-recheck.json" "$RUNNER_TEMP/release-evidence-recheck.json" \
+            > "$RUNNER_TEMP/release-recheck.json"
+          test "$(jq -r .releaseRunId "$RUNNER_TEMP/release-recheck.json")" = "$RELEASE_RUN_ID"
+          test "$(jq -r .releaseArtifactId "$RUNNER_TEMP/release-recheck.json")" = "$RELEASE_ARTIFACT_ID"
+          node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/coworld-list-recheck.json"
+          node .github/scripts/coworld-authenticated-command.mjs status "$SOURCE_COWORLD_ID" --json > "$RUNNER_TEMP/source-status-recheck.json"
+          node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$RUNNER_TEMP/source-league-recheck.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-source "$SOURCE_SHA" \
+            "$RUNNER_TEMP/coworld-list-recheck.json" "$RUNNER_TEMP/source-status-recheck.json" "$RUNNER_TEMP/source-league-recheck.json" \
+            > "$RUNNER_TEMP/source-preflight-recheck.json"
+          test "$(jq -r .previousCommissionerMigrationVersion "$RUNNER_TEMP/source-preflight-recheck.json")" = "$MIGRATION_BEFORE"
+          PATCH_VERSION=$(node .github/scripts/coworld-authenticated-command.mjs next-version "$COWORLD_NAME")
+          [[ "$PATCH_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$PATCH_VERSION" != "$SOURCE_VERSION"
+          echo "patch_version=$PATCH_VERSION" >> "$GITHUB_OUTPUT"
+          echo "PATCH_VERSION=$PATCH_VERSION" >> "$GITHUB_ENV"
+          jq -n --arg controlSha "$CONTROL_SHA" --argjson workflowRunId "$GITHUB_RUN_ID" \
+            --argjson mainCiRunId "$MAIN_CI_RUN_ID" --argjson releaseRunId "$RELEASE_RUN_ID" \
+            --argjson releaseArtifactId "$RELEASE_ARTIFACT_ID" --arg releaseArtifactName "$RELEASE_ARTIFACT_NAME" \
+            --argjson releaseArtifactBytes "$RELEASE_ARTIFACT_BYTES" \
+            '{controlSha:$controlSha,workflowRunId:$workflowRunId,mainCiRunId:$mainCiRunId,releaseRunId:$releaseRunId,releaseArtifactId:$releaseArtifactId,releaseArtifactName:$releaseArtifactName,releaseArtifactBytes:$releaseArtifactBytes}' \
+            > "$RUNNER_TEMP/release-context.json"
+      - name: Write exact pre-mutation resume authority
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/coworld-commissioner-production.mjs create-mutation-intent "$SOURCE_SHA" \
+            "$RUNNER_TEMP/release-context.json" "$RUNNER_TEMP/source-preflight-recheck.json" \
+            "$PATCH_VERSION" "$RUNNER_TEMP/image-validation.json" \
+            > "$RUNNER_TEMP/coworld-commissioner-mutation-intent.json"
+          echo "MUTATION_INTENT_PATH=$RUNNER_TEMP/coworld-commissioner-mutation-intent.json" >> "$GITHUB_ENV"
+      - name: Upload immutable pre-mutation resume authority
+        id: mutation_authority
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-mutation-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-mutation-intent.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Bind durable pre-mutation authority before mutation
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          MUTATION_ARTIFACT_ID: ${{ steps.mutation_authority.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          [[ "$MUTATION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          {
+            echo "MUTATION_WORKFLOW_RUN_ID=$GITHUB_RUN_ID"
+            echo "MUTATION_AUTHORITY_ARTIFACT_ID=$MUTATION_ARTIFACT_ID"
+          } >> "$GITHUB_ENV"
+      - name: Patch only the exact commissioner runnable
+        id: patch
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          OUTPUT="$RUNNER_TEMP/patch-commissioner.txt"
+          node .github/scripts/coworld-authenticated-command.mjs patch-commissioner "$COWORLD_NAME" "$LOCAL_COMMISSIONER_IMAGE" \
+            --runnable-id "$COMMISSIONER_RUNNABLE_ID" --version "$PATCH_VERSION" | tee "$OUTPUT"
+          PATCH_STATUS=${PIPESTATUS[0]}
+          test "$PATCH_STATUS" -eq 0
+          node .github/scripts/coworld-commissioner-production.mjs parse-patch "$OUTPUT" > "$RUNNER_TEMP/patch.json"
+          test "$(jq -r .patchedCoworldVersion "$RUNNER_TEMP/patch.json")" = "$PATCH_VERSION"
+          echo "patched_coworld_id=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")" >> "$GITHUB_OUTPUT"
+          {
+            echo "PATCHED_COWORLD_ID=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")"
+            echo "MUTATION_WORKFLOW_RUN_ID=$GITHUB_RUN_ID"
+          } >> "$GITHUB_ENV"
+      - name: Bind the returned hosted image to the authorized config digest
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          PATCHED_COMMISSIONER_IMAGE_ID=$(jq -r .patchedCommissionerImageId "$RUNNER_TEMP/patch.json")
+          node .github/scripts/coworld-authenticated-command.mjs images "$PATCHED_COMMISSIONER_IMAGE_ID" --json \
+            > "$RUNNER_TEMP/hosted-image.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-commissioner-image-binding "$SOURCE_SHA" \
+            "$MUTATION_INTENT_PATH" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/hosted-image.json" \
+            > "$RUNNER_TEMP/hosted-image-binding.json"
+      - name: Write post-mutation diagnostic receipt
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/coworld-commissioner-production.mjs create-mutation-receipt "$SOURCE_SHA" \
+            "$RUNNER_TEMP/release-context.json" "$RUNNER_TEMP/source-preflight-recheck.json" \
+            "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/image-validation.json" \
+            > "$RUNNER_TEMP/coworld-commissioner-mutation-receipt.json"
+      - name: Upload post-mutation diagnostic receipt
+        id: mutation_receipt
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-mutation-receipt-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-mutation-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Bind the optional diagnostic receipt identity
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          MUTATION_ARTIFACT_ID: ${{ steps.mutation_receipt.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          [[ "$MUTATION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          echo "MUTATION_RECEIPT_ARTIFACT_ID=$MUTATION_ARTIFACT_ID" >> "$GITHUB_ENV"
+      - name: Wait for certification, canonicality, commissioner migration, and league binding
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          READY=false
+          for attempt in $(seq 1 80); do
+            node .github/scripts/coworld-authenticated-command.mjs status "$PATCHED_COWORLD_ID" --json > "$RUNNER_TEMP/patched-status.json"
+            STATE=$(node .github/scripts/coworld-commissioner-production.mjs certification-state "$RUNNER_TEMP/patched-status.json")
+            test "$STATE" != failed
+            if [ "$STATE" = ready ]; then READY=true; break; fi
+            sleep 30
+          done
+          test "$READY" = true
+          BOUND=false
+          for attempt in $(seq 1 80); do
+            node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$RUNNER_TEMP/patched-league.json"
+            if [ "$(jq -r .game.coworld_id "$RUNNER_TEMP/patched-league.json")" = "$PATCHED_COWORLD_ID" ] && \
+               [ "$(jq -r .commissioner_migration_version "$RUNNER_TEMP/patched-league.json")" != "$MIGRATION_BEFORE" ]; then
+              BOUND=true
+              break
+            fi
+            sleep 15
+          done
+          test "$BOUND" = true
+          node .github/scripts/coworld-commissioner-production.mjs validate-final "$SOURCE_SHA" "$PATCH_VERSION" \
+            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
+            > "$RUNNER_TEMP/migration-evidence-core.json"
+          jq -s '.[0] + .[1] + .[2] + {migrationMode:$mode,controlSha:$control_sha,mutationControlSha:.[3].controlSha,mainCiRunId:.[3].mainCiRunId,releaseRunId:.[3].releaseRunId,releaseArtifactId:.[3].releaseArtifactId,releaseArtifactName:.[3].releaseArtifactName,releaseArtifactBytes:.[3].releaseArtifactBytes,workflowRunId:$workflow_run,mutationWorkflowRunId:.[3].workflowRunId,mutationAuthorityArtifactId:($authority_id|tonumber),mutationReceiptArtifactId:($receipt_id|if .=="" then null else tonumber end)}' \
+            --arg mode "$MIGRATION_MODE" --arg control_sha "$CONTROL_SHA" --argjson workflow_run "$GITHUB_RUN_ID" \
+            --arg authority_id "$MUTATION_AUTHORITY_ARTIFACT_ID" \
+            --arg receipt_id "${MUTATION_RECEIPT_ARTIFACT_ID:-}" \
+            "$RUNNER_TEMP/migration-evidence-core.json" "$RUNNER_TEMP/image-validation.json" \
+            "$RUNNER_TEMP/hosted-image-binding.json" "$RUNNER_TEMP/release-context.json" \
+            > "$RUNNER_TEMP/coworld-commissioner-migration-evidence.json"
+      - name: Capture resumable reconciliation state
+        if: ${{ always() }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          for path in source-preflight-recheck.json patch.json; do
+            test -f "$RUNNER_TEMP/$path" || printf '{}\n' > "$RUNNER_TEMP/$path"
+          done
+          STATUS_EXIT=not-attempted
+          LEAGUE_EXIT=not-attempted
+          if [[ "${PATCHED_COWORLD_ID:-}" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            node .github/scripts/coworld-authenticated-command.mjs status "$PATCHED_COWORLD_ID" --json \
+              > "$RUNNER_TEMP/reconciliation-status.json"
+            STATUS_CODE=$?
+            STATUS_EXIT=$STATUS_CODE
+            test "$STATUS_CODE" -eq 0 || printf '{}\n' > "$RUNNER_TEMP/reconciliation-status.json"
+            node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json \
+              > "$RUNNER_TEMP/reconciliation-league.json"
+            LEAGUE_CODE=$?
+            LEAGUE_EXIT=$LEAGUE_CODE
+            test "$LEAGUE_CODE" -eq 0 || printf '{}\n' > "$RUNNER_TEMP/reconciliation-league.json"
+          else
+            printf '{}\n' > "$RUNNER_TEMP/reconciliation-status.json"
+            printf '{}\n' > "$RUNNER_TEMP/reconciliation-league.json"
+          fi
+          AUTHORITY_RUN_ID="${MUTATION_WORKFLOW_RUN_ID:-}"
+          AUTHORITY_ARTIFACT_ID="${MUTATION_AUTHORITY_ARTIFACT_ID:-}"
+          if ! [[ "$AUTHORITY_RUN_ID" =~ ^[1-9][0-9]*$ && "$AUTHORITY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            AUTHORITY_RUN_ID=""
+            AUTHORITY_ARTIFACT_ID=""
+          fi
+          node .github/scripts/coworld-commissioner-production.mjs build-reconciliation "$SOURCE_SHA" \
+            "$CONTROL_SHA" "$GITHUB_RUN_ID" "$RUNNER_TEMP/source-preflight-recheck.json" \
+            "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/reconciliation-status.json" \
+            "$RUNNER_TEMP/reconciliation-league.json" "$STATUS_EXIT" "$LEAGUE_EXIT" \
+            "$AUTHORITY_RUN_ID" "$AUTHORITY_ARTIFACT_ID" \
+            > "$RUNNER_TEMP/coworld-commissioner-reconciliation-state.json"
+      - name: Upload resumable reconciliation state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-reconciliation-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-reconciliation-state.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload immutable non-secret deployment evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-migration-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/coworld-commissioner-migration-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record successful commissioner deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/coworld-commissioner-migration-evidence.json"
+          DEPLOYMENT_ID="${{ steps.audit.outputs.deployment_id }}"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=success -f environment=coworld-production -F auto_inactive=false \
+            -f description="Commissioner certified, canonical, migrated, and league-bound" >/dev/null
+          {
+            echo "## Coworld commissioner production migration"
+            jq -r '"- Source: `\(.sourceSha)` / `\(.sourceCoworldVersion)` / `\(.sourceCoworldId)`\n- Patched: `\(.patchedCoworldVersion)` / `\(.patchedCoworldId)`\n- Commissioner: `\(.commissionerImageId)` / `\(.platform)`\n- Migration: `\(.commissionerMigrationVersionBefore)` -> `\(.commissionerMigrationVersionAfter)`\n- Manifest / replay: `\(.manifestHash)` / `\(.replayBundle)`\n- Certification: 10/10 / `\(.certificationJobId)`\n- Canonical and league-bound: yes"' "$EVIDENCE"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record failed migration without claiming rollback
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_ID="${{ steps.audit.outputs.deployment_id }}"
+          if [ -n "$DEPLOYMENT_ID" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+              -f state=failure -f environment=coworld-production -F auto_inactive=false \
+              -f description="Commissioner migration failed; use retained reconciliation artifact" >/dev/null
+          fi
+      - name: Remove any residual ephemeral credential directories
+        if: always()
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const root = path.resolve(process.env.RUNNER_TEMP);
+          for (const name of fs.readdirSync(root).filter((entry) => entry.startsWith("coworld-auth-"))) {
+            const target = path.resolve(root, name);
+            if (path.dirname(target) !== root) throw new Error(`unexpected credential home: ${target}`);
+            fs.rmSync(target, { recursive: true, force: true });
+          }
+          NODE
+
+  migration-finalizer:
+    name: Recover interrupted commissioner deployment audit state
+    needs: [admission, migrate]
+    if: ${{ always() && needs.admission.result == 'success' && needs.migrate.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mark an interrupted migration as requiring reconciliation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ needs.migrate.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DEPLOYMENT_ID" ]; then
+            LATEST=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --jq '.[0].state // ""')
+            if [ "$LATEST" != success ] && [ "$LATEST" != failure ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+                -f state=failure -f environment=coworld-production -F auto_inactive=false \
+                -f description="Migration runner interrupted; reconcile hosted state" >/dev/null
+            fi
+          fi

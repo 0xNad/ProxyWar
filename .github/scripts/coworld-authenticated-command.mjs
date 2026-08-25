@@ -20,9 +20,11 @@ const allowedCommands = new Set([
   "commander-xp-certify",
   "episode-logs",
   "episodes",
+  "images",
   "leagues",
   "list",
   "next-version",
+  "patch-commissioner",
   "replay-open",
   "status",
   "upload-coworld",
@@ -357,6 +359,18 @@ if (command === "list" && !(args.length === 1 && args[0] === "--json")) {
   throw new Error("authenticated Coworld list mode is malformed");
 }
 if (
+  command === "images" &&
+  !(
+    args.length === 2 &&
+    /^img_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      args[0] ?? "",
+    ) &&
+    args[1] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld image lookup mode is malformed");
+}
+if (
   command === "next-version" &&
   !(args.length === 1 && /^[a-z0-9][a-z0-9-]{7,119}$/.test(args[0] ?? ""))
 ) {
@@ -379,6 +393,22 @@ if (
   )
 ) {
   throw new Error("authenticated Coworld upload mode is malformed");
+}
+if (
+  command === "patch-commissioner" &&
+  !(
+    args.length === 6 &&
+    args[0] === "proxywar" &&
+    /^proxywar-commissioner-local:coworld-[0-9a-f]{12}$/.test(args[1] ?? "") &&
+    args[2] === "--runnable-id" &&
+    args[3] === "proxywar-ladder-commissioner" &&
+    args[4] === "--version" &&
+    /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(
+      args[5] ?? "",
+    )
+  )
+) {
+  throw new Error("authenticated Coworld patch-commissioner mode is malformed");
 }
 if (!token || !python || !coworld) {
   throw new Error(
@@ -404,26 +434,28 @@ const childEnv = {
 if (!childEnv.PATH) {
   throw new Error("authenticated Coworld child PATH is unavailable");
 }
-if (command === "upload-coworld") {
+if (command === "upload-coworld" || command === "patch-commissioner") {
   const realDocker = process.env.COWORLD_REAL_DOCKER;
   if (!realDocker || resolve(realDocker) !== realDocker) {
-    throw new Error("upload-coworld requires an absolute COWORLD_REAL_DOCKER");
+    throw new Error(`${command} requires an absolute COWORLD_REAL_DOCKER`);
   }
   childEnv.COWORLD_REAL_DOCKER = realDocker;
-  const certificationCache = process.env.XDG_CACHE_HOME;
-  if (
-    !certificationCache ||
-    !exactRunnerTempDirectoryInput(certificationCache)
-  ) {
-    throw new Error(
-      "upload-coworld requires an exact runner-temp XDG_CACHE_HOME",
-    );
+  if (command === "upload-coworld") {
+    const certificationCache = process.env.XDG_CACHE_HOME;
+    if (
+      !certificationCache ||
+      !exactRunnerTempDirectoryInput(certificationCache)
+    ) {
+      throw new Error(
+        "upload-coworld requires an exact runner-temp XDG_CACHE_HOME",
+      );
+    }
+    childEnv.XDG_CACHE_HOME = certificationCache;
   }
-  childEnv.XDG_CACHE_HOME = certificationCache;
   const dockerHost = process.env.DOCKER_HOST;
   if (dockerHost) {
     if (!/^unix:\/\/[A-Za-z0-9._/-]+$/.test(dockerHost)) {
-      throw new Error("upload-coworld requires a local Unix DOCKER_HOST");
+      throw new Error(`${command} requires a local Unix DOCKER_HOST`);
     }
     childEnv.DOCKER_HOST = dockerHost;
   }
