@@ -2551,7 +2551,31 @@ function batchDecisionMetadata(input: {
       metadata.plannerFallbackUsed === true;
     metadata.plannerPromptLength = 0;
     metadata.externalPlannerCall = false;
+    metadata.externalActionCall = false;
     metadata.rawProviderOutputPresent = false;
+    // Provider evidence belongs to the one brain decision that authored the
+    // batch, not to every exact action fanned out from it. Retain plan-level
+    // provenance above, but remove every call/correlation/usage field from
+    // secondary records so reports cannot multiply one activity group by the
+    // batch size.
+    for (const key of [
+      "providerEvidenceSource",
+      "providerCallKind",
+      "providerEvidenceInvalid",
+      "providerName",
+      "providerRequestedModel",
+      "providerAttemptedModels",
+      "providerAttemptCount",
+      "providerCompletedAttemptCount",
+      "providerFailedAttemptCount",
+      "providerTimedOutAttemptCount",
+      "providerResponseModel",
+      "providerRequestID",
+      "providerInputTokens",
+      "providerOutputTokens",
+    ] as const) {
+      delete metadata[key];
+    }
     if (typeof metadata.plannerRawOutput === "string") {
       metadata.plannerRawOutput = "[same planner decision as batch index 0]";
     }

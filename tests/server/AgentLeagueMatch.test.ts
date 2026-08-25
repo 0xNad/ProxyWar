@@ -73,6 +73,7 @@ import {
   buildSpawnLegalAction,
   LegalActionBuilder,
 } from "../../src/server/agents/LegalActionBuilder";
+import { writeAgentLeagueRunArtifacts } from "../../src/server/agents/AgentDecisionLogWriter";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
@@ -1079,6 +1080,22 @@ describe("AgentLeagueMatchRunner", () => {
               plannerLatencyMs: 12,
               plannerPromptLength: 1000,
               planPlannerSource: "codex-cli",
+              externalPlannerCall: false,
+              externalActionCall: true,
+              rawProviderOutputPresent: true,
+              providerEvidenceSource: "policy-self-attested",
+              providerCallKind: "action",
+              providerName: "bedrock-sidecar",
+              providerRequestedModel: "requested-model",
+              providerAttemptedModels: '["requested-model","fallback-model"]',
+              providerAttemptCount: 2,
+              providerCompletedAttemptCount: 1,
+              providerFailedAttemptCount: 1,
+              providerTimedOutAttemptCount: 0,
+              providerResponseModel: "response-model",
+              providerRequestID: "request-1",
+              providerInputTokens: 100,
+              providerOutputTokens: 20,
             },
           }),
         }),
@@ -1123,8 +1140,55 @@ describe("AgentLeagueMatchRunner", () => {
         plannerFallbackUsed: false,
         plannerLatencyMs: 0,
         plannerPromptLength: 0,
+        externalPlannerCall: false,
+        externalActionCall: false,
+        rawProviderOutputPresent: false,
       });
+      expect(records[1].decisionMetadata).not.toHaveProperty(
+        "providerEvidenceSource",
+      );
+      expect(records[1].decisionMetadata).not.toHaveProperty(
+        "providerAttemptCount",
+      );
+      expect(records[1].decisionMetadata).not.toHaveProperty(
+        "providerInputTokens",
+      );
       expect(records[2].decisionMetadata?.plannerFallbackUsed).toBe(false);
+
+      const artifactRoot = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "proxywar-batch-provider-evidence-"),
+      );
+      try {
+        const paths = await writeAgentLeagueRunArtifacts({
+          rootDir: artifactRoot,
+          runID: "batch-provider-evidence-run",
+          matchID: "AGENTBAT",
+          scenario: "coworld",
+          brainMode: "planner-executor",
+          startedAt: Date.UTC(2026, 7, 25),
+          completedAt: Date.UTC(2026, 7, 25, 0, 0, 1),
+          records,
+          roster: [],
+        });
+        const summary = JSON.parse(
+          await fs.promises.readFile(paths.summaryPath, "utf8"),
+        );
+        expect(summary).toMatchObject({
+          policySelfAttestedPlannerActivityRecordCount: 0,
+          policySelfAttestedActionActivityRecordCount: 1,
+          policySelfAttestedProviderAttemptCount: 2,
+          policySelfAttestedProviderCompletedAttemptCount: 1,
+          policySelfAttestedProviderFailedAttemptCount: 1,
+          policySelfAttestedProviderTimedOutAttemptCount: 0,
+          policySelfAttestedProviderInputTokens: 100,
+          policySelfAttestedProviderOutputTokens: 20,
+          externalPlannerCallCount: 0,
+          externalActionCallCount: 1,
+          rawProviderOutputRecordCount: 1,
+        });
+      } finally {
+        await fs.promises.rm(artifactRoot, { recursive: true, force: true });
+      }
     } finally {
       await game.end({ archive: false });
     }

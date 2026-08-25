@@ -19,7 +19,11 @@ test("pins the dependency graph and immutable Node base", async () => {
   assert.deepEqual(lock.packages[""].dependencies, packageJson.dependencies);
   assert.match(dockerfile, new RegExp(`^FROM ${expectedBase}$`, "m"));
   assert.match(dockerfile, /^ARG MITO_SOURCE_SHA$/m);
-  assert.match(dockerfile, /^RUN test -n "\$\{MITO_SOURCE_SHA\}"$/m);
+  assert.ok(
+    dockerfile.includes(
+      "RUN printf '%s\\n' \"${MITO_SOURCE_SHA}\" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'",
+    ),
+  );
   assert.match(
     dockerfile,
     /org\.opencontainers\.image\.revision="\$\{MITO_SOURCE_SHA\}"/,
