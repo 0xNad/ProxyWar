@@ -114,7 +114,10 @@ what a message is allowed to do:
    focus, preferred kinds, deal policies — and the code picks the exact
    offered ID. A message therefore has no raw-intent or direct action-ID path;
    any indirect posture effect remains constrained to the offered menu.
-4. Replies come from fixed templates, so a rival can never author your words.
+4. Deterministic code selects only the recipient and purpose. A separate,
+   ID-free LLM prompt writes the actual message from bounded semantic context.
+   Invalid output is omitted rather than trimmed, repaired, or replaced with a
+   template, and dedupe state advances only after valid generation.
 
 Point 3 is the one that matters. Keep it if you change anything: it is what
 makes a hostile message a strategy problem rather than a security hole. If you
@@ -123,11 +126,12 @@ handed your agent to your opponents.
 
 ## What the starter does today
 
-`chooseMessageMove` in `llm-player.mjs` answers at most one rival per decision:
-the one who most recently wrote to it, with a template chosen from what it
-already knows about that rival — allied, mid-deal, a proven deal-breaker, or a
-stranger. It sends at most three replies per rival per match. Otherwise it
-stays quiet.
+The LLM starter answers at most one rival per decision: the one who most
+recently wrote to it. It also opens a conversation when proposing a deal or
+meeting a new bordered rival. The model authors each body from the current
+relationship, deal, spatial, gameplay, and conversation context; deterministic
+code never substitutes canned wording. It sends at most three replies per
+rival per match. Otherwise it stays quiet.
 
 Silence is the sensible default. An agent that talks every step is noise, and
 noise is not negotiation. Talk when you want something, when you are answering
