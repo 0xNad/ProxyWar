@@ -14,6 +14,7 @@ test("pins the hosted-tested image and installs the production Commander entrypo
   );
   assert.match(dockerfile, new RegExp(`^FROM ${expectedBase}$`, "m"));
   assert.match(dockerfile, /^ARG STARTER_SOURCE_SHA$/m);
+  assert.match(dockerfile, /^RUN test -n "\$\{STARTER_SOURCE_SHA\}"$/m);
   assert.match(
     dockerfile,
     /org\.opencontainers\.image\.revision="\$\{STARTER_SOURCE_SHA\}"/,
@@ -31,6 +32,13 @@ test("launch uploads the production argv with the exact Bedrock model", async ()
   assert.match(launch, new RegExp(`MODEL="${expectedModel}"`));
   assert.match(launch, /--bedrock-model "\$MODEL"/);
   assert.match(launch, /coworld submit/);
+  assert.match(launch, /COWORLD_PACKAGE="coworld==0\.1\.42"/);
+  assert.match(launch, /SOFTMAX_CLI_PACKAGE="softmax-cli==0\.26\.30"/);
+  assert.match(launch, /STARTER_SOURCE_SHA/);
+  assert.match(launch, /status --porcelain --untracked-files=all -- \./);
+  assert.match(launch, /--build-arg "STARTER_SOURCE_SHA=\$SOURCE_SHA"/);
+  assert.doesNotMatch(launch, /curl[^\n|]*\|\s*(?:sh|bash)/);
+  assert.doesNotMatch(launch, /uvx --from (?:coworld|softmax-cli)\b/);
   assert.doesNotMatch(launch, /commander-xp-player/);
   assert.doesNotMatch(launch, /--arm=/);
 });
@@ -45,6 +53,6 @@ test("the public contract states the exact-action and fallback boundaries", asyn
   assert.match(readme, /removes the\s+canary's eval run key/);
   assert.match(
     readme,
-    /structured deals and bounded free-form message replies/,
+    /uses structured deals and bounded free-form message replies/,
   );
 });

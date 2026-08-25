@@ -7,6 +7,7 @@ import type {
   LlmCompletionOptions,
   LlmProvider,
 } from "../../src/server/agents/LlmProvider";
+import type { CoworldProviderEvidence } from "../src/coworld-decision-wire";
 
 export const PRODUCTION_COMMANDER_MODEL =
   "us.anthropic.claude-sonnet-4-6" as const;
@@ -31,15 +32,22 @@ interface BedrockResponse {
   };
 }
 
-export interface CommanderProviderEvidence {
+export interface CommanderProviderEvidence extends CoworldProviderEvidence {
   provider: "bedrock-sidecar";
   callKind: "planner";
   requestedModel: typeof PRODUCTION_COMMANDER_MODEL;
+  attemptedModels: Array<typeof PRODUCTION_COMMANDER_MODEL>;
+}
+
+type CommanderProviderAttempt = {
+  sequence: number;
+  status: "in-flight" | "completed" | "failed" | "timed-out";
   responseModel?: string;
   requestID?: string;
   inputTokens?: number;
   outputTokens?: number;
-}
+  rawOutputPresent: boolean;
+};
 
 interface BedrockClient {
   messages: {
@@ -117,9 +125,7 @@ export class CommanderBedrockProvider implements LlmProvider {
   readonly model = PRODUCTION_COMMANDER_MODEL;
   private client: BedrockClient | null = null;
   private providerCallSequence = 0;
-  private lastProviderEvidence:
-    | { sequence: number; evidence: CommanderProviderEvidence }
-    | undefined;
+  private readonly providerAttempts: CommanderProviderAttempt[] = [];
 
   constructor(
     private readonly region: string,
@@ -131,23 +137,28 @@ export class CommanderBedrockProvider implements LlmProvider {
     options: LlmCompletionOptions = {},
   ): Promise<string> {
     const client = await this.bedrockClient();
-    this.providerCallSequence += 1;
-    const sequence = this.providerCallSequence;
-    this.lastProviderEvidence = {
-      sequence,
-      evidence: commanderProviderEvidenceFromResponse({}),
-    };
-    const response = await client.messages.create(
-      commanderBedrockRequest(prompt),
-      {
+    const attempt = this.beginProviderAttempt();
+    let response: BedrockResponse;
+    try {
+      response = await client.messages.create(commanderBedrockRequest(prompt), {
         timeout: PRODUCTION_COMMANDER_SELECTOR_TIMEOUT_MS,
         signal: options.signal,
-      },
-    );
-    this.lastProviderEvidence = {
-      sequence,
-      evidence: commanderProviderEvidenceFromResponse(response),
-    };
+      });
+    } catch (error) {
+      attempt.status = isCommanderProviderTimeoutError(error)
+        ? "timed-out"
+        : "failed";
+      throw error;
+    }
+
+    // A returned SDK response is a completed provider attempt even when later
+    // parsing, validation, or Commander response handling fails. Record its
+    // bounded identity/usage before touching the response body so an outer
+    // transport fallback cannot erase a real provider call.
+    Object.assign(attempt, boundedCommanderResponseEvidence(response), {
+      status: "completed" as const,
+      rawOutputPresent: commanderResponseHasRawOutput(response),
+    });
     const output = (response.content ?? [])
       .map((block) => (typeof block.text === "string" ? block.text : ""))
       .join("")
@@ -163,10 +174,26 @@ export class CommanderBedrockProvider implements LlmProvider {
   }
 
   providerEvidenceAfter(cursor: number): CommanderProviderEvidence | undefined {
-    const latest = this.lastProviderEvidence;
-    return latest !== undefined && latest.sequence > cursor
-      ? { ...latest.evidence }
-      : undefined;
+    const terminalAttempts = this.providerAttempts.filter(
+      (attempt) => attempt.sequence > cursor && attempt.status !== "in-flight",
+    );
+    if (terminalAttempts.length === 0) return undefined;
+    return commanderProviderEvidenceFromAttempts(terminalAttempts);
+  }
+
+  private beginProviderAttempt(): CommanderProviderAttempt {
+    this.providerCallSequence += 1;
+    const attempt: CommanderProviderAttempt = {
+      sequence: this.providerCallSequence,
+      status: "in-flight",
+      rawOutputPresent: false,
+    };
+    this.providerAttempts.push(attempt);
+    // One Commander decision currently makes at most one provider call. Keep a
+    // bounded eight-attempt history so a future bounded retry loop can still
+    // produce the exact aggregate accepted by the Coworld wire contract.
+    if (this.providerAttempts.length > 8) this.providerAttempts.shift();
+    return attempt;
   }
 
   private async bedrockClient(): Promise<BedrockClient> {
@@ -185,6 +212,9 @@ export class CommanderBedrockProvider implements LlmProvider {
     this.client = new Constructor({
       awsRegion: this.region,
       baseURL: this.endpoint,
+      // Evidence counts actual provider attempts. Disable opaque SDK retries so
+      // one recorded attempt cannot conceal multiple billed HTTP invocations.
+      maxRetries: 0,
     });
     return this.client;
   }
@@ -193,19 +223,107 @@ export class CommanderBedrockProvider implements LlmProvider {
 export function commanderProviderEvidenceFromResponse(
   response: BedrockResponse,
 ): CommanderProviderEvidence {
-  const responseModel = boundedEvidenceString(response.model, 200);
-  const requestID = boundedEvidenceString(response.id, 200);
-  const inputTokens = boundedTokenCount(response.usage?.input_tokens);
-  const outputTokens = boundedTokenCount(response.usage?.output_tokens);
+  const responseEvidence = boundedCommanderResponseEvidence(response);
   return {
     provider: "bedrock-sidecar",
     callKind: "planner",
     requestedModel: PRODUCTION_COMMANDER_MODEL,
+    attemptedModels: [PRODUCTION_COMMANDER_MODEL],
+    attemptCount: 1,
+    completedAttemptCount: 1,
+    failedAttemptCount: 0,
+    timedOutAttemptCount: 0,
+    ...responseEvidence,
+    rawOutputPresent: commanderResponseHasRawOutput(response),
+  };
+}
+
+function commanderProviderEvidenceFromAttempts(
+  attempts: CommanderProviderAttempt[],
+): CommanderProviderEvidence {
+  const completedAttempts = attempts.filter(
+    (attempt) => attempt.status === "completed",
+  );
+  const latestCompleted = completedAttempts.at(-1);
+  const inputTokens = boundedTokenTotal(
+    completedAttempts.map((attempt) => attempt.inputTokens),
+  );
+  const outputTokens = boundedTokenTotal(
+    completedAttempts.map((attempt) => attempt.outputTokens),
+  );
+  return {
+    provider: "bedrock-sidecar",
+    callKind: "planner",
+    requestedModel: PRODUCTION_COMMANDER_MODEL,
+    attemptedModels: attempts.map(() => PRODUCTION_COMMANDER_MODEL),
+    attemptCount: attempts.length,
+    completedAttemptCount: completedAttempts.length,
+    failedAttemptCount: attempts.filter(
+      (attempt) => attempt.status === "failed",
+    ).length,
+    timedOutAttemptCount: attempts.filter(
+      (attempt) => attempt.status === "timed-out",
+    ).length,
+    ...(latestCompleted?.responseModel === undefined
+      ? {}
+      : { responseModel: latestCompleted.responseModel }),
+    ...(completedAttempts.length === 1 &&
+    latestCompleted?.requestID !== undefined
+      ? { requestID: latestCompleted.requestID }
+      : {}),
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    rawOutputPresent: completedAttempts.some(
+      (attempt) => attempt.rawOutputPresent,
+    ),
+  };
+}
+
+function boundedCommanderResponseEvidence(
+  response: BedrockResponse,
+): Pick<
+  CommanderProviderEvidence,
+  "responseModel" | "requestID" | "inputTokens" | "outputTokens"
+> {
+  const responseModel = boundedEvidenceString(response.model, 160);
+  const requestID = boundedEvidenceString(response.id, 160);
+  const inputTokens = boundedTokenCount(response.usage?.input_tokens);
+  const outputTokens = boundedTokenCount(response.usage?.output_tokens);
+  return {
     ...(responseModel === undefined ? {} : { responseModel }),
     ...(requestID === undefined ? {} : { requestID }),
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
   };
+}
+
+function commanderResponseHasRawOutput(response: BedrockResponse): boolean {
+  return (
+    Array.isArray(response.content) &&
+    response.content.some(
+      (block) =>
+        typeof block === "object" &&
+        block !== null &&
+        typeof block.text === "string" &&
+        block.text.length > 0,
+    )
+  );
+}
+
+export function isCommanderProviderTimeoutError(error: unknown): boolean {
+  const candidate = error as
+    | { name?: unknown; code?: unknown; message?: unknown }
+    | undefined;
+  const name = String(candidate?.name ?? "").toUpperCase();
+  const code = String(candidate?.code ?? "").toUpperCase();
+  const message = String(candidate?.message ?? error);
+  return (
+    name === "ABORTERROR" ||
+    name === "TIMEOUTERROR" ||
+    code === "ABORT_ERR" ||
+    code === "ETIMEDOUT" ||
+    /timed?\s*out|timeout/i.test(message)
+  );
 }
 
 function boundedEvidenceString(
@@ -215,14 +333,29 @@ function boundedEvidenceString(
   return typeof value === "string" &&
     value.length > 0 &&
     value.length <= maxLength &&
-    /^[\x20-\x7e]+$/.test(value)
+    /^[A-Za-z0-9._:/-]+$/.test(value)
     ? value
     : undefined;
 }
 
 function boundedTokenCount(value: unknown): number | undefined {
-  return Number.isSafeInteger(value) && Number(value) >= 0
+  return Number.isSafeInteger(value) &&
+    Number(value) >= 0 &&
+    Number(value) <= 1_000_000_000
     ? Number(value)
+    : undefined;
+}
+
+function boundedTokenTotal(
+  values: Array<number | undefined>,
+): number | undefined {
+  const observed = values.filter(
+    (value): value is number => value !== undefined,
+  );
+  if (observed.length === 0) return undefined;
+  const total = observed.reduce((sum, value) => sum + value, 0);
+  return Number.isSafeInteger(total) && total <= 1_000_000_000
+    ? total
     : undefined;
 }
 
@@ -232,7 +365,7 @@ export function withCommanderProviderEvidence(
   evidence: CommanderProviderEvidence | undefined,
 ): Record<string, unknown> {
   return evidence !== undefined
-    ? { providerEvidence: evidence, ...response }
+    ? { ...response, providerEvidence: evidence }
     : response;
 }
 

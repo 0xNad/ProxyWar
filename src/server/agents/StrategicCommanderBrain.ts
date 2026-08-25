@@ -551,6 +551,12 @@ function commanderDecision(args: {
       ...(args.providerCalled === null
         ? {}
         : { externalPlannerCall: args.providerCalled }),
+      ...(args.providerCalled === true
+        ? {
+            providerEvidenceSource: "trusted-in-process",
+            providerCallKind: "planner",
+          }
+        : {}),
       externalActionCall: false,
       rawProviderOutputPresent:
         args.selectionTelemetry?.rawOutputPresent ?? false,

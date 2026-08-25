@@ -239,6 +239,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
         nonCombat: {
           inboundMessages: [
             inboundMessage({
+              messageEventID: "msg_00000000-0000-4000-8000-000000000001",
               text: "Peace ‮offer on the 北 border",
               turnNumber: 88,
             }),
@@ -249,6 +250,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
     );
     expect(state.messages).toEqual([
       {
+        eventID: "msg_00000000-0000-4000-8000-000000000001",
         fromID: "P_RIVAL",
         from: "Rival",
         turn: 88,
@@ -349,6 +351,50 @@ describe("scope of influence (a claim can never author or address a move)", () =
       null,
     );
     expect(move!.id).toBe("message:P_RIVAL");
+  });
+
+  it("replies to older A after the newer B event was already answered", async () => {
+    const { chooseMessageMove } = await loadStarter();
+    const answered = new Set<string>([
+      "msg_00000000-0000-4000-8000-00000000000b",
+    ]);
+    const move = chooseMessageMove(
+      [messageOffer("P_RIVAL"), messageOffer("P_OTHER")],
+      {
+        ...BASE_OBSERVATION,
+        visiblePlayers: [
+          ...BASE_OBSERVATION.visiblePlayers,
+          {
+            playerID: "P_OTHER",
+            name: "Other",
+            isAlive: true,
+            sharesBorder: false,
+            isAllied: false,
+          },
+        ],
+        nonCombat: {
+          inboundMessages: [
+            inboundMessage({
+              messageEventID: "msg_00000000-0000-4000-8000-00000000000a",
+              senderID: "P_RIVAL",
+              turnNumber: 90,
+            }),
+            inboundMessage({
+              messageEventID: "msg_00000000-0000-4000-8000-00000000000b",
+              senderID: "P_OTHER",
+              senderName: "Other",
+              turnNumber: 91,
+            }),
+          ],
+        },
+      },
+      answered,
+      null,
+    );
+    expect(move?.id).toBe("message:P_RIVAL");
+    expect(answered).toContain(
+      "msg_00000000-0000-4000-8000-00000000000a",
+    );
   });
 
   it("stays silent rather than fabricating an id when the sender is not offered", async () => {

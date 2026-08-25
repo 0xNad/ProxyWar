@@ -220,8 +220,8 @@ describe("Proxy War beta runtime config", () => {
           "PROXYWAR_CLIPS_ENABLED=false",
           "PROXYWAR_PREMIERE_CLIPS_ENABLED=true",
           "PROXYWAR_LEAGUE_CLIPS_ENABLED=false",
-          `PATH=${path.join(fixture, "private-env-bin-without-git")}`,
-          `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=${stateRoot}`,
+          `PATH=${JSON.stringify(path.join(fixture, "private-env-bin-without-git"))}`,
+          `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=${JSON.stringify(stateRoot)}`,
           "",
         ].join("\n"),
       );
@@ -323,7 +323,7 @@ describe("Proxy War beta runtime config", () => {
         });
       try {
         const enabled = runWrapper({ PROXYWAR_CLIPS_RELEASE_OVERRIDE: "true" });
-        expect(enabled.status).toBe(0);
+        expect(enabled.status, enabled.stderr).toBe(0);
         expect(enabled.stderr).toContain(
           "Clip activation source: release_manager",
         );

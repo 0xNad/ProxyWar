@@ -37,8 +37,9 @@ function validateClaimedGithub(raw: string): string | null {
  * guided flow, UNIFYING the existing paths rather than forking them:
  *
  * 1. Object model (Builder / Agent / Version) in plain language.
- * 2. Path choice — recommends the production Commander starter while keeping
- *    the older fully editable Coworld starter available as an explicit path.
+ * 2. Path choice — starts every new entrant from the canonical, fully editable
+ *    Coworld starter. Strategic Commander remains an architecture example, not
+ *    a second league-entry contract or clone route.
  * 3. Identity — generates a validated registration DRAFT (never an instant
  *    publish; see `BuildRegistrationSubmission.ts`'s doc for why).
  * 4. Run locally — exact `coworld run-episode --verify-replay` +
@@ -470,7 +471,7 @@ export class BuildPage extends LitElement {
             ${translateText("build_page.step2.llm_desc")}
           </p>
           ${this.renderCopyBlock(
-            "git clone https://github.com/0xNad/proxywar-commander-starter.git\ncd proxywar-commander-starter",
+            "git clone https://github.com/0xNad/proxywar-coworld-starter.git\ncd proxywar-coworld-starter",
             "step2-llm-clone",
           )}
         </div>
@@ -865,7 +866,7 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step5.launch_intro")}
       </p>
       ${this.renderCopyBlock(
-        "git clone https://github.com/0xNad/proxywar-commander-starter.git\ncd proxywar-commander-starter\nbash launch.sh my-agent",
+        "git clone https://github.com/0xNad/proxywar-coworld-starter.git\ncd proxywar-coworld-starter\nbash launch.sh my-agent",
         "step5-launch",
       )}
       <p class="mt-2 text-xs text-ink-muted">

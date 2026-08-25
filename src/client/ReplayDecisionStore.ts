@@ -92,7 +92,18 @@ export function replayDecisions(): readonly AiLeagueReplayUiDecision[] {
 export function statedReason(
   decision: AiLeagueReplayUiDecision,
 ): string | null {
-  const reason = decision.reason.trim();
+  return publicStatedReasonText(decision.reason);
+}
+
+/**
+ * Conservative public-output filter for the overloaded decision `reason`
+ * field. Rule/fallback policies also place compact debug tokens in that field
+ * (`dgd:err:atk`, `e1:hold`, `heuristic-expand`); those are useful technical
+ * evidence but are not agent-authored prose and must not be quoted as such.
+ */
+export function publicStatedReasonText(raw: string | null): string | null {
+  if (raw === null) return null;
+  const reason = raw.trim();
   if (reason.length === 0) return null;
   // Fallback/rule-engine decisions carry MACHINE CODES here, not prose —
   // measured on the real fixture: 96 of 240 snapshot decisions read like
@@ -100,7 +111,14 @@ export function statedReason(
   // would be nonsense on the dossier and toasts; the analyst drawer still
   // shows every decision (those rows carry their own FALLBACK flag). A code
   // is short, space-less, and colon-jointed; prose always has spaces.
-  if (!reason.includes(" ") && reason.includes(":")) return null;
+  if (
+    /^(?:dgd|rul|e\d+|heuristic|fallback|policy|autopilot)(?:[-_:\s]|$)/i.test(
+      reason,
+    ) ||
+    (!/\s/.test(reason) && /^[A-Za-z0-9_.:=-]+$/.test(reason))
+  ) {
+    return null;
+  }
   return reason;
 }
 

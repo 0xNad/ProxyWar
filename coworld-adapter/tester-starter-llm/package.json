@@ -8,7 +8,7 @@
     "test": "node --test owner-*.test.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0",
-    "@anthropic-ai/bedrock-sdk": "^0.29.2"
+    "ws": "8.21.3",
+    "@anthropic-ai/bedrock-sdk": "0.33.1"
   }
 }

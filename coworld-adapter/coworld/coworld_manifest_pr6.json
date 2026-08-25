@@ -300,7 +300,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, protocol:{maxActionsPerDecision,maxSpawnPreferences:16}, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. protocol.maxSpawnPreferences is independent of protocol.maxActionsPerDecision. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, spawnPreferenceLegalActionIds?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. On a spawn-only menu, spawnPreferenceLegalActionIds may rank up to protocol.maxSpawnPreferences exact offered spawn LegalAction.id values with selectedLegalActionId first. This spawn ballot is independent of selectedLegalActionIds action batching and must not be used to batch gameplay actions. The game still validates through Proxy War AgentDecisionValidator."
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, protocol:{maxActionsPerDecision,maxSpawnPreferences:16}, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. protocol.maxSpawnPreferences is independent of protocol.maxActionsPerDecision. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, spawnPreferenceLegalActionIds?, selectedMessageActionId?, messageText?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. On a spawn-only menu, spawnPreferenceLegalActionIds may rank up to protocol.maxSpawnPreferences exact offered spawn LegalAction.id values with selectedLegalActionId first. This spawn ballot is independent of selectedLegalActionIds action batching and must not be used to batch gameplay actions. When the responseContract advertises selectedMessageActionId and messageText and the menu offers message:* actions, the two fields must be sent together: selectedMessageActionId must exactly match one offered message id and messageText must be nonblank plain text of at most 280 characters. This optional comms slot is simulation-inert and independent of the gameplay, spawn, and structured-deal slots. The game still validates through Proxy War AgentDecisionValidator."
       },
       "global": {
         "type": "text",
@@ -462,7 +462,7 @@
         "num_agents": 4,
         "episode_timeout_seconds": 2400
       },
-      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached; the match can end at the cap without a winner. Alliance, deal, message, attack, and elimination evidence is recorded only when those events actually occur. The step cap bounds per-episode policy calls; a full episode runs in well under 1GB of memory."
     },
     {
       "id": "tournament-4p-asia",
@@ -493,7 +493,7 @@
         "num_agents": 4,
         "episode_timeout_seconds": 2400
       },
-      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached; the match can end at the cap without a winner. Alliance, deal, message, attack, and elimination evidence is recorded only when those events actually occur. The step cap bounds per-episode policy calls; a full episode runs in well under 1GB of memory."
     },
     {
       "id": "tournament-4p-europe",
@@ -524,7 +524,7 @@
         "num_agents": 4,
         "episode_timeout_seconds": 2400
       },
-      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached; the match can end at the cap without a winner. Alliance, deal, message, attack, and elimination evidence is recorded only when those events actually occur. The step cap bounds per-episode policy calls; a full episode runs in well under 1GB of memory."
     },
     {
       "id": "tournament-8p-pangaea",

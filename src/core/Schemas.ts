@@ -26,6 +26,15 @@ import { flattenedEmojiTable } from "./Util";
 export type GameID = string;
 export type ClientID = string;
 
+/**
+ * Server-owned identity for one free-text message event. Policies never author
+ * this value: the trusted in-process AgentRunner creates it immediately before
+ * submission, then replay, recipient observation, and decision evidence carry
+ * it unchanged. Optional on the wire only so archived pre-ID replays parse.
+ */
+export const AGENT_MESSAGE_EVENT_ID_REGEX =
+  /^msg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 export type Intent =
   | SpawnIntent
   | AttackIntent
@@ -447,7 +456,9 @@ export const QuickChatIntentSchema = z.object({
  * The ONLY wire message carrying agent-authored prose. The text is
  * simulation-inert: `AgentMessageExecution` delivers it for display and
  * observation and nothing in the simulation branches on its content, so
- * wording cannot change game state or replay hashes.
+ * wording cannot change game state or the game-state hashes carried in a
+ * replay. The replay file itself intentionally includes the message text, so
+ * its content hash does change when the text changes.
  *
  * The 280-character bound is duplicated here on purpose. `AgentDecisionValidator`
  * rejects over-cap text before it ever becomes an intent; this schema is the
@@ -459,6 +470,7 @@ export const AgentMessageIntentSchema = z.object({
   type: z.literal("agent_message"),
   recipient: ID,
   text: z.string().min(1).max(280),
+  messageEventID: z.string().regex(AGENT_MESSAGE_EVENT_ID_REGEX).optional(),
 });
 
 export const MarkDisconnectedIntentSchema = z.object({

@@ -115,6 +115,26 @@ export function withProductionCommanderSocial(input: {
   );
 }
 
+/**
+ * Preserve response-correlated provider activity even when a later Commander
+ * reconstruction/social/serialization step throws and the outer transport
+ * fallback has to answer. A cursor with no subsequent call remains omitted.
+ */
+export function productionCommanderTransportFallbackResponse(input: {
+  requestID: string;
+  request: unknown;
+  errorMessage: string;
+  provider: Pick<CommanderBedrockProvider, "providerEvidenceAfter">;
+  evidenceCursor: number;
+}): Record<string, unknown> {
+  return transportFallbackResponse(
+    input.requestID,
+    input.request,
+    input.errorMessage,
+    input.provider.providerEvidenceAfter(input.evidenceCursor),
+  );
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -178,8 +198,8 @@ async function main(): Promise<void> {
 
     decisionChain = decisionChain.then(async () => {
       const requestID = String(message.requestID ?? "");
+      const evidenceCursor = provider.evidenceCursor();
       try {
-        const evidenceCursor = provider.evidenceCursor();
         const input: AgentBrainInput = requestToBrainInput(
           message.request,
           runtime.profile,
@@ -239,7 +259,13 @@ async function main(): Promise<void> {
         console.error(`commander decision failed: ${reason}`);
         socket.send(
           JSON.stringify(
-            transportFallbackResponse(requestID, message.request, reason),
+            productionCommanderTransportFallbackResponse({
+              requestID,
+              request: message.request,
+              errorMessage: reason,
+              provider,
+              evidenceCursor,
+            }),
           ),
         );
       }

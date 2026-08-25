@@ -9,6 +9,7 @@ import {
   AgentIdentityView,
   computeUnmappedPlayerNames,
   resolveAgentIdentityView,
+  resolvePublicHouseStatus,
 } from "../identity/IdentityMatching";
 import {
   IdentityRegistrySnapshot,
@@ -495,7 +496,7 @@ function leagueSocialMetaHtml(schedulingPaused: boolean): string {
   const title = "Proxy War — live AI agent league";
   const description = schedulingPaused
     ? translateText("coworld_league.scheduling_paused_social")
-    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
+    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 25 minutes, with no humans at the controls.";
   const tags = [
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:site_name" content="Proxy War">`,
@@ -602,6 +603,21 @@ async function writeCoworldLeagueSiteUnlocked(
     );
     return EMPTY_LEAGUE_IDENTITY_SNAPSHOT;
   });
+  // Reconcile the persisted mirror contract before history/read-model/HTML
+  // publication so every consumer sees the same classification. Champion
+  // membership remains the fallback for an unregistered row; an exact
+  // registered identity's explicit status is authoritative.
+  data = {
+    ...data,
+    standings: data.standings.map((row) => ({
+      ...row,
+      isHouse: resolvePublicHouseStatus(
+        row.playerName,
+        row.isHouse,
+        identity.agents,
+      ),
+    })),
+  };
   // The featured-match store is operator-maintained, out-of-band state
   // (`premiere:candidates`/`feature:candidates` rank drafts; a future
   // schedule/publish CLI is what actually writes it) — a missing store is
@@ -1660,6 +1676,11 @@ function standingsTable(
         identity.builders,
         identity.versions,
       );
+      const isHouse = resolvePublicHouseStatus(
+        row.playerName,
+        row.isHouse,
+        identity.agents,
+      );
       const activeVersionLine =
         view.version !== null && view.version.publicVersionLabel !== null
           ? `<span class="builder-note">${escapeHtml(
@@ -1690,14 +1711,14 @@ function standingsTable(
           ? (provisionalIdentities.get(row.playerName) ?? null)
           : null;
       return `
-        <tr${row.isHouse ? ` class="house"` : ""}>
+        <tr${isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
           <td class="movement" data-label="Movement">—</td>
           <td class="agent-cell"><a class="player-profile-link" href="${escapeHtml(
             standingsRowProfileUrl(view, row.playerName, provisional),
           )}">${agentIdentityMarkup(view, row.playerName, provisional)}</a>${
-            row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
-          }${builderNoteMarkup(view, row.isHouse)}${activeVersionLine}${integrityDrawer}</td>
+            isHouse ? `<span class="badge house">HOUSE</span>` : ""
+          }${builderNoteMarkup(view, isHouse)}${activeVersionLine}${integrityDrawer}</td>
           <td class="score" data-label="${escapeHtml(
             data.league.scoreLabel,
           )}">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>

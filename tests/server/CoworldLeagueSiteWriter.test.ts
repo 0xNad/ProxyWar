@@ -37,7 +37,7 @@ function sampleData(): CoworldLeagueMirrorData {
       name: "Proxywar",
       description: "Test league",
       divisionName: "Competition",
-      roundIntervalMinutes: 30,
+      roundIntervalMinutes: 25,
       episodesPerRound: 8,
       currentRoundNumber: 268,
       currentRoundStatus: "running",
@@ -178,7 +178,7 @@ describe("coworldLeagueIndexHtml", () => {
       "Round scheduling is currently paused; completed results and replays remain available.",
     );
     expect(html).not.toMatch(
-      /a new round every|every ~30 minutes a new round/i,
+      /a new round every|every ~\d+ minutes a new round/i,
     );
   });
 
@@ -187,7 +187,7 @@ describe("coworldLeagueIndexHtml", () => {
     data.league.roundsPausedAt = "not-a-timestamp";
     const html = coworldLeagueIndexHtml(data);
     expect(html).not.toContain("Round scheduling is paused");
-    expect(html).toContain("a new round every 30 minutes");
+    expect(html).toContain("a new round every 25 minutes");
   });
 
   test("escapes hostile player names", () => {
@@ -559,7 +559,9 @@ describe("coworldLeagueIndexHtml", () => {
   test("shows live round chip and cadence", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("ROUND 268 · LIVE");
-    expect(html).toContain("every 30 minutes");
+    expect(html).toContain("every 25 minutes");
+    expect(html).toContain("<span>Round cadence</span><strong>25m</strong>");
+    expect(html).not.toContain("every 30 minutes");
   });
 
   test("computes recent form and latest match per row from the mirror's own episodes, never forcing a number when none exist", () => {
@@ -629,7 +631,7 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain('<span class="round-pill">Pangaea · Compact</span>');
     expect(html).toContain("<h2>League format</h2>");
     expect(html).toContain(
-      "Every ~30 minutes a new round runs on the competition ladder",
+      "Every ~25 minutes a new round runs on the competition ladder",
     );
     expect(html).toContain(
       "Qualifiers division and graduate to Competition automatically",
@@ -754,6 +756,35 @@ describe("writeCoworldLeagueSite", () => {
     // Map size is retained in the data model; difficulty is gone end-to-end.
     expect(roundTrip.episodes[0].mapSize).toBe("Compact");
     expect(roundTrip.episodes[0]).not.toHaveProperty("difficulty");
+  });
+
+  test("persists the registered house classification consistently across data, HTML, and the public read model", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    data.standings[2] = {
+      ...data.standings[2],
+      activeChampionPolicyLabel: "Auri Commander:v2",
+      isHouse: false,
+    };
+    const paths = await writeCoworldLeagueSite(siteDir, data);
+    const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
+    const readModel = JSON.parse(await readFile(paths.readModelPath, "utf8"));
+    const html = await readFile(paths.indexPath, "utf8");
+    expect(
+      roundTrip.standings.find(
+        (row: { playerName: string }) => row.playerName === "Auri",
+      ).isHouse,
+    ).toBe(true);
+    expect(
+      readModel.agents.find(
+        (entry: { playerName: string }) => entry.playerName === "Auri",
+      ),
+    ).toMatchObject({
+      status: "house",
+      standing: { isHouse: true },
+      activeVersion: { familyMismatch: false, publicVersionLabel: "v2" },
+    });
+    expect(html).toContain('<span class="badge house">HOUSE</span>');
   });
 
   test("premiereHref round-trips through data.json additively (absent rows stay unchanged)", async () => {

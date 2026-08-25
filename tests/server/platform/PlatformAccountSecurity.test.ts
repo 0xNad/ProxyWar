@@ -118,6 +118,7 @@ describe("PlatformAccountSecurity", () => {
 
   test("bootstrapRead relaxes Origin to same-origin proof (Sec-Fetch-Site) but still rejects a cross-site probe", () => {
     const security = harness();
+    expect(security.bootstrapRead({}).account.accountId).toMatch(/^acct_/);
     const sameOrigin = security.bootstrapRead({ secFetchSite: "same-origin" });
     expect(sameOrigin.account.accountId).toMatch(/^acct_/);
     expect(() => security.bootstrapRead({ secFetchSite: "cross-site" })).toThrow(

@@ -1154,8 +1154,13 @@ Planner/executor artifacts include:
 
 Reports show planner decisions separately from executor actions, including
 planner fallbacks and parse failures. A local-only or mock-only win is not an
-LLM win unless `externalPlannerCallCount` or `externalActionCallCount` is
-non-zero and the report shows provider output/cost attribution.
+LLM win. For an in-process house brain, an LLM-backed claim requires trusted
+runtime/provider evidence. For a Coworld or other external policy, the
+`providerEvidence` envelope and derived `externalPlannerCall` /
+`externalActionCall` fields are explicitly policy self-attestation: they are
+useful diagnostics, but they do not prove that a provider call happened, which
+model ran, token usage, or cost. No LLM/cost claim may use self-attested call
+records without independent commissioner, sidecar, or provider evidence.
 
 ## Strategic Skills
 

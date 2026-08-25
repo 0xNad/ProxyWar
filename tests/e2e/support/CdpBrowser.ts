@@ -177,8 +177,14 @@ function findOwnedChromeProcesses(
     if (markerIndex === -1) continue;
     const valueStart = markerIndex + "--user-data-dir=".length;
     const rest = command.slice(valueStart);
-    const spaceIndex = rest.indexOf(" ");
-    const userDataDir = spaceIndex === -1 ? rest : rest.slice(0, spaceIndex);
+    // `ps` renders argv without preserving shell quoting. A temp root may
+    // legitimately contain spaces (the managed ProxyWar workspace does), so
+    // the first space is not the end of this value. Chrome's following argv
+    // entries are flags; split only at the next ` --` boundary.
+    const nextFlagIndex = rest.indexOf(" --");
+    const userDataDir = (
+      nextFlagIndex === -1 ? rest : rest.slice(0, nextFlagIndex)
+    ).trimEnd();
     const ownerMatch = /^(\d+)-/.exec(
       userDataDir.slice(USER_DATA_DIR_MARKER.length),
     );

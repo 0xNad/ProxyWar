@@ -384,6 +384,25 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(house?.activeChampionPolicyLabel).toBe("Commander:v1");
   });
 
+  test("treats Auri Commander's canonical public lineage as the current house policy", () => {
+    const rows = buildStandingRows(standingsFixture, [
+      {
+        status: "competing",
+        substatus: "active",
+        is_champion: true,
+        end_time: null,
+        player: { id: "ply_house" },
+        policy_version: {
+          player_id: "ply_house",
+          label: "Auri Commander:v2",
+        },
+      },
+    ]);
+    const house = rows.find((row) => row.playerName === "Auri");
+    expect(house?.isHouse).toBe(true);
+    expect(house?.activeChampionPolicyLabel).toBe("Auri Commander:v2");
+  });
+
   test("scoreLabelFromStandings falls back to Score", () => {
     expect(scoreLabelFromStandings(standingsFixture)).toBe("Score");
     expect(scoreLabelFromStandings([])).toBe("Score");

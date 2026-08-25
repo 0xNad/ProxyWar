@@ -75,6 +75,23 @@ describe("AgentDecisionLogWriter", () => {
         plannerRan: true,
         plannerLatencyMs: 5,
         plannerFallbackUsed: false,
+        externalPlannerCall: true,
+        externalActionCall: false,
+        rawProviderOutputPresent: true,
+        providerEvidenceSource: "policy-self-attested",
+        providerCallKind: "planner",
+        providerName: "bedrock-sidecar",
+        providerRequestedModel: "us.anthropic.claude-sonnet-4-6",
+        providerAttemptedModels:
+          '["us.anthropic.claude-sonnet-4-6","us.anthropic.claude-haiku-4-5"]',
+        providerAttemptCount: 2,
+        providerCompletedAttemptCount: 1,
+        providerFailedAttemptCount: 1,
+        providerTimedOutAttemptCount: 0,
+        providerResponseModel: "us.anthropic.claude-sonnet-4-6",
+        providerRequestID: "req-provider-log-1",
+        providerInputTokens: 3525,
+        providerOutputTokens: 87,
         plannerRawOutput:
           '{"objective":"fortify_border","rationale":"Border needs a defense post.","maxDecisionCycles":3,"preferredActionKinds":["build"]}',
         plannerParseOk: true,
@@ -204,6 +221,18 @@ describe("AgentDecisionLogWriter", () => {
         parseSuccess: true,
         fallbackUsed: false,
         plannerParseSuccess: true,
+        externalPlannerCall: true,
+        externalActionCall: false,
+        providerCallKind: "planner",
+        providerName: "bedrock-sidecar",
+        providerAttemptedModels:
+          '["us.anthropic.claude-sonnet-4-6","us.anthropic.claude-haiku-4-5"]',
+        providerAttemptCount: 2,
+        providerCompletedAttemptCount: 1,
+        providerFailedAttemptCount: 1,
+        providerTimedOutAttemptCount: 0,
+        providerInputTokens: 3525,
+        providerOutputTokens: 87,
         result: { accepted: true },
         auditStatus: "confirmed",
         auditReason: expect.stringContaining("build_unit accepted"),
@@ -224,6 +253,22 @@ describe("AgentDecisionLogWriter", () => {
         plannerRunCount: 1,
         planFollowedCount: 1,
         plannerFallbackCount: 0,
+        policySelfAttestedPlannerActivityRecordCount: 1,
+        policySelfAttestedActionActivityRecordCount: 0,
+        trustedInProcessPlannerActivityRecordCount: 0,
+        trustedInProcessActionActivityRecordCount: 0,
+        policySelfAttestedProviderAttemptCount: 2,
+        policySelfAttestedProviderCompletedAttemptCount: 1,
+        policySelfAttestedProviderFailedAttemptCount: 1,
+        policySelfAttestedProviderTimedOutAttemptCount: 0,
+        policySelfAttestedProviderInputTokens: 3525,
+        policySelfAttestedProviderOutputTokens: 87,
+        externalPlannerCallCount: 1,
+        externalActionCallCount: 0,
+        externalCallCountSemantics:
+          "deprecated decision-record activity booleans; not provider call or cost proof",
+        rawProviderOutputRecordCount: 1,
+        invalidProviderEvidenceRecordCount: 0,
         runnerMode: "step-locked",
         runnerConfig: {
           spawnSelectionMode: "sealed-ranked-v1",
@@ -233,7 +278,7 @@ describe("AgentDecisionLogWriter", () => {
         failedEffectCount: 0,
         externalAgentFeedbackPath: "external-agent-feedback.json",
         externalAgentFeedbackMarkdownPath: "external-agent-feedback.md",
-        externalAgentCount: 0,
+        externalAgentCount: 1,
         matchStoryPath: "match-story.json",
         matchStoryMarkdownPath: "match-story.md",
         matchPackagePath: "match-package.json",
@@ -317,7 +362,7 @@ describe("AgentDecisionLogWriter", () => {
       ).resolves.toContain("Objective Scorecard");
       await expect(
         fs.readFile(paths.externalAgentFeedbackJsonPath, "utf8"),
-      ).resolves.toContain('"externalAgentCount": 0');
+      ).resolves.toContain('"externalAgentCount": 1');
       await expect(
         fs.readFile(paths.externalAgentFeedbackMarkdownPath, "utf8"),
       ).resolves.toContain("External Agent Feedback");
@@ -1389,12 +1434,15 @@ const COMMS_FLAG = "PROXYWAR_TUNE_FREETEXT_MESSAGES";
 const COMMS_SLOT_KEYS = [
   "commsSlotActionID",
   "commsSlotRecipientID",
+  "commsSlotMessageEventID",
   "commsSlotText",
   "commsSlotAccepted",
   "commsSlotResult",
   "commsSlotRequestedID",
   "commsSlotRejected",
 ] as const;
+
+const MESSAGE_EVENT_ID = "msg_00000000-0000-4000-8000-000000000001";
 
 /** Agent-authored message body; survives the validator's tidying unchanged. */
 const MESSAGE_CLAIM =
@@ -1428,12 +1476,21 @@ function pickMessageTo(
 function stubAcceptedSubmission(
   harness: ReturnType<typeof dealLeagueHarness>,
 ): void {
+  let sequence = 0;
   for (const runner of harness.runners) {
-    runner.submitAgentMessage = () => ({
-      accepted: true,
-      reason: "accepted",
-      intent: null,
-    });
+    runner.submitAgentMessage = (input) => {
+      sequence += 1;
+      return {
+        accepted: true,
+        reason: "accepted",
+        intent: {
+          type: "agent_message",
+          recipient: input.recipient,
+          text: input.text,
+          messageEventID: `msg_00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+        },
+      };
+    };
   }
 }
 
@@ -1452,9 +1509,11 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
         turnNumber: 12,
       }),
       brainType: "external-http",
+      inboundMessageEventIDs: [MESSAGE_EVENT_ID],
       decisionMetadata: {
         commsSlotActionID: "message:P_B",
         commsSlotRecipientID: "P_B",
+        commsSlotMessageEventID: MESSAGE_EVENT_ID,
         commsSlotText: MESSAGE_CLAIM,
         commsSlotAccepted: true,
         commsSlotResult: "accepted",
@@ -1490,8 +1549,10 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
       await writeAndParseEntries([accepted, rejected, bare]);
     // The negotiation evidence: exact wording, recipient, and outcome.
     expect(acceptedEntry).toMatchObject({
+      inboundMessageEventIDs: [MESSAGE_EVENT_ID],
       commsSlotActionID: "message:P_B",
       commsSlotRecipientID: "P_B",
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
       commsSlotResult: "accepted",
@@ -1529,6 +1590,7 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
     expect(stamped!.decisionMetadata).toMatchObject({
       commsSlotActionID: `message:${EXT_B.playerID}`,
       commsSlotRecipientID: EXT_B.playerID,
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
     });
@@ -1542,6 +1604,7 @@ describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
     expect(entry).toMatchObject({
       commsSlotActionID: `message:${EXT_B.playerID}`,
       commsSlotRecipientID: EXT_B.playerID,
+      commsSlotMessageEventID: MESSAGE_EVENT_ID,
       commsSlotText: MESSAGE_CLAIM,
       commsSlotAccepted: true,
       commsSlotResult: "accepted",

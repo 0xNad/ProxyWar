@@ -3,12 +3,12 @@ import {
   coworldLeagueIndexHtml,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
+import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
 import type {
   AgentProfile,
   AgentVersion,
   BuilderProfile,
 } from "../../src/server/identity/IdentitySchemas";
-import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
 
 /**
  * Integration coverage for Stage 1 item 7: registry identities render on the
@@ -195,14 +195,13 @@ describe("registry identity rendering on the league mirror", () => {
       versions: [version()],
     };
     const html = coworldLeagueIndexHtml(baseData(), identity);
-    expect(html).toContain(
-      '<span class="agent-emblem"><svg',
-    );
+    expect(html).toContain('<span class="agent-emblem"><svg');
     expect(html).toContain("a brand new participant</span>");
     // No short-code markup ever attached to the unmapped row (that concept
     // only applies to a real registered AgentProfile) — provable because
     // the ONLY agent-shortcode in the page belongs to daveey.
-    const shortCodeCount = (html.match(/class="agent-shortcode"/g) ?? []).length;
+    const shortCodeCount = (html.match(/class="agent-shortcode"/g) ?? [])
+      .length;
     expect(shortCodeCount).toBe(1);
     // daveey (registered), "a brand new participant", AND "Auri" (both
     // unregistered in THIS test's identity snapshot, which only contains
@@ -221,9 +220,16 @@ describe("registry identity rendering on the league mirror", () => {
           slug: "auri",
           displayName: "Auri",
           shortCode: "AUR",
-          policyMatchRule: { playerName: "Auri", policyFamily: "proxywar-keystone" },
+          policyMatchRule: {
+            playerName: "Auri",
+            policyFamily: "proxywar-keystone",
+          },
           status: "house",
-          emblem: { style: "geometric-svg-v1", seed: "agt_auri", assetPath: "resources/identity/emblems/agt_auri.svg" },
+          emblem: {
+            style: "geometric-svg-v1",
+            seed: "agt_auri",
+            assetPath: "resources/identity/emblems/agt_auri.svg",
+          },
         }),
       ],
       versions: [],
@@ -233,21 +239,54 @@ describe("registry identity rendering on the league mirror", () => {
     expect(html).not.toContain("Unclaimed");
   });
 
-  test("no-auto-attribution: an unverified (builderId null) AgentProfile always renders \"Unclaimed\", never a builder display name, even though a BuilderProfile with a similar name exists in the registry", () => {
+  test("a registered house identity remains HOUSE when the transient standings bit is false", () => {
+    const identity: IdentityRegistrySnapshot = {
+      builders: [],
+      agents: [
+        agent({
+          id: "agt_auri",
+          slug: "auri",
+          displayName: "Auri",
+          shortCode: "AUR",
+          policyMatchRule: {
+            playerName: "Auri",
+            policyFamily: "Auri Commander",
+          },
+          status: "house",
+          emblem: {
+            style: "geometric-svg-v1",
+            seed: "agt_auri",
+            assetPath: "resources/identity/emblems/agt_auri.svg",
+          },
+        }),
+      ],
+      versions: [],
+    };
+    const data = baseData();
+    data.standings[2] = { ...data.standings[2], isHouse: false };
+    const html = coworldLeagueIndexHtml(data, identity);
+    expect(html).toContain('<tr class="house">');
+    expect(html).toContain('<span class="badge house">HOUSE</span>');
+    expect(html).not.toContain("Unclaimed");
+  });
+
+  test('no-auto-attribution: an unverified (builderId null) AgentProfile always renders "Unclaimed", never a builder display name, even though a BuilderProfile with a similar name exists in the registry', () => {
     const identity: IdentityRegistrySnapshot = {
       // A builder exists in the registry, but NO AgentProfile references it
       // (builderId stays null) — matching by proximity/similarity must never
       // happen; the render must show "Unclaimed", not this builder's name.
       builders: [
-        builder({ id: "bld_daveey", slug: "daveey", displayName: "daveey (unrelated builder account)" }),
+        builder({
+          id: "bld_daveey",
+          slug: "daveey",
+          displayName: "daveey (unrelated builder account)",
+        }),
       ],
       agents: [agent({ builderId: null })],
       versions: [version()],
     };
     const html = coworldLeagueIndexHtml(baseData(), identity);
-    expect(html).toContain(
-      '<span class="builder-note">Unclaimed</span>',
-    );
+    expect(html).toContain('<span class="builder-note">Unclaimed</span>');
     expect(html).not.toContain("unrelated builder account");
   });
 

@@ -1,3 +1,4 @@
+import { parsePolicyLabel } from "../identity/IdentityMatching";
 import type { StandingsHistorySnapshot } from "./CoworldLeagueStandingsHistory";
 
 /**
@@ -23,6 +24,15 @@ import type { StandingsHistorySnapshot } from "./CoworldLeagueStandingsHistory";
 const WINRATE_SERIES_MIN_EPISODES = 5;
 /** A "series" of one point isn't a series. Two real per-sync snapshots is the minimum something can be called a trend at all. */
 const SCORE_SERIES_MIN_SNAPSHOTS = 2;
+/**
+ * The retained store predates Coworld's current rating regime and does not
+ * carry an explicit regime id. A >=10x adjacent scale change is therefore a
+ * conservative fail-closed boundary: points before the LAST such boundary
+ * are not comparable to the current score and must not be connected into one
+ * public trajectory. Ordinary rating movement is nowhere near an order of
+ * magnitude; the live migration crossed this boundary by thousands-fold.
+ */
+const SCORE_REGIME_SCALE_RATIO = 10;
 
 export interface WinLossEpisode {
   readonly completedAt: string | null;
@@ -67,6 +77,40 @@ export interface ScoreSeries {
 export interface AgentTimeSeries {
   readonly winrate: WinrateSeries | null;
   readonly score: ScoreSeries | null;
+}
+
+function isScoreRegimeBoundary(previous: number, current: number): boolean {
+  const low = Math.min(Math.abs(previous), Math.abs(current));
+  const high = Math.max(Math.abs(previous), Math.abs(current));
+  if (high === 0) return false;
+  if (low === 0) return high >= SCORE_REGIME_SCALE_RATIO;
+  return high / low >= SCORE_REGIME_SCALE_RATIO;
+}
+
+const INTERNAL_POLICY_FAMILY_TOKEN =
+  /(^|[-_\s])(e2e|smoke|test|tester|probe|audit|canary|candidate|baseline|control|experiment|debug|tmp|cert)([-_\s]|$)/i;
+
+/**
+ * Charts need a human version marker, not the raw Softmax policy label. Raw
+ * labels remain available in the dedicated provenance/integrity surfaces;
+ * reducing an ordinary `family:version` label to its bounded suffix here and
+ * omitting explicit test/canary family names prevents internal experiment
+ * labels from leaking into prominent chart annotations. Malformed labels fail
+ * closed to no marker.
+ */
+function publicVersionMarker(policyLabel: string | null): string | null {
+  if (policyLabel === null) return null;
+  const parsed = parsePolicyLabel(policyLabel);
+  if (parsed === null) {
+    return /^v[a-z0-9._-]{0,18}$/i.test(policyLabel) ? policyLabel : null;
+  }
+  if (
+    parsed.version.length > 20 ||
+    INTERNAL_POLICY_FAMILY_TOKEN.test(parsed.family)
+  ) {
+    return null;
+  }
+  return parsed.version;
 }
 
 /**
@@ -115,27 +159,51 @@ export function computeScoreSeries(
   snapshots: readonly StandingsHistorySnapshot[],
   playerName: string,
 ): ScoreSeries | null {
-  const points: ScoreSeriesPoint[] = [];
+  const candidatePoints: Array<
+    ScoreSeriesPoint & { readonly sourcePolicyLabel: string | null }
+  > = [];
+  let latestRegimeStart = 0;
   for (const snapshot of snapshots) {
     const entry = snapshot.agents.find((a) => a.playerName === playerName);
     if (entry === undefined || entry.score === null) continue;
-    const previousLabel = points[points.length - 1]?.activeVersionLabel ?? null;
-    points.push({
+    const previousPoint = candidatePoints[candidatePoints.length - 1];
+    if (
+      previousPoint !== undefined &&
+      isScoreRegimeBoundary(previousPoint.score, entry.score)
+    ) {
+      latestRegimeStart = candidatePoints.length;
+    }
+    const previousSourceLabel = previousPoint?.sourcePolicyLabel ?? null;
+    candidatePoints.push({
       recordedAt: snapshot.recordedAt,
       score: entry.score,
       rank: entry.rank,
-      activeVersionLabel: entry.activeVersionLabel,
+      activeVersionLabel: publicVersionMarker(entry.activeVersionLabel),
       versionFirstObserved:
         entry.activeVersionLabel !== null &&
-        entry.activeVersionLabel !== previousLabel,
+        entry.activeVersionLabel !== previousSourceLabel,
+      sourcePolicyLabel: entry.activeVersionLabel,
     });
   }
+  let previousPublishedSourceLabel: string | null = null;
+  const points: ScoreSeriesPoint[] = candidatePoints
+    .slice(latestRegimeStart)
+    .map(({ sourcePolicyLabel, ...point }) => {
+      const versionFirstObserved =
+        point.activeVersionLabel !== null &&
+        sourcePolicyLabel !== null &&
+        sourcePolicyLabel !== previousPublishedSourceLabel;
+      previousPublishedSourceLabel = sourcePolicyLabel;
+      return { ...point, versionFirstObserved };
+    });
   if (points.length < SCORE_SERIES_MIN_SNAPSHOTS) return null;
   return {
     points,
     recordedSince: points[0].recordedAt,
     methodology:
-      "one point per league-mirror sync where this agent's score, rank, or active version actually changed, recorded since deployment of the standings-history store — never backfilled or interpolated across a gap",
+      latestRegimeStart > 0
+        ? "one point per league-mirror sync where this agent's score, rank, or active version actually changed, within the most recent comparable score regime — earlier points are omitted after an order-of-magnitude scale discontinuity; never backfilled or interpolated across a gap"
+        : "one point per league-mirror sync where this agent's score, rank, or active version actually changed, recorded since deployment of the standings-history store — never backfilled or interpolated across a gap",
   };
 }
 

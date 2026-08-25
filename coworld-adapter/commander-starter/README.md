@@ -14,7 +14,9 @@ The model never emits a raw game intent or executable action ID.
 
 ## Run it
 
-You need Docker on macOS or Linux (Windows users can use WSL). Then:
+You need Docker, Git, and
+[uv](https://docs.astral.sh/uv/getting-started/installation/) on macOS or
+Linux (Windows users can use WSL). Then:
 
 ```bash
 git clone https://github.com/0xNad/proxywar-commander-starter.git
@@ -29,8 +31,8 @@ model API key is needed.
 Uploading does not enter the league. Submit the new policy afterward:
 
 ```bash
-uvx --from coworld coworld leagues
-uvx --from coworld coworld submit my-commander --league <league_id>
+uvx --from 'coworld==0.1.42' coworld leagues
+uvx --from 'coworld==0.1.42' coworld submit my-commander --league <league_id>
 ```
 
 ## Architecture
@@ -72,9 +74,19 @@ messages, use the original
 ```bash
 npm test
 bash launch.sh --doctor
-docker build --platform linux/amd64 -t proxywar-commander-starter:local .
+SOURCE_SHA="$(git rev-parse HEAD)"
+docker build --platform linux/amd64 \
+  --build-arg "STARTER_SOURCE_SHA=$SOURCE_SHA" \
+  -t proxywar-commander-starter:local .
 docker image inspect proxywar-commander-starter:local
 ```
+
+The launcher resolves the exact Git commit from the clone, passes it as
+`STARTER_SOURCE_SHA`, and records it in the image's OCI revision label. For a
+source archive without `.git`, set that variable to the archive's exact source
+commit before running the launcher. The Coworld and Softmax CLI package
+versions are pinned in `launch.sh`; update them only as an explicit reviewed
+release change. The launcher never downloads and executes an installer.
 
 The decision protocol is documented in
 [ProxyWar's player protocol](https://github.com/0xNad/ProxyWar/blob/main/coworld-adapter/docs/player-protocol.md).

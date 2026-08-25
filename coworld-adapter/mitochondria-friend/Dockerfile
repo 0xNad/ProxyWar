@@ -1,6 +1,7 @@
 FROM public.ecr.aws/q5f4m8t9/cogames@sha256:6cb946c338fa3d58685f280a4e6853e2194b2a6a0cbb60001a99342094d9a244
 
 ARG MITO_SOURCE_SHA
+RUN printf '%s\n' "${MITO_SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'
 LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
       org.opencontainers.image.revision="${MITO_SOURCE_SHA}" \
       org.opencontainers.image.description="ProxyWar LLM-powered MitochondriaFriend"

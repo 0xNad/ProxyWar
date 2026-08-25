@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from collections import Counter
+from math import floor, isfinite
+
 from commissioners.common.app import commissioner_app, run
 from commissioners.common.commissioners import register_commissioner
+from commissioners.common.protocol import CommissionerRoundReport
+from commissioners.common.protocol import EpisodeFailed as CommissionerProtocolEpisodeFailed
+from commissioners.common.protocol import EpisodeRequest as CommissionerProtocolEpisodeRequest
+from commissioners.common.protocol import EpisodeResult as CommissionerProtocolEpisodeResult
+from commissioners.common.protocol import RoundComplete as CommissionerRoundComplete
 from commissioners.common.protocol import RoundStart as CommissionerRoundStart
 from commissioners.common.protocol import ScheduleEpisodes as CommissionerScheduleEpisodes
 from commissioners.common.ruleset_strategy.commissioner import RulesetStrategyCommissioner
@@ -78,6 +86,95 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
     ),
 ]
 
+# This is the source-side counterpart of the live league's
+# settings.ladder.fulfillment.allowed_failures=0.05 contract. The platform does
+# not include that setting in the commissioner RoundStart payload, so the
+# package must pin the same rate itself to keep incomplete terminal rows from
+# becoming ratings. A fractional episode is never allowed: at 25 requests this
+# permits one failure, while six evidence-less completed rows quarantine the
+# entire rated round.
+PROXYWAR_RATED_ALLOWED_FAILURE_RATE = 0.05
+
+
+def _score_bearing_episode_result(
+    scheduled: CommissionerProtocolEpisodeRequest,
+    result: CommissionerProtocolEpisodeResult,
+) -> bool:
+    """Return true only for an exact, finite score row per scheduled seat.
+
+    `type=episode_result` is only a terminal transport label. It is not rating
+    evidence by itself: Coworld has emitted completed requests with an empty
+    `scores` list. Counter equality deliberately supports qualifier self-play,
+    where the same policy may occupy more than one scheduled seat.
+    """
+
+    return (
+        len(result.scores) == len(scheduled.policy_version_ids)
+        and Counter(score.policy_version_id for score in result.scores)
+        == Counter(scheduled.policy_version_ids)
+        and all(isfinite(score.score) for score in result.scores)
+    )
+
+
+def _rated_round_integrity(
+    scheduled_episodes: list[CommissionerProtocolEpisodeRequest],
+    episode_results: list[CommissionerProtocolEpisodeResult],
+    failed_episodes: list[CommissionerProtocolEpisodeFailed],
+) -> tuple[list[CommissionerProtocolEpisodeResult], dict[str, object]]:
+    """Classify terminal Competition evidence before any rating is emitted."""
+
+    scheduled_by_id = {episode.request_id: episode for episode in scheduled_episodes}
+    failed_ids = {episode.request_id for episode in failed_episodes}
+    valid_results: list[CommissionerProtocolEpisodeResult] = []
+    invalid_result_ids: set[str] = set()
+    seen_result_ids: set[str] = set()
+    for result in episode_results:
+        scheduled = scheduled_by_id.get(result.request_id)
+        if (
+            scheduled is None
+            or result.request_id in seen_result_ids
+            or not _score_bearing_episode_result(scheduled, result)
+        ):
+            invalid_result_ids.add(result.request_id)
+        else:
+            valid_results.append(result)
+        seen_result_ids.add(result.request_id)
+
+    valid_results = [
+        result
+        for result in valid_results
+        if result.request_id not in invalid_result_ids
+        and result.request_id not in failed_ids
+    ]
+
+    missing_request_ids = set(scheduled_by_id) - seen_result_ids - failed_ids
+    unknown_failure_ids = failed_ids - set(scheduled_by_id)
+    effective_failure_ids = (
+        (failed_ids & set(scheduled_by_id))
+        | invalid_result_ids
+        | missing_request_ids
+        | unknown_failure_ids
+    )
+    expected_count = len(scheduled_episodes)
+    allowed_failure_count = floor(
+        expected_count * PROXYWAR_RATED_ALLOWED_FAILURE_RATE + 1e-12
+    )
+    return valid_results, {
+        "status": (
+            "quarantined"
+            if len(effective_failure_ids) > allowed_failure_count
+            else "score_bearing"
+        ),
+        "expected_episode_count": expected_count,
+        "score_bearing_count": len(valid_results),
+        "effective_failure_count": len(effective_failure_ids),
+        "allowed_failure_count": allowed_failure_count,
+        "allowed_failure_rate": PROXYWAR_RATED_ALLOWED_FAILURE_RATE,
+        "failed_request_ids": sorted(effective_failure_ids),
+        "invalid_result_request_ids": sorted(invalid_result_ids),
+        "missing_request_ids": sorted(missing_request_ids),
+    }
+
 
 class ProxyWarCommissioner(RulesetStrategyCommissioner):
     """Stock ruleset_strategy commissioner, plus one override: Competition rounds route to a
@@ -90,6 +187,78 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
     are here right now" (confirmed against ruleset_strategy/entrants.py: DivisionMatch/
     EntrantSelector match on division name/type/membership status, never on entrant count).
     """
+
+    def complete_round_for_round_start(
+        self,
+        round_start: CommissionerRoundStart,
+        episode_results: list[CommissionerProtocolEpisodeResult],
+        scheduled_episodes: list[CommissionerProtocolEpisodeRequest] | None = None,
+        failed_episodes: list[CommissionerProtocolEpisodeFailed] | None = None,
+    ) -> CommissionerRoundComplete:
+        view = RoundStartView(round_start, self._config())
+        # Qualifiers are not rated and need their normal failure observations to
+        # drive promotion/disqualification. Competition is the rating boundary.
+        if view.current_division.type != "competition":
+            return super().complete_round_for_round_start(
+                round_start,
+                episode_results,
+                scheduled_episodes,
+                failed_episodes,
+            )
+        if not scheduled_episodes:
+            integrity = {
+                "status": "quarantined",
+                "expected_episode_count": 0,
+                "score_bearing_count": 0,
+                "effective_failure_count": 1,
+                "allowed_failure_count": 0,
+                "allowed_failure_rate": PROXYWAR_RATED_ALLOWED_FAILURE_RATE,
+                "failed_request_ids": [],
+                "invalid_result_request_ids": [],
+                "missing_request_ids": [],
+                "reason": "scheduled episode evidence was absent",
+            }
+            valid_results: list[CommissionerProtocolEpisodeResult] = []
+        else:
+            valid_results, integrity = _rated_round_integrity(
+                scheduled_episodes,
+                episode_results,
+                failed_episodes or [],
+            )
+        if integrity["status"] == "quarantined":
+            # An empty result list is the platform-compatible quarantine: the
+            # terminal round is recorded, but no entrant receives a rating row
+            # and no membership transition is fabricated from incomplete play.
+            return CommissionerRoundComplete(
+                results=[],
+                policy_membership_events=[],
+                membership_changes=[],
+                round_display={"integrity": integrity},
+                observability=CommissionerRoundReport(
+                    rule_id="proxywar_rated_round_integrity_quarantine",
+                    rule_description=(
+                        "No rating was emitted because terminal score-bearing "
+                        "episode failures exceeded the configured tolerance."
+                    ),
+                    division_id=view.current_division.id,
+                    entrants=[],
+                    notes=[
+                        f"Quarantined {integrity['effective_failure_count']} effective "
+                        f"failure(s); allowed {integrity['allowed_failure_count']}."
+                    ],
+                    extra=integrity,
+                ),
+            )
+        complete = super().complete_round_for_round_start(
+            round_start,
+            valid_results,
+            scheduled_episodes,
+            failed_episodes,
+        )
+        if complete.round_display is None:
+            complete.round_display = {}
+        complete.round_display["integrity"] = integrity
+        return complete
 
     def schedule_episodes_for_round_start(
         self, round_start: CommissionerRoundStart

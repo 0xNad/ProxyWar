@@ -14,6 +14,7 @@ import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
 import "./publicapp/BuildPage";
 import "./publicapp/LobbyPage";
+import "./publicapp/LegalInfoPage";
 import "./publicapp/MatchDetailPage";
 import "./publicapp/WatchPage";
 import "./styles.css";
@@ -98,6 +99,14 @@ function mount(pathname: string): boolean {
   }
   if (pathname === "/about") {
     document.body.replaceChildren(document.createElement("about-page"));
+    return true;
+  }
+  if (
+    pathname === "/privacy" ||
+    pathname === "/terms" ||
+    pathname === "/credits"
+  ) {
+    document.body.replaceChildren(document.createElement("legal-info-page"));
     return true;
   }
   if (pathname === "/build") {

@@ -165,6 +165,19 @@ describe("Coworld manifest spawn-preference protocol", () => {
   });
 
   it.each(MANIFEST_NAMES)(
+    "%s does not promise a decisive winner or fabricated social dynamics",
+    (manifestName) => {
+      const source = readFileSync(
+        `${manifestDirectory}/${manifestName}`,
+        "utf8",
+      );
+
+      expect(source).not.toContain("a decisive winner normally arrives");
+      expect(source).not.toContain("dynamics emerge");
+    },
+  );
+
+  it.each(MANIFEST_NAMES)(
     "%s keeps spawn ranking independent from gameplay-action batching",
     (manifestName) => {
       const manifest = JSON.parse(
@@ -193,6 +206,18 @@ describe("Coworld manifest spawn-preference protocol", () => {
       );
       expect(machineProtocol).toContain(
         "independent of selectedLegalActionIds action batching",
+      );
+      expect(machineProtocol).toContain("selectedMessageActionId?");
+      expect(machineProtocol).toContain("messageText?");
+      expect(machineProtocol).toContain("the two fields must be sent together");
+      expect(machineProtocol).toContain(
+        "selectedMessageActionId must exactly match one offered message id",
+      );
+      expect(machineProtocol).toContain(
+        "messageText must be nonblank plain text of at most 280 characters",
+      );
+      expect(machineProtocol).toContain(
+        "This optional comms slot is simulation-inert and independent of the gameplay, spawn, and structured-deal slots",
       );
 
       expect(readme).toContain(

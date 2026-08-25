@@ -9,7 +9,7 @@
 #   bash launch.sh [agent-name] [--yes] [--doctor]
 #
 #   agent-name   name for your uploaded policy (default: my-proxywar-agent)
-#   --yes        auto-approve safe setup steps (installing uv, starting Docker);
+#   --yes        auto-approve safe setup steps (starting Docker);
 #                for coding agents / CI, PROXYWAR_STARTER_YES=1 works too
 #   --doctor     only check the environment and report; change nothing
 #
@@ -31,7 +31,7 @@ for arg in "$@"; do
 Usage: bash launch.sh [agent-name] [--yes] [--doctor]
 
   agent-name   name for your uploaded policy (default: my-proxywar-agent)
-  --yes        auto-approve safe setup steps (installing uv, starting Docker);
+  --yes        auto-approve safe setup steps (starting Docker);
                for coding agents / CI, PROXYWAR_STARTER_YES=1 works too
   --doctor     only check the environment and report; change nothing
 EOF
@@ -44,6 +44,8 @@ done
 IMAGE="proxywar-agent-llm:latest"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SERVER="https://softmax.com/api"
+COWORLD_PACKAGE="coworld==0.1.42"
+SOFTMAX_CLI_PACKAGE="softmax-cli==0.26.30"
 BLOCKED=0
 AUTH="unknown"
 
@@ -71,24 +73,12 @@ case "$(uname -s)" in
   *) echo "This starter supports macOS and Linux (on Windows, use WSL)." >&2; exit 1 ;;
 esac
 
-# uv — user-space install, no sudo
+# uv — explicit prerequisite. Do not execute a mutable remote installer from
+# the league-entry path; builders install uv from its verified documentation.
 if command -v uv >/dev/null 2>&1; then
   ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
-elif [ "$DOCTOR" = "1" ]; then
-  note "uv missing — launch will offer to install it (user-space, no sudo)"
-elif confirm "uv is missing — install it now? (official installer, no sudo)"; then
-  if curl -LsSf https://astral.sh/uv/install.sh | sh; then
-    export PATH="$HOME/.local/bin:$PATH"
-    if command -v uv >/dev/null 2>&1; then
-      fixed "uv $(uv --version | awk '{print $2}')"
-    else
-      needs "uv installed but not on PATH yet — open a new terminal and re-run"
-    fi
-  else
-    needs "uv install failed — see https://docs.astral.sh/uv/ then re-run"
-  fi
 else
-  needs "uv — install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  needs "uv — install from https://docs.astral.sh/uv/getting-started/installation/ then re-run"
 fi
 
 # Docker — detect and guide; auto-start on macOS with consent (never installed for you)
@@ -123,7 +113,7 @@ fi
 
 # Softmax sign-in — probe only; the actual login runs after all checks pass
 if command -v uv >/dev/null 2>&1; then
-  AUTH="$(uvx --from coworld python - "$SERVER" 2>/dev/null <<'PY' || true
+  AUTH="$(uvx --from "$COWORLD_PACKAGE" python - "$SERVER" 2>/dev/null <<'PY' || true
 import sys
 try:
     from coworld.api_client import CoworldApiClient
@@ -162,7 +152,7 @@ fi
 
 if [ "$AUTH" != "ok" ]; then
   echo "==> Signing in to Softmax (browser sign-in; free account)..."
-  uvx --from softmax-cli softmax login
+  uvx --from "$SOFTMAX_CLI_PACKAGE" softmax login
   fixed "Softmax sign-in"
 fi
 
@@ -170,11 +160,11 @@ echo "==> Building your agent image (linux/amd64)..."
 docker build --platform linux/amd64 -t "$IMAGE" "$HERE"
 
 echo "==> Uploading to Softmax as policy '$NAME' (Bedrock enabled)..."
-uvx --from coworld coworld upload-policy "$IMAGE" \
+uvx --from "$COWORLD_PACKAGE" coworld upload-policy "$IMAGE" \
   --name "$NAME" --use-bedrock --run node --run /app/llm-player.mjs
 
 echo "==> Resolving your policy id..."
-POLICY_ID="$(uvx --from coworld python - "$NAME" "$SERVER" <<'PY'
+POLICY_ID="$(uvx --from "$COWORLD_PACKAGE" python - "$NAME" "$SERVER" <<'PY'
 import sys
 try:
     from coworld.api_client import CoworldApiClient
@@ -205,6 +195,6 @@ cat <<EOF
 
 Uploading is not the same as entering the league. To enter it:
 
-    uvx --from coworld coworld leagues        # find the Proxywar league id
-    uvx --from coworld coworld submit "$NAME" --league <league_id>
+    uvx --from $COWORLD_PACKAGE coworld leagues        # find the Proxywar league id
+    uvx --from $COWORLD_PACKAGE coworld submit "$NAME" --league <league_id>
 EOF

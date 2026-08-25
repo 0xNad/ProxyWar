@@ -24,13 +24,20 @@ Behavior:
 Run the pure policy checks with:
 
 ```sh
-node --test friendly-policy.node-test.mjs
+npm ci --ignore-scripts
+npm test
 ```
+
+The direct runtime dependency and npm lockfile are pinned for local checks. The
+hosted image uses Coworld's immutable, digest-pinned Cogames base and requires
+an exact 40- or 64-character source digest in its OCI revision label. Keep all
+of those pins intact when changing the policy.
 
 Build the hosted linux/amd64 policy image from the repository root with:
 
 ```sh
 docker build --platform linux/amd64 \
-  -f coworld-adapter/mitochondria-friend/Dockerfile \
-  -t proxywar-mitochondria-friend:latest .
+  --build-arg MITO_SOURCE_SHA= \
+  coworld-adapter/mitochondria-friend/Dockerfile \
+  -t proxywar-mitochondria-friend:local . < exact-source-sha > -f
 ```

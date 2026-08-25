@@ -110,6 +110,7 @@ const MESSAGE_ACTIONS = [
 function observationWithInbox(
   turnNumber: number,
   inbound: {
+    messageEventID?: string;
     senderID: string;
     senderName: string;
     text: string;
@@ -213,6 +214,80 @@ describe.each(STARTER_FILES)("echo loop: %s", (starterFile) => {
       null,
     );
     expect(repeat).toBeNull();
+  });
+
+  it("distinguishes same-turn messages by server-owned event id and keeps the legacy fallback", async () => {
+    const { chooseMessageMove } = await commsFor(starterFile);
+    const answered = new Set<string>();
+    const message = (messageEventID: string) =>
+      observationWithInbox(101, [
+        {
+          messageEventID,
+          senderID: "P_RIVAL",
+          senderName: "Rival",
+          text: "pact?",
+          turnNumber: 100,
+        },
+      ]);
+
+    expect(
+      chooseMessageMove(
+        MESSAGE_ACTIONS,
+        message("msg_00000000-0000-4000-8000-000000000001"),
+        answered,
+        null,
+      ),
+    ).not.toBeNull();
+    expect(
+      chooseMessageMove(
+        MESSAGE_ACTIONS,
+        message("msg_00000000-0000-4000-8000-000000000002"),
+        answered,
+        null,
+      ),
+    ).not.toBeNull();
+    expect(
+      chooseMessageMove(
+        MESSAGE_ACTIONS,
+        message("msg_00000000-0000-4000-8000-000000000002"),
+        answered,
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it("answers the newest event first, then an older unanswered event", async () => {
+    const { chooseMessageMove } = await commsFor(starterFile);
+    const answered = new Set<string>();
+    const olderID = "msg_00000000-0000-4000-8000-000000000011";
+    const newerID = "msg_00000000-0000-4000-8000-000000000012";
+    const inbox = observationWithInbox(102, [
+      {
+        messageEventID: olderID,
+        senderID: "P_RIVAL",
+        senderName: "Rival",
+        text: "older question",
+        turnNumber: 100,
+      },
+      {
+        messageEventID: newerID,
+        senderID: "P_RIVAL",
+        senderName: "Rival",
+        text: "newer question",
+        turnNumber: 101,
+      },
+    ]);
+
+    expect(
+      chooseMessageMove(MESSAGE_ACTIONS, inbox, answered, null),
+    ).not.toBeNull();
+    expect(answered).toContain(newerID);
+    expect(answered).not.toContain(olderID);
+
+    expect(
+      chooseMessageMove(MESSAGE_ACTIONS, inbox, answered, null),
+    ).not.toBeNull();
+    expect(answered).toContain(olderID);
   });
 
   it("spends the budget per counterparty, not globally", async () => {

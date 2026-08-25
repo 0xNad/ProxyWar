@@ -25,6 +25,7 @@ import {
   Turn,
 } from "../core/Schemas";
 import { createPartialGameRecord } from "../core/Util";
+import { validateAgentMessageText } from "./agents/AgentDecisionValidator";
 import { freeTextMessagesEnabled } from "./agents/AgentTunables";
 import { archive, finalizeGameRecord } from "./Archive";
 import { Client } from "./Client";
@@ -69,6 +70,8 @@ export class GameServer {
   private intents: StampedIntent[] = [];
   public activeClients: Client[] = [];
   private allClients: Map<ClientID, Client> = new Map();
+  /** Only trusted in-process AgentRunner clients may submit agent prose. */
+  private agentMessageClients = new WeakSet<Client>();
   // Map persistentID to clientID for reconnection lookup
   private persistentIdToClientId: Map<string, ClientID> = new Map();
   private clientsDisconnectedStatus: Map<ClientID, boolean> = new Map();
@@ -212,6 +215,15 @@ export class GameServer {
     if (!clientID) return null;
     if (this.kickedPersistentIds.has(persistentID)) return null;
     return clientID;
+  }
+
+  /** Join and mark the trusted in-process producer for the comms-slot intent. */
+  public joinAgentClient(client: Client): "joined" | "kicked" | "rejected" {
+    const result = this.joinClient(client);
+    if (result === "joined") {
+      this.agentMessageClients.add(client);
+    }
+    return result;
   }
 
   public joinClient(client: Client): "joined" | "kicked" | "rejected" {
@@ -392,6 +404,17 @@ export class GameServer {
             clientID: client.clientID,
             type: clientMsg.type,
           });
+          if (
+            clientMsg.type === "intent" &&
+            clientMsg.intent.type === "agent_message"
+          ) {
+            client.ws.send(
+              JSON.stringify({
+                type: "error",
+                error: "agent-message-rate-limited",
+              } satisfies ServerErrorMessage),
+            );
+          }
           return;
         }
         switch (clientMsg.type) {
@@ -433,15 +456,77 @@ export class GameServer {
                       gameID: this.id,
                     },
                   );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-feature-off",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
+                }
+                if (!this.agentMessageClients.has(client)) {
+                  this.log.warn(
+                    "agent_message intent refused: client lacks agent message capability",
+                    {
+                      clientID: client.clientID,
+                      gameID: this.id,
+                    },
+                  );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-capability-required",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
+                }
+                if (stampedIntent.messageEventID === undefined) {
+                  this.log.warn(
+                    "agent_message intent refused: missing server-owned event id",
+                    {
+                      clientID: client.clientID,
+                      gameID: this.id,
+                    },
+                  );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-event-id-required",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
+                }
+                const textValidation = validateAgentMessageText(
+                  stampedIntent.text,
+                );
+                if (!textValidation.ok) {
+                  this.log.warn("agent_message intent refused: invalid text", {
+                    clientID: client.clientID,
+                    gameID: this.id,
+                    reason: textValidation.reason,
+                  });
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "invalid-agent-message-text",
+                    } satisfies ServerErrorMessage),
+                  );
                   return;
                 }
                 // Armed: relay it exactly like any ordinary intent. This must
                 // mirror the `default` arm below — a bare `break` here would
                 // leave the switch WITHOUT submitting, silently swallowing
                 // every message the moment the feature was turned on.
-                if (!this.isPaused) {
-                  this.addIntent(stampedIntent);
+                if (this.isPaused) {
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-game-paused",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
                 }
+                this.addIntent(stampedIntent);
                 break;
               }
 

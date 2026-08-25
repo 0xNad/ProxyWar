@@ -379,7 +379,7 @@ it("public LLM starter returns its spawn ballot before planning cadence or gamep
   expect(source.slice(spawnBranch, buildState)).toContain(
     'runtimeMode: "llm-policy-planner"',
   );
-  expect(buildState).toBeGreaterThan(spawnBranch);
-  expect(agePlan).toBeGreaterThan(buildState);
-  expect(appendHistory).toBeGreaterThan(agePlan);
+  expect(agePlan).toBeGreaterThan(spawnBranch);
+  expect(buildState).toBeGreaterThan(agePlan);
+  expect(appendHistory).toBeGreaterThan(buildState);
 });

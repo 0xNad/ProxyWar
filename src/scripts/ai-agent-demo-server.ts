@@ -1615,6 +1615,11 @@ app.get("/match/:matchId/card-v1.svg", async (req, res) => {
 app.get("/about", async (_req, res) => {
   await sendPublicAppShellPage(res, "the about page");
 });
+for (const legalRoute of ["privacy", "terms", "credits"] as const) {
+  app.get(`/${legalRoute}`, async (_req, res) => {
+    await sendPublicAppShellPage(res, `the ${legalRoute} page`);
+  });
+}
 app.get("/build", async (_req, res) => {
   await sendPublicAppShellPage(res, "the build flow");
 });

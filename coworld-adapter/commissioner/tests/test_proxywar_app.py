@@ -17,7 +17,9 @@ from commissioners.common.adapters import schedule_rounds_for_request
 from commissioners.common.protocol import (
     DivisionInfo,
     EPISODE_SEED_MAX,
+    EpisodeResult,
     EpisodeRequest,
+    EpisodeScore,
     LeagueInfo,
     MembershipInfo,
     RoundStart,
@@ -243,6 +245,102 @@ def test_configured_four_episode_floor_is_preserved_at_12_champions() -> None:
 
     assert len(scheduled.episodes) == 4
     assert all(len(episode.policy_version_ids) == 12 for episode in scheduled.episodes)
+
+
+def _rated_integrity_fixture(
+    episode_count: int = 25,
+) -> tuple[RoundStart, list[EpisodeRequest]]:
+    round_start = competition_round_start(12)
+    base = commissioner().schedule_episodes_for_round_start(round_start).episodes
+    episodes = [
+        base[index % len(base)].model_copy(update={"request_id": str(index)})
+        for index in range(episode_count)
+    ]
+    return round_start, episodes
+
+
+def _score_bearing_result(episode: EpisodeRequest) -> EpisodeResult:
+    return EpisodeResult(
+        request_id=episode.request_id,
+        scores=[
+            EpisodeScore(
+                policy_version_id=policy_version_id,
+                score=1.0 if index == 0 else 0.0,
+            )
+            for index, policy_version_id in enumerate(episode.policy_version_ids)
+        ],
+    )
+
+
+def test_rated_round_quarantines_six_evidence_less_completed_rows() -> None:
+    round_start, scheduled = _rated_integrity_fixture()
+    results = [
+        _score_bearing_result(episode)
+        if index < 19
+        else EpisodeResult(request_id=episode.request_id, scores=[])
+        for index, episode in enumerate(scheduled)
+    ]
+
+    complete = commissioner().complete_round_for_round_start(
+        round_start,
+        results,
+        scheduled,
+        [],
+    )
+
+    assert complete.results == []
+    assert complete.policy_membership_events == []
+    assert complete.observability is not None
+    assert complete.observability.rule_id == "proxywar_rated_round_integrity_quarantine"
+    assert complete.observability.extra == {
+        "status": "quarantined",
+        "expected_episode_count": 25,
+        "score_bearing_count": 19,
+        "effective_failure_count": 6,
+        "allowed_failure_count": 1,
+        "allowed_failure_rate": 0.05,
+        "failed_request_ids": ["19", "20", "21", "22", "23", "24"],
+        "invalid_result_request_ids": ["19", "20", "21", "22", "23", "24"],
+        "missing_request_ids": [],
+    }
+
+
+def test_rated_round_excludes_one_tolerated_evidence_less_row_from_scoring() -> None:
+    round_start, scheduled = _rated_integrity_fixture()
+    results = [
+        _score_bearing_result(episode)
+        if index < 24
+        else EpisodeResult(request_id=episode.request_id, scores=[])
+        for index, episode in enumerate(scheduled)
+    ]
+
+    complete = commissioner().complete_round_for_round_start(
+        round_start,
+        results,
+        scheduled,
+        [],
+    )
+
+    assert complete.results
+    assert complete.observability is not None
+    assert complete.observability.rule_id == "competition_wins"
+    assert complete.round_display is not None
+    assert complete.round_display["integrity"] == {
+        "status": "score_bearing",
+        "expected_episode_count": 25,
+        "score_bearing_count": 24,
+        "effective_failure_count": 1,
+        "allowed_failure_count": 1,
+        "allowed_failure_rate": 0.05,
+        "failed_request_ids": ["24"],
+        "invalid_result_request_ids": ["24"],
+        "missing_request_ids": [],
+    }
+    assert all(
+        ranking.result_metadata["ranked_score_count"] == 24
+        for division in complete.results
+        for ranking in division.rankings
+    )
 
 
 @pytest.mark.parametrize("champion_count", [2, 3, 4, 5, 8, 9, 12, 13, 17, 24])

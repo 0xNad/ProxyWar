@@ -43,7 +43,11 @@ import type {
  * mirror's site data. No IO here — the mirror script owns fetching.
  */
 
-const housePolicyNames = new Set(["Commander", "proxywar-keystone"]);
+const housePolicyNames = new Set([
+  "Auri Commander",
+  "Commander",
+  "proxywar-keystone",
+]);
 const replayUiRecentDecisionLimit = 60;
 const replayUiTextLimit = 1_000;
 

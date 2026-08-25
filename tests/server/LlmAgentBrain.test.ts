@@ -167,6 +167,29 @@ const spawnLegalActions: LegalAction[] = [
 ];
 
 describe("LLM agent decision contract", () => {
+  it("does not report a provider call when no legal actions are offered", async () => {
+    let providerCalls = 0;
+    const provider: LlmProvider = {
+      providerType: "custom",
+      complete: async () => {
+        providerCalls += 1;
+        return "unused";
+      },
+    };
+    const brain = new LlmAgentBrain({ provider });
+
+    const decision = await brain.decide({ observation, legalActions: [] });
+
+    expect(providerCalls).toBe(0);
+    expect(decision.metadata).toMatchObject({
+      externalPlannerCall: false,
+      externalActionCall: false,
+      rawProviderOutputPresent: false,
+    });
+    expect(decision.metadata).not.toHaveProperty("providerEvidenceSource");
+    expect(decision.metadata).not.toHaveProperty("providerCallKind");
+  });
+
   it("builds a prompt with observation data and legal action ids", () => {
     const prompt = new LlmPromptBuilder().build({
       observation: objectiveObservation,
@@ -248,6 +271,11 @@ describe("LLM agent decision contract", () => {
     expect(decision.actionID).toBe("spawn:20");
     expect(decision.spawnPreferenceActionIDs).toEqual(["spawn:20", "spawn:10"]);
     expect(decision.actionIDs).toBeUndefined();
+    expect(decision.metadata).toMatchObject({
+      externalActionCall: true,
+      providerEvidenceSource: "trusted-in-process",
+      providerCallKind: "action",
+    });
   });
 
   it("preserves the fallback brain's ranked spawn ballot after an LLM parse failure", async () => {
@@ -492,6 +520,8 @@ describe("LLM agent decision contract", () => {
       runtimeMode: "llm-action-selector",
       externalPlannerCall: false,
       externalActionCall: true,
+      providerEvidenceSource: "trusted-in-process",
+      providerCallKind: "action",
       rawProviderOutputPresent: false,
       llmParseOk: false,
       fallbackUsed: true,

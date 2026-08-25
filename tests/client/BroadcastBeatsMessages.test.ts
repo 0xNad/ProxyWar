@@ -11,9 +11,9 @@ import { severityOf } from "../../src/client/graphics/layers/WarRoomToasts";
 
 /**
  * MESSAGE beats (free-text negotiation viewer surface). The source contract
- * under test: beats derive from the RECORD's own delivered `agent_message`
- * intents — the turn stream — never from the runner's `commsSlotAccepted`
- * claim, so a message that was never relayed can never be announced.
+ * under test: beats derive from the RECORD's server-relayed `agent_message`
+ * intents — the turn stream — never from a decision record alone. A queued
+ * intent may still be dropped if its recipient dies before core execution.
  */
 
 function telemetryWith(
@@ -35,6 +35,8 @@ const ROSTER = telemetryWith([
   { playerID: "p2", username: "Calc" },
   { playerID: "p3", username: "Jordan" },
 ]);
+
+const MESSAGE_EVENT_ID = "msg_00000000-0000-4000-8000-000000000001";
 
 function message(
   overrides: Partial<RecordedAgentMessage> = {},
@@ -79,6 +81,7 @@ describe("recordedAgentMessages — the turn stream is the source", () => {
             clientID: "c1",
             recipient: "p2",
             text: "Pact?",
+            messageEventID: MESSAGE_EVENT_ID,
           },
           { type: "attack", clientID: "c2", troops: 100 },
         ],
@@ -105,10 +108,11 @@ describe("recordedAgentMessages — the turn stream is the source", () => {
     ],
   };
 
-  it("extracts delivered messages in record order with resolved sender names", () => {
+  it("extracts server-relayed messages in record order with resolved sender names", () => {
     const messages = recordedAgentMessages(record);
     expect(messages).toEqual([
       {
+        messageEventID: MESSAGE_EVENT_ID,
         turn: 900,
         sequence: 0,
         senderName: "Auri",
@@ -134,7 +138,7 @@ describe("recordedAgentMessages — the turn stream is the source", () => {
 });
 
 describe("message war-room beats", () => {
-  it("curates a delivered message into a MESSAGE beat with the chat wording", () => {
+  it("curates a server-relayed message into a MESSAGE beat with the chat wording", () => {
     const beats = messageEvents(ROSTER, [message()]);
     expect(beats).toHaveLength(1);
     expect(beats[0].kind).toBe("message");
@@ -144,6 +148,16 @@ describe("message war-room beats", () => {
     // The message IS the agent's words; there is no second-line claim.
     expect(beats[0].publicReason).toBeNull();
     expect(beats[0].tier).toBe(2);
+  });
+
+  it("uses the server-owned event id while preserving the exact legacy fallback", () => {
+    const identified = messageEvents(ROSTER, [
+      message({ messageEventID: MESSAGE_EVENT_ID }),
+    ]);
+    expect(identified[0]?.id).toBe(MESSAGE_EVENT_ID);
+
+    const legacy = messageEvents(ROSTER, [message({ turn: 901, sequence: 7 })]);
+    expect(legacy[0]?.id).toBe("message:901:7");
   });
 
   it("drops a message whose recipient the telemetry roster cannot name", () => {
@@ -210,6 +224,35 @@ describe("message war-room beats", () => {
       false;
     const beats = curatedWarRoomEvents(ROSTER, [], null, [message()]);
     expect(beats.some((event) => event.kind === "message")).toBe(false);
+  });
+});
+
+describe("plan-change public rationale", () => {
+  it("never quotes policy/debug codes as an agent-stated reason", () => {
+    const beats = curatedWarRoomEvents(
+      null,
+      [
+        {
+          sequence: 1,
+          turnNumber: 10,
+          username: "Auri",
+          reason: "dgd:err:atk",
+          planObjective: "expand",
+        },
+        {
+          sequence: 2,
+          turnNumber: 20,
+          username: "Auri",
+          reason: "heuristic-expand",
+          planObjective: "survive",
+          planRationale: "e1:hold",
+        },
+      ],
+      null,
+    );
+    const planChange = beats.find((event) => event.kind === "plan_change");
+    expect(planChange?.publicReason).toBeNull();
+    expect(planChange?.expandedDetail).toBeNull();
   });
 });
 

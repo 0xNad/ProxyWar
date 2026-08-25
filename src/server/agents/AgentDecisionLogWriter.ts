@@ -215,6 +215,20 @@ interface DecisionLogEntry {
   externalPlannerCall?: boolean;
   externalActionCall?: boolean;
   rawProviderOutputPresent?: boolean;
+  providerEvidenceSource?: string;
+  providerCallKind?: "planner" | "action";
+  providerEvidenceInvalid?: boolean;
+  providerName?: string;
+  providerRequestedModel?: string;
+  providerAttemptedModels?: string;
+  providerAttemptCount?: number;
+  providerCompletedAttemptCount?: number;
+  providerFailedAttemptCount?: number;
+  providerTimedOutAttemptCount?: number;
+  providerResponseModel?: string;
+  providerRequestID?: string;
+  providerInputTokens?: number;
+  providerOutputTokens?: number;
   decisionLatencyMs: number;
   observationSummary: string;
   strategicPriority?: AgentDecisionRecord["strategicPriority"];
@@ -279,6 +293,8 @@ interface DecisionLogEntry {
   selectedLegalActionId: string;
   selectedActionKind: LegalActionKind;
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
+  /** Server-owned message events visible to the agent for this decision. */
+  inboundMessageEventIDs?: string[];
   /** Staged diplomacy-slot evidence, separate from the primary action result. */
   dealSlotEvidence?: AgentDecisionRecord["dealSlotEvidence"];
   /** One-stage sealed spawn allocation evidence, copied verbatim and bounded at source. */
@@ -339,6 +355,7 @@ interface DecisionLogEntry {
    */
   commsSlotActionID?: string;
   commsSlotRecipientID?: string;
+  commsSlotMessageEventID?: string;
   commsSlotText?: string;
   commsSlotAccepted?: boolean;
   commsSlotResult?: string;
@@ -721,6 +738,102 @@ function decisionLogEntry(
           ),
         }
       : {}),
+    ...(stringMetadata(metadata, "providerEvidenceSource") !== undefined
+      ? {
+          providerEvidenceSource: stringMetadata(
+            metadata,
+            "providerEvidenceSource",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "providerCallKind") === "planner" ||
+    stringMetadata(metadata, "providerCallKind") === "action"
+      ? {
+          providerCallKind: stringMetadata(metadata, "providerCallKind") as
+            | "planner"
+            | "action",
+        }
+      : {}),
+    ...(booleanMetadata(metadata, "providerEvidenceInvalid") === true
+      ? { providerEvidenceInvalid: true }
+      : {}),
+    ...(stringMetadata(metadata, "providerName") !== undefined
+      ? { providerName: stringMetadata(metadata, "providerName") }
+      : {}),
+    ...(stringMetadata(metadata, "providerRequestedModel") !== undefined
+      ? {
+          providerRequestedModel: stringMetadata(
+            metadata,
+            "providerRequestedModel",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "providerAttemptedModels") !== undefined
+      ? {
+          providerAttemptedModels: stringMetadata(
+            metadata,
+            "providerAttemptedModels",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerAttemptCount") !== undefined
+      ? {
+          providerAttemptCount: numberMetadata(
+            metadata,
+            "providerAttemptCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerCompletedAttemptCount") !== undefined
+      ? {
+          providerCompletedAttemptCount: numberMetadata(
+            metadata,
+            "providerCompletedAttemptCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerFailedAttemptCount") !== undefined
+      ? {
+          providerFailedAttemptCount: numberMetadata(
+            metadata,
+            "providerFailedAttemptCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerTimedOutAttemptCount") !== undefined
+      ? {
+          providerTimedOutAttemptCount: numberMetadata(
+            metadata,
+            "providerTimedOutAttemptCount",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "providerResponseModel") !== undefined
+      ? {
+          providerResponseModel: stringMetadata(
+            metadata,
+            "providerResponseModel",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "providerRequestID") !== undefined
+      ? {
+          providerRequestID: stringMetadata(metadata, "providerRequestID"),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerInputTokens") !== undefined
+      ? {
+          providerInputTokens: numberMetadata(metadata, "providerInputTokens"),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "providerOutputTokens") !== undefined
+      ? {
+          providerOutputTokens: numberMetadata(
+            metadata,
+            "providerOutputTokens",
+          ),
+        }
+      : {}),
     decisionLatencyMs: record.decisionLatencyMs,
     observationSummary: record.observationSummary,
     ...(record.strategicPriority !== undefined
@@ -1088,6 +1201,9 @@ function decisionLogEntry(
       : {}),
     selectedLegalActionId: record.chosenActionID,
     selectedActionKind: record.chosenActionKind,
+    ...(record.inboundMessageEventIDs !== undefined
+      ? { inboundMessageEventIDs: record.inboundMessageEventIDs }
+      : {}),
     ...(record.chosenActionMetadata
       ? { selectedActionMetadata: record.chosenActionMetadata }
       : {}),
@@ -1145,6 +1261,14 @@ function decisionLogEntry(
           commsSlotRecipientID: stringMetadata(
             metadata,
             "commsSlotRecipientID",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotMessageEventID") !== undefined
+      ? {
+          commsSlotMessageEventID: stringMetadata(
+            metadata,
+            "commsSlotMessageEventID",
           ),
         }
       : {}),
@@ -1433,14 +1557,90 @@ function matchSummary(
       counts[mode] = (counts[mode] ?? 0) + 1;
       return counts;
     }, {}),
+    policySelfAttestedPlannerActivityRecordCount: entries.filter(
+      (entry) =>
+        entry.providerEvidenceSource === "policy-self-attested" &&
+        entry.providerCallKind === "planner",
+    ).length,
+    policySelfAttestedActionActivityRecordCount: entries.filter(
+      (entry) =>
+        entry.providerEvidenceSource === "policy-self-attested" &&
+        entry.providerCallKind === "action",
+    ).length,
+    trustedInProcessPlannerActivityRecordCount: entries.filter(
+      (entry) =>
+        entry.providerEvidenceSource === "trusted-in-process" &&
+        entry.providerCallKind === "planner",
+    ).length,
+    trustedInProcessActionActivityRecordCount: entries.filter(
+      (entry) =>
+        entry.providerEvidenceSource === "trusted-in-process" &&
+        entry.providerCallKind === "action",
+    ).length,
+    policySelfAttestedProviderAttemptCount: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerAttemptCount ?? 0)
+          : 0),
+      0,
+    ),
+    policySelfAttestedProviderCompletedAttemptCount: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerCompletedAttemptCount ?? 0)
+          : 0),
+      0,
+    ),
+    policySelfAttestedProviderFailedAttemptCount: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerFailedAttemptCount ?? 0)
+          : 0),
+      0,
+    ),
+    policySelfAttestedProviderTimedOutAttemptCount: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerTimedOutAttemptCount ?? 0)
+          : 0),
+      0,
+    ),
+    policySelfAttestedProviderInputTokens: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerInputTokens ?? 0)
+          : 0),
+      0,
+    ),
+    policySelfAttestedProviderOutputTokens: entries.reduce(
+      (total, entry) =>
+        total +
+        (entry.providerEvidenceSource === "policy-self-attested"
+          ? (entry.providerOutputTokens ?? 0)
+          : 0),
+      0,
+    ),
+    // One-window compatibility aliases. These count decision-record booleans,
+    // not authenticated provider calls, and must never be used as call/cost
+    // proof. Source-qualified fields above are the canonical report contract.
     externalPlannerCallCount: entries.filter(
       (entry) => entry.externalPlannerCall === true,
     ).length,
     externalActionCallCount: entries.filter(
       (entry) => entry.externalActionCall === true,
     ).length,
+    externalCallCountSemantics:
+      "deprecated decision-record activity booleans; not provider call or cost proof",
     rawProviderOutputRecordCount: entries.filter(
       (entry) => entry.rawProviderOutputPresent === true,
+    ).length,
+    invalidProviderEvidenceRecordCount: entries.filter(
+      (entry) => entry.providerEvidenceInvalid === true,
     ).length,
     spectator:
       input.spectatorReplay === undefined
@@ -2117,11 +2317,17 @@ function matchReport(
     `- Plan-following actions: ${summary.planFollowedCount}`,
     `- Planner fallbacks: ${summary.plannerFallbackCount}`,
     `- Runtime modes: ${JSON.stringify(summary.runtimeModes)}`,
-    `- External planner calls: ${summary.externalPlannerCallCount}`,
-    `- External action calls: ${summary.externalActionCallCount}`,
+    `- Policy-self-attested planner activity decision records: ${summary.policySelfAttestedPlannerActivityRecordCount}`,
+    `- Policy-self-attested action activity decision records: ${summary.policySelfAttestedActionActivityRecordCount}`,
+    `- Trusted in-process planner activity decision records: ${summary.trustedInProcessPlannerActivityRecordCount}`,
+    `- Trusted in-process action activity decision records: ${summary.trustedInProcessActionActivityRecordCount}`,
+    `- Policy-self-attested provider attempts: ${summary.policySelfAttestedProviderAttemptCount} (${summary.policySelfAttestedProviderCompletedAttemptCount} completed, ${summary.policySelfAttestedProviderFailedAttemptCount} failed, ${summary.policySelfAttestedProviderTimedOutAttemptCount} timed out)`,
+    `- Policy-self-attested provider token totals: ${summary.policySelfAttestedProviderInputTokens} input / ${summary.policySelfAttestedProviderOutputTokens} output (untrusted policy report)`,
+    `- Deprecated external activity-record booleans: ${summary.externalPlannerCallCount} planner / ${summary.externalActionCallCount} action (not provider proof)`,
     `- External agents: ${summary.externalAgentCount}`,
     `- External-agent feedback: ${summary.externalAgentReadyForDeveloperReview ? "ready" : "needs review"}`,
     `- Raw provider output records: ${summary.rawProviderOutputRecordCount}`,
+    `- Invalid provider evidence records: ${summary.invalidProviderEvidenceRecordCount}`,
     `- Effect audits: ${summary.confirmedEffectCount} confirmed / ${summary.unknownEffectCount} unknown / ${summary.failedEffectCount} failed / ${summary.notApplicableEffectCount} not applicable`,
     ...(summary.spectator
       ? [

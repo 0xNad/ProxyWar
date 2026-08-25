@@ -270,7 +270,7 @@ function plannerComparisonMarkdown(input: {
       input.candidate.selectedActionKindCounts,
     ),
     "",
-    "## Candidate Planner Calls",
+    "## Candidate Planner Activity Records",
     "| Turn | Objective | Intent | Preferred | Modules | Latency ms | Selected | Rationale |",
     "| ---: | --- | --- | --- | --- | ---: | --- | --- |",
     ...input.candidatePlannerCalls.map(
@@ -293,7 +293,7 @@ function plannerComparisonMarkdown(input: {
 
 function summaryTable(sides: SideSummary[]): string {
   return [
-    "| Side | Benchmark | Outcome | Records | External planner calls | Parse failures | Fallbacks | Avg decision ms | Avg planner ms |",
+    "| Side | Benchmark | Outcome | Records | Planner activity records | Parse failures | Fallbacks | Avg decision ms | Avg planner ms |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ...sides.map(
       (side) =>

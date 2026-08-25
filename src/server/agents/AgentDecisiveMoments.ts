@@ -216,6 +216,9 @@ function momentState(
  */
 export const STATED_REASON_MAX_LENGTH = 400;
 const STATED_REASON_DENYLIST_PATTERNS: readonly RegExp[] = [
+  // Compact policy/debug vocabulary recorded in the overloaded reason field.
+  /^(?:dgd|rul|e\d+|heuristic|fallback|policy|autopilot)(?:[-_:\s]|$)/i,
+  /^[A-Za-z0-9_.:=-]+$/,
   // HTTP status/error response shapes.
   /\bhttp\/?\s*\d{3}\b/i,
   /\b(400|401|402|403|404|405|408|409|429|500|502|503|504)\b/,

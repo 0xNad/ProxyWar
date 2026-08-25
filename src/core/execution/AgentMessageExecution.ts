@@ -6,8 +6,10 @@ import { Execution, Game, Player, PlayerID } from "../game/Game";
  * Delivers one agent-authored private message. Deliberately inert: it emits a
  * display update and nothing else. It grants no permission, creates no
  * obligation, moves no troops, and touches no player state, so message text
- * cannot influence the simulation or the replay hash. Talk is free; only the
- * structured-deal meta-actions bind.
+ * cannot influence the simulation or its game-state hash. The replay payload
+ * intentionally records the message, so changing the words changes that
+ * payload's file/content hash. Talk is free; only the structured-deal
+ * meta-actions bind.
  *
  * Length and character validation happen upstream (`AgentDecisionValidator`,
  * then `AgentMessageIntentSchema`). By the time text reaches here it is

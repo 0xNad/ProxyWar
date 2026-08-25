@@ -41,6 +41,7 @@ import { generateEmblemSvg } from "./identity/IdentityEmblems";
 import {
   AgentIdentityView,
   resolveAgentIdentityView,
+  resolvePublicHouseStatus,
 } from "./identity/IdentityMatching";
 import { IdentityRegistrySnapshot } from "./identity/IdentityRegistry";
 import type {
@@ -429,6 +430,14 @@ function publicAgentFromView(
     activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
   };
   const stats = publicAgentStats(playerName, statsArtifact);
+  const isHouse =
+    standing === null
+      ? false
+      : resolvePublicHouseStatus(
+          playerName,
+          standing.isHouse,
+          view.agent === null ? [] : [view.agent],
+        );
   const timeSeries = computeAgentTimeSeries(
     episodesForPlayer,
     standingsHistory.snapshots,
@@ -460,7 +469,7 @@ function publicAgentFromView(
               rank: standing.rank,
               score: standing.score,
               roundsPlayed: standing.roundsPlayed,
-              isHouse: standing.isHouse,
+              isHouse,
             },
       activeVersion: null,
       provenance,
@@ -493,7 +502,7 @@ function publicAgentFromView(
             rank: standing.rank,
             score: standing.score,
             roundsPlayed: standing.roundsPlayed,
-            isHouse: standing.isHouse,
+            isHouse,
           },
     activeVersion:
       view.version === null || view.version.publicVersionLabel === null

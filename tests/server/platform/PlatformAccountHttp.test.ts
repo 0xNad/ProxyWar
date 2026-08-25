@@ -154,6 +154,22 @@ describe("returning_authenticated_visitor (GET /api/account)", () => {
     return count;
   }
 
+  test("a clean read-only bootstrap works without browser-only Origin metadata", async () => {
+    const response = await get("/api/account");
+    expect(response.status).toBe(200);
+    expect(response.headers["set-cookie"]).toBeDefined();
+  });
+
+  test("an explicit cross-site browser probe is rejected as unauthorized, not misreported as a platform outage", async () => {
+    const response = await get("/api/account", {
+      "Sec-Fetch-Site": "cross-site",
+    });
+    expect(response.status).toBe(403);
+    expect(JSON.parse(response.body)).toEqual({
+      error: { code: "PLATFORM_UNAUTHORIZED" },
+    });
+  });
+
   test("does NOT emit on a visitor's first-ever bootstrap (the cookie is freshly minted, not returning)", async () => {
     const response = await get("/api/account", { Origin: PLATFORM_ORIGIN });
     expect(response.headers["set-cookie"]).toBeDefined();

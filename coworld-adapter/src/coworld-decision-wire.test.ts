@@ -834,13 +834,141 @@ describe("composeCoworldDecision", () => {
     expect(selection).toEqual(normalized);
     expect(metadata).toMatchObject({
       brain: "coworld-websocket",
-      externalActionCall: true,
+      externalActionCall: false,
       parseSuccess: true,
       coworldSlot: 2,
       coworldRequestID: "req_42",
       offeredLegalActionCount: 7,
-      rawProviderOutputPresent: true,
+      rawProviderOutputPresent: false,
     });
+    expect("externalRawOutput" in metadata).toBe(false);
+  });
+
+  it("counts only strict provider-call attestations and preserves bounded usage", () => {
+    const composed = composeCoworldDecision({
+      normalized,
+      message: {
+        selectedLegalActionId: "attack:one",
+        providerEvidence: {
+          callKind: "action",
+          provider: "bedrock-sidecar",
+          requestedModel: "us.anthropic.claude-sonnet-4-6",
+          attemptedModels: [
+            "us.anthropic.claude-sonnet-4-6",
+            "us.anthropic.claude-haiku-4-5",
+          ],
+          attemptCount: 2,
+          completedAttemptCount: 1,
+          failedAttemptCount: 1,
+          timedOutAttemptCount: 0,
+          responseModel: "us.anthropic.claude-sonnet-4-6",
+          requestID: "req-provider-42",
+          inputTokens: 3525,
+          outputTokens: 87,
+          rawOutputPresent: true,
+        },
+      },
+      slot: 2,
+      requestID: "req_42",
+      offeredLegalActionCount: 7,
+    });
+    expect(composed.metadata).toMatchObject({
+      externalActionCall: true,
+      rawProviderOutputPresent: true,
+      providerEvidenceSource: "policy-self-attested",
+      providerCallKind: "action",
+      providerName: "bedrock-sidecar",
+      providerRequestedModel: "us.anthropic.claude-sonnet-4-6",
+      providerAttemptedModels:
+        '["us.anthropic.claude-sonnet-4-6","us.anthropic.claude-haiku-4-5"]',
+      providerAttemptCount: 2,
+      providerCompletedAttemptCount: 1,
+      providerFailedAttemptCount: 1,
+      providerTimedOutAttemptCount: 0,
+      providerResponseModel: "us.anthropic.claude-sonnet-4-6",
+      providerRequestID: "req-provider-42",
+      providerInputTokens: 3525,
+      providerOutputTokens: 87,
+    });
+  });
+
+  it("fails closed on malformed provider evidence", () => {
+    for (const providerEvidence of [
+      { provider: "bedrock-sidecar" },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model with spaces",
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+        attemptedModels: ["model"],
+        attemptCount: 2,
+        completedAttemptCount: 1,
+        failedAttemptCount: 0,
+        timedOutAttemptCount: 0,
+        rawOutputPresent: true,
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+        attemptedModels: Array.from({ length: 9 }, () => "model"),
+        attemptCount: 9,
+        completedAttemptCount: 9,
+        failedAttemptCount: 0,
+        timedOutAttemptCount: 0,
+        rawOutputPresent: true,
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+        attemptedModels: ["model"],
+        attemptCount: 1,
+        completedAttemptCount: 0,
+        failedAttemptCount: 0,
+        timedOutAttemptCount: 1,
+        responseModel: "impossible-response",
+        requestID: "impossible-request",
+        inputTokens: 1,
+        outputTokens: 1,
+        rawOutputPresent: true,
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+        inputTokens: -1,
+        rawOutputPresent: true,
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+        surprise: "unbounded",
+        rawOutputPresent: true,
+      },
+      {
+        provider: "bedrock-sidecar",
+        callKind: "action",
+        requestedModel: "model",
+      },
+    ]) {
+      const composed = composeCoworldDecision({
+        normalized,
+        message: { providerEvidence },
+        slot: 0,
+        requestID: "req_bad",
+        offeredLegalActionCount: 1,
+      });
+      expect(composed.metadata.externalActionCall).toBe(false);
+      expect(composed.metadata.rawProviderOutputPresent).toBe(false);
+      expect(composed.metadata.providerEvidenceInvalid).toBe(true);
+      expect("providerName" in composed.metadata).toBe(false);
+    }
   });
 
   it("reports the player's own degradation flags rather than assuming health", () => {
@@ -871,6 +999,7 @@ describe("composeCoworldDecision", () => {
     const envelope = commanderExecutionEnvelope({
       runtimeMode: "commander-v0-selector",
       plannerSource: "strategic-commander-v0",
+      externalPlannerCall: true,
       planID: "plan-wire-fixture",
       planObjective: "survive",
       commanderSelectedOptionID: "survive",
@@ -897,12 +1026,24 @@ describe("composeCoworldDecision", () => {
       deterministicPreferredOptionAbsent: true,
     });
     expect(envelope?.selectionSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(envelope?.metadata.externalPlannerCall).toBe(true);
 
     const composed = composeCoworldDecision({
       normalized,
       message: {
         runtimeMode: "commander-v0-selector",
         commanderExecution: envelope,
+        providerEvidence: {
+          callKind: "planner",
+          provider: "bedrock-sidecar",
+          requestedModel: "us.anthropic.claude-sonnet-4-6",
+          attemptedModels: ["us.anthropic.claude-sonnet-4-6"],
+          attemptCount: 1,
+          completedAttemptCount: 1,
+          failedAttemptCount: 0,
+          timedOutAttemptCount: 0,
+          rawOutputPresent: true,
+        },
       },
       slot: 1,
       requestID: "req_commander_wire",
@@ -914,9 +1055,54 @@ describe("composeCoworldDecision", () => {
       planID: "plan-wire-fixture",
       planObjective: "survive",
       commanderFidelity: "aligned_primary",
+      externalPlannerCall: true,
+      externalActionCall: false,
+      providerCallKind: "planner",
       commanderExecutionSha256: envelope?.metadataSha256,
       commanderSelectionSha256: envelope?.selectionSha256,
     });
+
+    const withoutProvider = composeCoworldDecision({
+      normalized,
+      message: { commanderExecution: envelope },
+      slot: 1,
+      requestID: "req_commander_no_provider",
+      offeredLegalActionCount: 1,
+    });
+    expect(withoutProvider.metadata.externalPlannerCall).toBe(false);
+    expect(withoutProvider.metadata.externalActionCall).toBe(false);
+
+    const denyingEnvelope = commanderExecutionEnvelope({
+      runtimeMode: "commander-v0-selector",
+      externalPlannerCall: false,
+      planID: "plan-wire-denies-provider",
+    });
+    const providerOverridesLegacyFalse = composeCoworldDecision({
+      normalized,
+      message: {
+        commanderExecution: denyingEnvelope,
+        providerEvidence: {
+          callKind: "planner",
+          provider: "bedrock-sidecar",
+          requestedModel: "model",
+          attemptedModels: ["model"],
+          attemptCount: 1,
+          completedAttemptCount: 1,
+          failedAttemptCount: 0,
+          timedOutAttemptCount: 0,
+          rawOutputPresent: true,
+        },
+      },
+      slot: 1,
+      requestID: "req_provider_overrides_false",
+      offeredLegalActionCount: 1,
+    });
+    expect(providerOverridesLegacyFalse.metadata.externalPlannerCall).toBe(
+      true,
+    );
+    expect(providerOverridesLegacyFalse.metadata.externalActionCall).toBe(
+      false,
+    );
 
     const tampered = structuredClone(envelope!);
     tampered.metadata.planObjective = "pressure_rival:forged";
@@ -974,7 +1160,7 @@ describe("composeCoworldDecision", () => {
     }
   });
 
-  it("bounds the raw frame it stamps as evidence", () => {
+  it("does not mislabel an ordinary websocket frame as provider output", () => {
     const composed = composeCoworldDecision({
       normalized,
       message: { reason: "r".repeat(5_000), confidence: 0.5 },
@@ -982,7 +1168,9 @@ describe("composeCoworldDecision", () => {
       requestID: "req_1",
       offeredLegalActionCount: 1,
     });
-    expect(String(composed.metadata.externalRawOutput)).toHaveLength(1_000);
+    expect(composed.metadata.externalRawOutput).toBeUndefined();
+    expect(composed.metadata.externalActionCall).toBe(false);
+    expect(composed.metadata.rawProviderOutputPresent).toBe(false);
     expect(composed.metadata.confidence).toBe(0.5);
     // A non-numeric confidence is dropped, never coerced into a fake score.
     expect(

@@ -46,7 +46,7 @@ No separate sign-in step — `launch.sh` runs the browser sign-in for you when n
 bash launch.sh my-agent
 ```
 
-This checks your setup (offering to install uv / start Docker, and signing you in if
+This checks your setup (offering to start Docker, and signing you in if
 needed), builds your agent, uploads it (Bedrock auto-enabled), and prints your
 **policy-version id** (a UUID) — a diagnostic reference, not proof you're in the league yet.
 First build pulls a base image (a couple of minutes, once).
@@ -54,8 +54,8 @@ First build pulls a base image (a couple of minutes, once).
 Uploading isn't entering the league — do that next:
 
 ```bash
-uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent --league <league_id>
+uvx --from coworld==0.1.42 coworld leagues        # find the Proxywar league id
+uvx --from coworld==0.1.42 coworld submit my-agent --league <league_id>
 ```
 
 The unsuffixed policy name selects your latest uploaded version.
@@ -78,9 +78,11 @@ The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus
 "preferKinds": [...], "target": ..., "avoidTargets": [...], "dealPolicies": ...,
 "breakDealIDs": [...], "reason": ...}`) from your
 `STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
-The agent answers every decision instantly from the current plan and refreshes the plan in
-the background every `PLAN_EVERY` decisions (default 6). If the model returns junk or
-Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
+The agent executes decisions immediately from the current plan between refreshes. Every
+`PLAN_EVERY` decisions (default 6), it awaits one refresh in that decision exchange, capped
+at 12 seconds under the canonical 15-second decision budget. If the model returns junk,
+times out, or Bedrock hiccups, it keeps playing on the last good plan and flags the decision
+as degraded.
 
 When `legalActions` includes `deal_*` entries, `chooseDealMove` may also return
 one of those exact offered ids as `selectedDealActionId`. It rides beside
@@ -144,15 +146,15 @@ land geometry exists. Both remain absent when the parent spatial flag is OFF.
 
 Re-run `bash launch.sh my-agent` to push a new version.
 
-> **Why not ask the model every turn?** Hosted matches have a hard **wall-clock budget**
-> set by the match package (league games currently allow up to 100 minutes; older packages
-> only 20). Blocking ~15s on a model call per decision burns the budget waiting — and a
-> killed match is scored as a loss no matter how well you played. Plan-in-background
-> answers in milliseconds, so full 300-decision games finish with time to spare.
+> **Why not ask the model every turn?** Hosted matches enforce a per-decision deadline and
+> a match wall-clock budget. The default cadence awaits one refresh at most every six
+> decisions, caps that refresh at 12 seconds, and preserves at least three seconds of
+> headroom under the canonical 15-second decision limit. Intervening decisions make no
+> provider call and execute directly from the current plan.
 
 ## Step 4 — Iterate
 
-Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent --league <league_id>`. The unsuffixed name submits your latest uploaded version.
+Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld==0.1.42 coworld submit my-agent --league <league_id>`. The unsuffixed name submits your latest uploaded version.
 
 ## Prefer a non-LLM agent?
 
@@ -168,7 +170,7 @@ accidental pact violations. Point `launch.sh` at `--run node --run
 | Not sure your machine is ready            | `bash launch.sh --doctor` — reports everything, changes nothing.                                        |
 | `Cannot connect to the Docker daemon`     | The script offers to start Docker Desktop (macOS); otherwise start your Docker runtime and re-run.      |
 | `command not found: uv`                   | The script offers to install it. If it was just installed, open a new terminal (fresh PATH) and re-run. |
-| `Not authenticated`                       | The script signs you in automatically; to redo it manually: `uvx --from softmax-cli softmax login`.     |
+| `Not authenticated`                       | The script signs you in automatically; to redo it manually: `uvx --from softmax-cli==0.26.30 softmax login`.     |
 | First build is slow                       | Normal — pulls the Node base image once.                                                                |
 | `permission denied: ./launch.sh`          | Run it as `bash launch.sh my-agent`.                                                                    |
 | Replay shows `BEDROCK_FAIL` on some turns | Shared Bedrock capacity throttled; the agent fell back safely. Usually transient.                       |

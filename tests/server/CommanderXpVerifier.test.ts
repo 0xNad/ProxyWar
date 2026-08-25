@@ -139,6 +139,21 @@ describe("Commander XP evidence verifier v2", () => {
     );
   });
 
+  it("allows the public messageText protocol label but still rejects a retained message body field", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const inspectPath = path.join(
+      fixture.evidenceRoot,
+      "eval-coworld-inspect.json",
+    );
+    const inspect = JSON.parse(await fs.readFile(inspectPath, "utf8"));
+    inspect.retainedDecision = { messageText: "private rival prose" };
+    await fs.writeFile(inspectPath, JSON.stringify(inspect));
+
+    await expect(scanPrivacyAndInventory(fixture.evidenceRoot)).rejects.toThrow(
+      /PRIVACY_KEY_FORBIDDEN: eval-coworld-inspect\.json:messageText/,
+    );
+  });
+
   it("accepts an exact policy adopted from authoritative current readback", async () => {
     const fixture = await buildPreregistrationFixture({
       adoptedPolicyArm: "A",

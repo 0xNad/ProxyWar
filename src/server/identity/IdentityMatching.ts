@@ -43,6 +43,24 @@ export function findAgentForPlayerName(
   );
 }
 
+/**
+ * One public house/non-house classification for every surface. Coworld's
+ * membership-derived bit is still the only evidence available for an
+ * unregistered participant. Once an exact `playerName` resolves to a tracked
+ * AgentProfile, however, the registry's explicit status is authoritative:
+ * publishing `status: "house"` beside `isHouse: false` is internally
+ * contradictory, and a transiently unavailable champion feed must not
+ * silently reclassify a known house agent as community-owned.
+ */
+export function resolvePublicHouseStatus(
+  playerName: string,
+  observedIsHouse: boolean,
+  agents: readonly AgentProfile[],
+): boolean {
+  const agent = findAgentForPlayerName(playerName, agents);
+  return agent === null ? observedIsHouse : agent.status === "house";
+}
+
 export interface ObservedVersion {
   /** The label actually live right now — champion when present, else rating. */
   policyLabel: string;
