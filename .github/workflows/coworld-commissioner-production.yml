@@ -516,8 +516,8 @@ jobs:
           done
           test "$BOUND" = true
           node .github/scripts/coworld-commissioner-production.mjs validate-final "$SOURCE_SHA" "$PATCH_VERSION" \
-            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/source-status-recheck.json" \
-            "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
+            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/hosted-image-binding.json" \
+            "$RUNNER_TEMP/source-status-recheck.json" "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
             > "$RUNNER_TEMP/migration-evidence-core.json"
           jq -s '.[0] + .[1] + .[2] + {migrationMode:$mode,controlSha:$control_sha,mutationControlSha:.[3].controlSha,mainCiRunId:.[3].mainCiRunId,releaseRunId:.[3].releaseRunId,releaseArtifactId:.[3].releaseArtifactId,releaseArtifactName:.[3].releaseArtifactName,releaseArtifactBytes:.[3].releaseArtifactBytes,workflowRunId:$workflow_run,mutationWorkflowRunId:.[3].workflowRunId,mutationAuthorityArtifactId:($authority_id|tonumber),mutationReceiptArtifactId:($receipt_id|if .=="" then null else tonumber end)}' \
             --arg mode "$MIGRATION_MODE" --arg control_sha "$CONTROL_SHA" --argjson workflow_run "$GITHUB_RUN_ID" \
