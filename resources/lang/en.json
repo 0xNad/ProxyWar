@@ -2154,7 +2154,7 @@
     "analyst_decisions_col_audit": "Audit",
     "analyst_decisions_col_reason": "Stated reason",
     "analyst_latency_ms": "{ms}ms",
-    "analyst_events_heading": "Full public event log",
+    "analyst_events_heading": "Public event log",
     "analyst_events_empty": "No events recorded yet.",
     "analyst_unavailable_premiere_sealed": "Decision data is sealed until this premiere reveals — the curated War Room and timeline stay live.",
     "analyst_unavailable_no_data": "No decision data is available for this match.",

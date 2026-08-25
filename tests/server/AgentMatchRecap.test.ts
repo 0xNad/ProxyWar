@@ -8,6 +8,7 @@ import {
 } from "../../src/server/agents/AgentMatchRecap";
 import {
   buildAgentSpectatorTelemetry,
+  type SpectatorDealEventCoverage,
   type SpectatorEvent,
 } from "../../src/server/agents/AgentSpectatorTelemetry";
 import type {
@@ -164,6 +165,30 @@ function dealEvent(
     llmPlannerDegraded: false,
     auditStatus: "not_applicable",
     importance: kind === "deal_violated" ? 96 : 70,
+    ...overrides,
+  };
+}
+
+function dealCoverage(
+  overrides: Partial<SpectatorDealEventCoverage> = {},
+): SpectatorDealEventCoverage {
+  const emptyCounts = {
+    deal_proposed: 0,
+    deal_accepted: 0,
+    deal_rejected: 0,
+    deal_superseded: 0,
+    deal_expired: 0,
+    deal_fulfilled: 0,
+    deal_violated: 0,
+  };
+  return {
+    authority: "finalized_deal_ledger",
+    complete: true,
+    sourceEventCount: 0,
+    emittedEventCount: 0,
+    droppedEventCount: 0,
+    sourceCountsByKind: { ...emptyCounts },
+    emittedCountsByKind: { ...emptyCounts },
     ...overrides,
   };
 }
@@ -341,6 +366,192 @@ describe("buildAgentMatchRecap", () => {
     expect(withDeals?.summary).toContain("1 superseded deal");
     expect(withDeals?.summary).toContain("1 violated promise");
     expect(withDeals?.curatedDramaScore).toBe(baseline?.curatedDramaScore);
+  });
+
+  it("uses complete ledger coverage for exact deal totals while keeping War Room facts deduplicated", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-complete-deal-counts",
+      records: [],
+      roster: ROSTER,
+    });
+    const proposal = dealEvent(
+      1,
+      100,
+      "deal_proposed",
+      "Atlas proposed a non-aggression pact to Blitz.",
+    );
+    const coverage = dealCoverage({
+      sourceEventCount: 2,
+      emittedEventCount: 2,
+      sourceCountsByKind: {
+        ...dealCoverage().sourceCountsByKind,
+        deal_proposed: 2,
+      },
+      emittedCountsByKind: {
+        ...dealCoverage().emittedCountsByKind,
+        deal_proposed: 2,
+      },
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-complete-deal-counts",
+      telemetry: {
+        ...telemetry,
+        events: [proposal, { ...proposal, id: "ledger-event-2", sequence: 2 }],
+        dealEventCoverage: coverage,
+      },
+      finalTurnCount: 100,
+      series: null,
+    });
+
+    expect(recap).toMatchObject({
+      schemaVersion: 9,
+      summary: "This match featured 2 deal proposals.",
+      dealEventCoverage: coverage,
+    });
+    expect(recap?.beats).toEqual([
+      {
+        turnNumber: 100,
+        kind: "deal_proposed",
+        message: "Atlas proposed a non-aggression pact to Blitz.",
+      },
+    ]);
+  });
+
+  it("keeps the War Room digest bounded when complete telemetry contains more than 24 terminal deal facts", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-bounded-deal-digest",
+      records: [],
+      roster: ROSTER,
+    });
+    const events = Array.from({ length: 30 }, (_, index) =>
+      dealEvent(
+        index + 1,
+        (index + 1) * 100,
+        "deal_fulfilled",
+        `VERDICT: Atlas fulfilled promise ${index + 1}.`,
+      ),
+    );
+    const emptyCounts = dealCoverage().sourceCountsByKind;
+    const coverage = dealCoverage({
+      sourceEventCount: 30,
+      emittedEventCount: 30,
+      sourceCountsByKind: { ...emptyCounts, deal_fulfilled: 30 },
+      emittedCountsByKind: { ...emptyCounts, deal_fulfilled: 30 },
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-bounded-deal-digest",
+      telemetry: { ...telemetry, events, dealEventCoverage: coverage },
+      finalTurnCount: 3000,
+      series: null,
+    });
+
+    expect(recap?.beats).toHaveLength(16);
+    expect(recap?.beats.every((beat) => beat.kind === "deal_fulfilled")).toBe(
+      true,
+    );
+    expect(recap?.summary).toBe("This match featured 30 fulfilled promises.");
+    expect(recap?.dealEventCoverage).toEqual(coverage);
+  });
+
+  it("qualifies legacy and explicitly partial deal totals instead of presenting them as complete", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-partial-deal-counts",
+      records: [],
+      roster: ROSTER,
+    });
+    const accepted = dealEvent(
+      1,
+      100,
+      "deal_accepted",
+      "Blitz accepted Atlas's non-aggression pact.",
+    );
+    const legacy = buildAgentMatchRecap({
+      runID: "run-legacy-deal-counts",
+      telemetry: { ...telemetry, events: [accepted] },
+      finalTurnCount: 100,
+      series: null,
+    });
+    const partialCoverage = dealCoverage({
+      authority: "decision_records",
+      complete: false,
+      sourceEventCount: 2,
+      emittedEventCount: 1,
+      droppedEventCount: 1,
+      sourceCountsByKind: {
+        ...dealCoverage().sourceCountsByKind,
+        deal_accepted: 2,
+      },
+      emittedCountsByKind: {
+        ...dealCoverage().emittedCountsByKind,
+        deal_accepted: 1,
+      },
+    });
+    const partial = buildAgentMatchRecap({
+      runID: "run-partial-deal-counts",
+      telemetry: {
+        ...telemetry,
+        events: [accepted],
+        dealEventCoverage: partialCoverage,
+      },
+      finalTurnCount: 100,
+      series: null,
+    });
+
+    expect(legacy).toMatchObject({
+      schemaVersion: 9,
+      summary:
+        "Available public deal evidence includes at least 1 accepted deal.",
+      dealEventCoverage: null,
+    });
+    expect(partial).toMatchObject({
+      schemaVersion: 9,
+      summary:
+        "Available public deal evidence includes at least 1 accepted deal.",
+      dealEventCoverage: partialCoverage,
+    });
+  });
+
+  it("does not fabricate exact totals from malformed complete-coverage metadata", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-malformed-deal-coverage",
+      records: [],
+      roster: ROSTER,
+    });
+    const accepted = dealEvent(
+      1,
+      100,
+      "deal_accepted",
+      "Blitz accepted Atlas's non-aggression pact.",
+    );
+    const fabricatedCoverage = dealCoverage({
+      sourceEventCount: 99,
+      emittedEventCount: 99,
+      sourceCountsByKind: {
+        ...dealCoverage().sourceCountsByKind,
+        deal_accepted: 99,
+      },
+      emittedCountsByKind: {
+        ...dealCoverage().emittedCountsByKind,
+        deal_accepted: 99,
+      },
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-malformed-deal-coverage",
+      telemetry: {
+        ...telemetry,
+        events: [accepted],
+        dealEventCoverage: fabricatedCoverage,
+      },
+      finalTurnCount: 100,
+      series: null,
+    });
+
+    expect(recap).toMatchObject({
+      summary:
+        "Available public deal evidence includes at least 1 accepted deal.",
+      dealEventCoverage: null,
+    });
+    expect(recap?.summary).not.toContain("99");
   });
 
   it("does not count accepted audit-unknown effect-looking events as recap facts", () => {
@@ -656,7 +867,7 @@ describe("buildAgentMatchRecap", () => {
     // Cap respected.
     expect(recap.beats.length).toBe(16);
 
-    // Betrayals never dropped, and never aggregated away.
+    // High-priority betrayals fit this fixture's cap and are not aggregated away.
     const betrayalBeats = recap.beats.filter(
       (beat) => beat.kind === "betrayal",
     );
@@ -693,12 +904,12 @@ describe("buildAgentMatchRecap", () => {
     const turns = recap.beats.map((beat) => beat.turnNumber);
     expect(turns).toEqual([...turns].sort((a, b) => a - b));
 
-    // The summary line reports the FULL raw counts (9+1+1=11 alliance
+    // The summary line reports the full non-deal raw counts (9+1+1=11 alliance
     // formations — c1/c2's repeated re-requests each independently
     // re-trigger `alliance_formed` once both directions have ever been
     // pending, a real `AgentSpectatorTelemetry.ts` characteristic, not
     // something this module fabricates — 2 betrayals, 18 first strikes),
-    // independent of how many beats survived the cap — "nothing is hidden".
+    // independent of how many beats survived the curated cap.
     expect(recap.summary).toBe(
       "This match featured 11 alliances, 2 betrayals and 18 first strikes.",
     );

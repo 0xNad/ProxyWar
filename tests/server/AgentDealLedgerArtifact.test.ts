@@ -84,7 +84,13 @@ async function writeRun(
     startedAt: Date.UTC(2026, 7, 8),
     completedAt: Date.UTC(2026, 7, 8, 0, 1),
     records,
-    roster: [],
+    roster: [A, B].map((seat) => ({
+      agentID: seat.agentID,
+      username: seat.username,
+      profile: "diplomatic" as const,
+      clientID: `CLNT_${seat.playerID}`,
+      brainType: "external-http" as const,
+    })),
     dealLedger,
   });
 }
@@ -206,6 +212,43 @@ describe("final structured-deal ledger artifact", () => {
     expect(firstBytes).not.toContain("PRIVATE PROMPT MUST NOT ENTER LEDGER");
     expect(firstBytes).not.toContain("PRIVATE REJECTED REASON");
     expect(firstBytes).not.toContain("deal_reject:PRIVATE");
+
+    const publicTelemetry = JSON.parse(
+      await fs.readFile(firstPaths.spectatorTelemetryPath, "utf8"),
+    );
+    const publicDealEvents = publicTelemetry.events.filter(
+      (event: { kind?: unknown }) =>
+        typeof event.kind === "string" && event.kind.startsWith("deal_"),
+    );
+    expect(publicTelemetry.dealEventCoverage).toMatchObject({
+      authority: "finalized_deal_ledger",
+      complete: true,
+      sourceEventCount: ledger.events.length,
+      emittedEventCount: ledger.events.length,
+      droppedEventCount: 0,
+    });
+    expect(
+      publicDealEvents.map((event: { kind: string }) => event.kind),
+    ).toEqual(ledger.events.map((event) => event.event));
+    expect(publicDealEvents).toHaveLength(ledger.events.length);
+    expect(publicDealEvents).toEqual([
+      expect.objectContaining({
+        kind: "deal_proposed",
+        actionKind: "deal_propose",
+        actionID: `deal:deal_proposed:${DEAL_ID}`,
+        evidenceLevel: "accepted_action",
+        actorAgentID: A.agentID,
+        targetAgentID: B.agentID,
+      }),
+      expect.objectContaining({
+        kind: "deal_accepted",
+        actionKind: "deal_accept",
+        actionID: `deal:deal_accepted:${DEAL_ID}`,
+        evidenceLevel: "accepted_action",
+        actorAgentID: B.agentID,
+        targetAgentID: A.agentID,
+      }),
+    ]);
 
     const artifact = JSON.parse(firstBytes);
     expect(JSON.stringify(artifact)).not.toContain("PRIVATE");

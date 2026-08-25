@@ -141,18 +141,26 @@ It also emits bounded `PROXYWAR_OWNER_CAPABILITY_EVIDENCE` policy-log records
 containing offered/chosen IDs, message digests, and each current inbound
 message's exact server-owned `messageEventID`, never raw bodies or model
 prompts. The sender-side selection record cannot invent that ID because the
-server assigns it after selection. After an isolated XP, use
-`owner-evidence-check.mjs` to verify unique exact observation IDs and the
-policy-reported sender-to-recipient join. The logger retains the complete
+server assigns it after selection. After an isolated XP, retain the replay and
+use `owner-evidence-check.mjs` with `--replay=PATH` to bind each sender's
+chronological selections to game-owned message intents, unique server IDs, and
+exact recipient observations. A message admitted on the final decision frame
+cannot appear in a later policy observation because no later decision exists;
+the replay-bound checker permits at most one such final-frame admission per
+sender and reports its exact ID separately as
+`terminalUnobservedMessageEventIDs`. It never calls that terminal admission an
+observation or response opportunity. Without `--replay`, message checking keeps
+the stricter legacy rule that every selection needs a recipient policy
+observation. The logger retains the complete
 supported horizon per policy: at most 600 deal selections, 600 message
 selections, 4,800 distinct observations from the eight-message inbox, and one
 spatial observation. Any future overflow emits explicit saturation evidence
 that the checker rejects; it never silently certifies a sample. If Coworld
 downloads a log as a whole-file Python bytes literal, run the strict bounded
 `owner-evidence-normalize.mjs` helper on the raw `--download-dir` artifact
-before checking it. This is not game-owned delivery authority: retain the
-Coworld request/result identities and require the replay message event as a
-separate hosted layer.
+before checking it. Replay binding proves server admission, not a recipient
+response or provider/billing truth; retain the Coworld request/result
+identities as their separate hosted layer.
 
 ## Optional spatial/minimap state
 

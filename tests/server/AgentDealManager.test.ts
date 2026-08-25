@@ -6,6 +6,7 @@ import {
   MAX_ACTIVE_DEALS_PER_AGENT,
   MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR,
 } from "../../src/server/agents/AgentDealManager";
+import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
 import type {
   AgentDecisionRecord,
   LegalAction,
@@ -303,6 +304,84 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
     ).toEqual([
       expect.objectContaining({ event: "deal_expired", dealID: secondNapID }),
     ]);
+  });
+
+  it("keeps an ordinary last-step TTL expiry at turn 500 while a finalize-only expiry uses turn 600", () => {
+    const { manager, records, beginStep } = registeredManager([A, B, C]);
+    const ordinaryDealID = "deal:P_A:P_B:non_aggression_pact:0";
+    const forceExpiredDealID = "deal:P_C:P_B:non_aggression_pact:3";
+    expect(
+      manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: proposeAction(B, "non_aggression_pact"),
+        turnNumber: 0,
+      }).result.accepted,
+    ).toBe(true);
+    beginStep(100);
+    beginStep(200);
+    beginStep(300);
+    expect(
+      manager.applyDealAction({
+        agentID: C.agentID,
+        playerID: C.playerID,
+        playerName: C.username,
+        action: proposeAction(B, "non_aggression_pact"),
+        turnNumber: 300,
+      }).result.accepted,
+    ).toBe(true);
+    beginStep(400);
+    beginStep(500);
+
+    const ordinaryExpiry = manager
+      .ledgerSnapshot()
+      .events.find(
+        (event) =>
+          event.event === "deal_expired" && event.dealID === ordinaryDealID,
+      );
+    expect(ordinaryExpiry).toMatchObject({
+      step: 5,
+      sourceTurnNumber: 500,
+    });
+
+    manager.finalize({ records, turnNumber: 600 });
+    const ledger = manager.ledgerSnapshot();
+    const forceExpiry = ledger.events.find(
+      (event) =>
+        event.event === "deal_expired" && event.dealID === forceExpiredDealID,
+    );
+    expect(
+      ledger.events.find(
+        (event) =>
+          event.event === "deal_expired" && event.dealID === ordinaryDealID,
+      ),
+    ).toMatchObject({ step: 5, sourceTurnNumber: 500 });
+    expect(forceExpiry).toMatchObject({ step: 5, sourceTurnNumber: 600 });
+
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "DEAL_TURN_PROVENANCE",
+      records,
+      roster: [A, B, C].map((seat) => ({
+        agentID: seat.agentID,
+        username: seat.username,
+        profile: "diplomatic" as const,
+        clientID: `CLNT_${seat.playerID}`,
+        brainType: "rule" as const,
+      })),
+      dealLedger: ledger,
+    });
+    const expiryTurns = new Map(
+      telemetry.events
+        .filter((event) => event.kind === "deal_expired")
+        .map((event) => [event.actionID, event.turnNumber]),
+    );
+    expect(expiryTurns).toEqual(
+      new Map([
+        [`deal:deal_expired:${ordinaryDealID}:${B.playerID}`, 500],
+        [`deal:deal_expired:${forceExpiredDealID}:${B.playerID}`, 600],
+      ]),
+    );
   });
 
   it("produces identical deal IDs for identical histories (determinism)", async () => {
