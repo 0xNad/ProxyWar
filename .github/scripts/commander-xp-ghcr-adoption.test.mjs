@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyManifestInspection,
   discoverSinglePlatformManifest,
   inspectSinglePlatformManifest,
 } from "./commander-xp-ghcr-adoption.mjs";
@@ -74,6 +75,63 @@ test("GHCR output-loss recovery discovers the remote config without rebuild equa
     discoverSinglePlatformManifest({
       tag: publicTag,
       rawBytes: Buffer.alloc(1024 * 1024 + 1),
+    }),
+  );
+});
+
+test("GHCR discovery accepts only an authenticated semantic not-found result", () => {
+  const publicTag = `ghcr.io/0xnad/proxywar-commander-public-base:${"5".repeat(40)}`;
+  assert.equal(
+    classifyManifestInspection({
+      tag: publicTag,
+      status: 0,
+      stderrBytes: Buffer.alloc(0),
+    }),
+    "available",
+  );
+  assert.equal(
+    classifyManifestInspection({
+      tag: publicTag,
+      status: 1,
+      stderrBytes: Buffer.from(`ERROR: ${publicTag}: not found\n`),
+    }),
+    "not-found",
+  );
+  assert.equal(
+    classifyManifestInspection({
+      tag: publicTag,
+      status: 1,
+      stderrBytes: Buffer.from(
+        `ERROR: failed to solve: ${publicTag}: manifest unknown\n`,
+      ),
+    }),
+    "not-found",
+  );
+});
+
+test("GHCR discovery fails closed on auth, network, transient, and oversized failures", () => {
+  const publicTag = `ghcr.io/0xnad/proxywar-commander-public-base:${"6".repeat(40)}`;
+  for (const message of [
+    `ERROR: unauthorized: authentication required for ${publicTag}`,
+    `ERROR: failed to do request: Head "https://ghcr.io/v2/...": dial tcp: network is unreachable`,
+    `ERROR: ${publicTag}: unexpected status from HEAD request: 503 Service Unavailable`,
+    `ERROR: ${publicTag}: 429 Too Many Requests`,
+    `ERROR: failed to solve: ${publicTag}: not found\nERROR: retry failed`,
+    "",
+  ]) {
+    assert.throws(() =>
+      classifyManifestInspection({
+        tag: publicTag,
+        status: 1,
+        stderrBytes: Buffer.from(message),
+      }),
+    );
+  }
+  assert.throws(() =>
+    classifyManifestInspection({
+      tag: publicTag,
+      status: 1,
+      stderrBytes: Buffer.alloc(64 * 1024 + 1),
     }),
   );
 });

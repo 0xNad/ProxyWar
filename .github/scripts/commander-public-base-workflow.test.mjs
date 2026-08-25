@@ -150,6 +150,26 @@ test("GHCR and Coworld output-loss windows have exact adoption authority", () =>
   );
 });
 
+test("intent recovery authenticates GHCR discovery and fails closed before push", () => {
+  const recovery = step("Resolve exact GHCR recovery state");
+  const login = recovery.indexOf("docker login ghcr.io");
+  const inspect = recovery.indexOf("docker buildx imagetools inspect --raw");
+  const classify = recovery.indexOf("classify-inspect");
+  assert.notEqual(login, -1);
+  assert.ok(login < inspect);
+  assert.ok(inspect < classify);
+  assert.match(recovery, /GHCR_INSPECT_STATUS=\$\?/);
+  assert.match(recovery, /REMOTE_GHCR_STATE=\$\(node/);
+  assert.match(recovery, /if test "\$REMOTE_GHCR_STATE" = available; then/);
+  assert.match(recovery, /elif test "\$REMOTE_GHCR_STATE" = not-found; then/);
+  assert.doesNotMatch(recovery, /imagetools inspect[\s\S]*2>\/dev\/null/);
+  assert.doesNotMatch(recovery, /\|\|\s*true/);
+
+  const push = step("Push one exact immutable GHCR image");
+  assert.match(push, /if: env\.REMOTE_GHCR_AVAILABLE != 'true'/);
+  assert.ok(workflow.indexOf("classify-inspect") < workflow.indexOf(push));
+});
+
 test("public-base workflow retains strict cumulative failure boundaries", () => {
   for (const stage of [
     "boundary-intent",

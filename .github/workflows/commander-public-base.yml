@@ -308,8 +308,17 @@ jobs:
           set -euo pipefail
           REMOTE_GHCR_AVAILABLE=false
           REMOTE_GHCR_ADOPTED=false
-          if docker buildx imagetools inspect --raw "$POLICY_TAG" \
-            > "$RUNNER_TEMP/remote-policy-manifest.json" 2>/dev/null; then
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          set +e
+          docker buildx imagetools inspect --raw "$POLICY_TAG" \
+            > "$RUNNER_TEMP/remote-policy-manifest.json" \
+            2> "$RUNNER_TEMP/remote-policy-inspect-error.txt"
+          GHCR_INSPECT_STATUS=$?
+          set -e
+          REMOTE_GHCR_STATE=$(node .github/scripts/commander-xp-ghcr-adoption.mjs \
+            classify-inspect "$POLICY_TAG" "$GHCR_INSPECT_STATUS" \
+            "$RUNNER_TEMP/remote-policy-inspect-error.txt")
+          if test "$REMOTE_GHCR_STATE" = available; then
             node .github/scripts/commander-xp-ghcr-adoption.mjs discover \
               "$POLICY_TAG" "$RUNNER_TEMP/remote-policy-manifest.json" \
               > "$RUNNER_TEMP/remote-policy-identity.json"
@@ -325,7 +334,6 @@ jobs:
               echo "Commander public-base GHCR tag exists without retained recovery authority" >&2
               exit 1
             fi
-            printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             docker pull "$POLICY_REPO_DIGEST" > "$RUNNER_TEMP/remote-policy-pull.txt"
             docker image inspect "$POLICY_REPO_DIGEST" > "$RUNNER_TEMP/remote-policy-inspect.json"
             test "$(docker image inspect --format '{{.Id}}' "$POLICY_REPO_DIGEST")" = "$REMOTE_CONFIG_DIGEST"
@@ -359,8 +367,11 @@ jobs:
             done
             POLICY_CONFIG_DIGEST="$REMOTE_CONFIG_DIGEST"
             REMOTE_GHCR_AVAILABLE=true
-          else
+          elif test "$REMOTE_GHCR_STATE" = not-found; then
             test "$RECOVERED_GHCR_BOUNDARY" = false
+          else
+            echo "Commander public-base GHCR discovery state is invalid" >&2
+            exit 1
           fi
           {
             echo "POLICY_CONFIG_DIGEST=$POLICY_CONFIG_DIGEST"
