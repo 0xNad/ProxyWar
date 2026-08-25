@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  openSync,
+  readSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
+import { TextDecoder } from "node:util";
 
 const SHA = /^[0-9a-f]{40}$/;
 const COWORLD_ID =
@@ -9,6 +16,30 @@ const COWORLD_ID =
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const ROUND_STATUS = new Set(["pending", "running", "completed", "failed"]);
 const EPISODE_STATUS = new Set(["pending", "running", "completed", "failed"]);
+const TERMINAL_STATUS = new Set(["completed", "failed"]);
+const MONITORING_FIELDS = [
+  "minimumTerminalRoundsPerMap",
+  "minimumCompletionRate",
+  "minimumScoreBearingCoverage",
+  "minimumSpawnValidityCoverage",
+  "minimumTelemetryCoverage",
+  "minimumReplayIntegrityCoverage",
+  "minimumArtifactIntegrityCoverage",
+  "warnAtEpisodeTimeoutFraction",
+];
+
+export const MAP_MONITOR_LIMITS = Object.freeze({
+  contractBytes: 64 * 1024,
+  evidenceBytes: 4 * 1024 * 1024,
+  objectMembers: 32,
+  comparisonSeatCounts: 16,
+  rungs: 16,
+  variantsPerRung: 32,
+  totalVariants: 256,
+  rounds: 128,
+  episodesPerRound: 128,
+  totalEpisodes: 4_096,
+});
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -20,10 +51,23 @@ function exactKeys(value, keys, label) {
     `${label} must be an object`,
   );
   invariant(
+    Object.keys(value).length <= MAP_MONITOR_LIMITS.objectMembers,
+    `${label} exceeds the object member limit`,
+  );
+  invariant(
     JSON.stringify(Object.keys(value).sort()) ===
       JSON.stringify([...keys].sort()),
     `${label} has unexpected fields`,
   );
+}
+
+function boundedArray(value, label, maximum, minimum = 0) {
+  invariant(Array.isArray(value), `${label} must be an array`);
+  invariant(
+    value.length >= minimum && value.length <= maximum,
+    `${label} length must be between ${minimum} and ${maximum}`,
+  );
+  return value;
 }
 
 function boundedInteger(value, label, minimum = 0) {
@@ -54,36 +98,181 @@ function timestamp(value, label) {
   return Date.parse(value);
 }
 
-function contractIndex(contract) {
+function sameFileIdentity(left, right) {
+  return ["dev", "ino", "size", "mtimeNs", "ctimeNs"].every(
+    (field) => left[field] === right[field],
+  );
+}
+
+export function readBoundedJsonFile(path, maximumBytes, label) {
   invariant(
-    contract?.schemaVersion === 1,
+    typeof path === "string" && path.length > 0 && !path.includes("\0"),
+    `${label} path is invalid`,
+  );
+  boundedInteger(maximumBytes, `${label} maximumBytes`, 1);
+  invariant(
+    Number.isSafeInteger(fsConstants.O_NOFOLLOW) &&
+      Number.isSafeInteger(fsConstants.O_NONBLOCK),
+    "this platform does not support safe no-follow file reads",
+  );
+
+  const descriptor = openSync(
+    path,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+  );
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    invariant(before.isFile(), `${label} must be a regular file`);
+    invariant(before.size > 0n, `${label} must not be empty`);
+    invariant(
+      before.size <= BigInt(maximumBytes),
+      `${label} exceeds the ${maximumBytes}-byte limit`,
+    );
+
+    const size = Number(before.size);
+    const bytes = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const read = readSync(descriptor, bytes, offset, size - offset, null);
+      invariant(read > 0, `${label} changed or truncated while being read`);
+      offset += read;
+    }
+    const trailingByte = Buffer.allocUnsafe(1);
+    invariant(
+      readSync(descriptor, trailingByte, 0, 1, null) === 0,
+      `${label} grew while being read`,
+    );
+    const after = fstatSync(descriptor, { bigint: true });
+    invariant(
+      sameFileIdentity(before, after),
+      `${label} identity changed while being read`,
+    );
+
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new Error(`${label} is not valid JSON`, { cause: error });
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function contractIndex(contract) {
+  exactKeys(
+    contract,
+    [
+      "schemaVersion",
+      "comparisonPoolSeatCounts",
+      "competitionRungs",
+      "postReleaseMonitoring",
+    ],
+    "map contract",
+  );
+  invariant(
+    contract.schemaVersion === 1,
     "map contract schemaVersion must be 1",
   );
-  invariant(
-    Array.isArray(contract.competitionRungs),
-    "map contract competitionRungs must be an array",
+  boundedArray(
+    contract.comparisonPoolSeatCounts,
+    "map contract comparisonPoolSeatCounts",
+    MAP_MONITOR_LIMITS.comparisonSeatCounts,
+    2,
   );
-  const byVariant = new Map();
-  for (const rung of contract.competitionRungs) {
-    boundedInteger(rung?.seats, "map contract seats", 1);
+  boundedArray(
+    contract.competitionRungs,
+    "map contract competitionRungs",
+    MAP_MONITOR_LIMITS.rungs,
+    1,
+  );
+  exactKeys(
+    contract.postReleaseMonitoring,
+    MONITORING_FIELDS,
+    "map monitoring thresholds",
+  );
+  boundedInteger(
+    contract.postReleaseMonitoring.minimumTerminalRoundsPerMap,
+    "minimumTerminalRoundsPerMap",
+    1,
+  );
+  for (const field of MONITORING_FIELDS.slice(1)) {
+    const value = contract.postReleaseMonitoring[field];
     invariant(
-      Array.isArray(rung.variants) && rung.variants.length > 0,
-      `map contract rung ${rung.seats} must contain variants`,
+      typeof value === "number" &&
+        Number.isFinite(value) &&
+        value > 0 &&
+        value <= 1,
+      `${field} must be in (0, 1]`,
     );
+  }
+
+  const byVariant = new Map();
+  const poolsBySeats = new Map();
+  let previousSeats = 0;
+  for (const rung of contract.competitionRungs) {
+    exactKeys(rung, ["seats", "variants"], "map contract rung");
+    boundedInteger(rung.seats, "map contract seats", 1);
+    invariant(
+      rung.seats > previousSeats,
+      "map contract seat counts must be strictly increasing",
+    );
+    previousSeats = rung.seats;
+    boundedArray(
+      rung.variants,
+      `map contract rung ${rung.seats} variants`,
+      MAP_MONITOR_LIMITS.variantsPerRung,
+      1,
+    );
+    const maps = [];
     for (let index = 0; index < rung.variants.length; index += 1) {
       const variant = rung.variants[index];
-      invariant(
-        typeof variant?.id === "string" && !byVariant.has(variant.id),
-        "map contract variant ids must be unique strings",
+      exactKeys(
+        variant,
+        [
+          "id",
+          "map",
+          "mapSize",
+          "maxDecisionSteps",
+          "turnsPerDecisionStep",
+          "episodeTimeoutSeconds",
+        ],
+        `map contract rung ${rung.seats} variant`,
       );
       invariant(
-        typeof variant.map === "string" && variant.map.length > 0,
+        typeof variant.id === "string" &&
+          variant.id.startsWith(`tournament-${rung.seats}p-`) &&
+          /^tournament-[1-9]\d*p-[a-z0-9-]+$/.test(variant.id) &&
+          !byVariant.has(variant.id),
+        "map contract variant ids must be unique and match their rung",
+      );
+      invariant(
+        typeof variant.map === "string" && /^[A-Za-z0-9]+$/.test(variant.map),
         `${variant.id} must declare a map`,
+      );
+      invariant(
+        typeof variant.mapSize === "string" &&
+          /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(variant.mapSize),
+        `${variant.id} mapSize is invalid`,
+      );
+      boundedInteger(
+        variant.maxDecisionSteps,
+        `${variant.id} maxDecisionSteps`,
+        1,
+      );
+      boundedInteger(
+        variant.turnsPerDecisionStep,
+        `${variant.id} turnsPerDecisionStep`,
+        1,
       );
       boundedInteger(
         variant.episodeTimeoutSeconds,
         `${variant.id} episodeTimeoutSeconds`,
         1,
+      );
+      invariant(
+        byVariant.size < MAP_MONITOR_LIMITS.totalVariants,
+        "map contract exceeds total variant limit",
       );
       byVariant.set(variant.id, {
         id: variant.id,
@@ -92,7 +281,33 @@ function contractIndex(contract) {
         poolIndex: index,
         episodeTimeoutSeconds: variant.episodeTimeoutSeconds,
       });
+      maps.push(variant.map);
     }
+    invariant(
+      new Set(maps).size === maps.length,
+      `map contract rung ${rung.seats} contains duplicate maps`,
+    );
+    poolsBySeats.set(rung.seats, maps);
+  }
+
+  const comparisonPools = contract.comparisonPoolSeatCounts.map((seats) => {
+    boundedInteger(seats, "comparison pool seat count", 1);
+    invariant(
+      poolsBySeats.has(seats),
+      `comparison pool references unknown ${seats}-seat rung`,
+    );
+    return poolsBySeats.get(seats);
+  });
+  invariant(
+    new Set(contract.comparisonPoolSeatCounts).size ===
+      contract.comparisonPoolSeatCounts.length,
+    "comparison pool seat counts must be unique",
+  );
+  for (const pool of comparisonPools.slice(1)) {
+    invariant(
+      JSON.stringify(pool) === JSON.stringify(comparisonPools[0]),
+      "comparison rungs must use the same ordered map pool",
+    );
   }
   return byVariant;
 }
@@ -224,10 +439,12 @@ export function buildMapMonitoringReport(contract, evidence) {
     DIGEST.test(evidence.commissionerMigrationVersion),
     "evidence commissionerMigrationVersion is invalid",
   );
-  invariant(Array.isArray(evidence.rounds), "evidence rounds must be an array");
+  boundedArray(evidence.rounds, "evidence rounds", MAP_MONITOR_LIMITS.rounds);
 
   const summaries = new Map();
   const observedSeatCounts = new Set();
+  const roundIds = new Set();
+  let totalEpisodes = 0;
   for (const round of evidence.rounds) {
     exactKeys(
       round,
@@ -239,9 +456,23 @@ export function buildMapMonitoringReport(contract, evidence) {
         /^round_[0-9a-f-]{36}$/.test(round.roundId),
       "roundId is invalid",
     );
+    invariant(
+      !roundIds.has(round.roundId),
+      "evidence contains duplicate roundId",
+    );
+    roundIds.add(round.roundId);
     boundedInteger(round.roundNumber, "roundNumber", 1);
     invariant(ROUND_STATUS.has(round.status), "round status is invalid");
-    invariant(Array.isArray(round.episodes), "round episodes must be an array");
+    boundedArray(
+      round.episodes,
+      "round episodes",
+      MAP_MONITOR_LIMITS.episodesPerRound,
+    );
+    totalEpisodes += round.episodes.length;
+    invariant(
+      totalEpisodes <= MAP_MONITOR_LIMITS.totalEpisodes,
+      "evidence exceeds total episode limit",
+    );
     const variant = variants.get(round.variantId);
     invariant(
       variant !== undefined,
@@ -265,6 +496,11 @@ export function buildMapMonitoringReport(contract, evidence) {
       );
       requestIds.add(episode?.episodeRequestId);
       const durationSeconds = validateEpisode(episode, variant);
+      invariant(
+        !TERMINAL_STATUS.has(round.status) ||
+          TERMINAL_STATUS.has(episode.status),
+        "terminal round contains nonterminal episode",
+      );
       summary.episodes.scheduled += 1;
       summary.episodes[episode.status] += 1;
       if (episode.status !== "completed") continue;
@@ -421,8 +657,16 @@ function main(args) {
     "usage: coworld-map-monitor.mjs <map-contract.json> <evidence.json>",
   );
   const [contractPath, evidencePath] = args;
-  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-  const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+  const contract = readBoundedJsonFile(
+    contractPath,
+    MAP_MONITOR_LIMITS.contractBytes,
+    "map contract",
+  );
+  const evidence = readBoundedJsonFile(
+    evidencePath,
+    MAP_MONITOR_LIMITS.evidenceBytes,
+    "map evidence",
+  );
   process.stdout.write(
     `${JSON.stringify(buildMapMonitoringReport(contract, evidence), null, 2)}\n`,
   );

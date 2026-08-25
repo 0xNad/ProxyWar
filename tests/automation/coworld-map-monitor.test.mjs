@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { buildMapMonitoringReport } from "../../.github/scripts/coworld-map-monitor.mjs";
+import {
+  buildMapMonitoringReport,
+  MAP_MONITOR_LIMITS,
+  readBoundedJsonFile,
+} from "../../.github/scripts/coworld-map-monitor.mjs";
 
 const contract = JSON.parse(
   readFileSync(
@@ -18,9 +30,9 @@ const SIXTEEN_VARIANTS = contract.competitionRungs.find(
 ).variants;
 
 function episode(index, overrides = {}) {
-  const second = String(index).padStart(2, "0");
+  const suffix = String(index).padStart(12, "0");
   return {
-    episodeRequestId: `ereq_11111111-1111-1111-1111-1111111111${second}`,
+    episodeRequestId: `ereq_11111111-1111-1111-1111-${suffix}`,
     status: "completed",
     participantCount: 16,
     scoreCount: 16,
@@ -40,9 +52,9 @@ function episode(index, overrides = {}) {
 }
 
 function round(variant, index, overrides = {}) {
-  const second = String(index).padStart(2, "0");
+  const suffix = String(index).padStart(12, "0");
   return {
-    roundId: `round_22222222-2222-2222-2222-2222222222${second}`,
+    roundId: `round_22222222-2222-2222-2222-${suffix}`,
     roundNumber: 2000 + index,
     variantId: variant.id,
     map: variant.map,
@@ -89,6 +101,22 @@ test("map monitor reports complete aggregate-only coverage for one full rotation
   assert.equal(report.maps[4].decisions.fallback, 4);
   const serialized = JSON.stringify(report);
   assert.doesNotMatch(serialized, /ereq_|round_|policy|participant/i);
+});
+
+test("every map rejects nonterminal episodes hidden inside a terminal round", () => {
+  for (let index = 0; index < SIXTEEN_VARIANTS.length; index += 1) {
+    for (const status of ["pending", "running"]) {
+      const rounds = fullRotation();
+      rounds[index] = round(SIXTEEN_VARIANTS[index], index, {
+        episodes: [episode(index, { status, completedAt: null })],
+      });
+      assert.throws(
+        () => buildMapMonitoringReport(contract, evidence(rounds)),
+        /terminal round contains nonterminal episode/,
+        `${SIXTEEN_VARIANTS[index].map} accepted ${status} episode evidence`,
+      );
+    }
+  }
 });
 
 test("map monitor exposes absent comparison maps as insufficient evidence", () => {
@@ -188,5 +216,94 @@ test("map monitor fails closed on unsupported or mislabeled variants", () => {
   assert.throws(
     () => buildMapMonitoringReport(contract, evidence([mislabeled])),
     /map identity mismatch/,
+  );
+});
+
+test("bounded JSON reader rejects links, non-files, oversized bytes, and invalid UTF-8", () => {
+  const directory = mkdtempSync(join(tmpdir(), "proxywar-map-monitor-"));
+  try {
+    const validPath = join(directory, "valid.json");
+    writeFileSync(validPath, '{"schemaVersion":1}');
+    assert.deepEqual(readBoundedJsonFile(validPath, 64, "fixture"), {
+      schemaVersion: 1,
+    });
+
+    const linkPath = join(directory, "linked.json");
+    symlinkSync(validPath, linkPath);
+    assert.throws(() => readBoundedJsonFile(linkPath, 64, "fixture"));
+    assert.throws(
+      () => readBoundedJsonFile(directory, 64, "fixture"),
+      /must be a regular file/,
+    );
+
+    const oversizedPath = join(directory, "oversized.json");
+    writeFileSync(oversizedPath, Buffer.alloc(65, 0x20));
+    assert.throws(
+      () => readBoundedJsonFile(oversizedPath, 64, "fixture"),
+      /exceeds the 64-byte limit/,
+    );
+
+    const invalidUtf8Path = join(directory, "invalid-utf8.json");
+    writeFileSync(invalidUtf8Path, Buffer.from([0x7b, 0xc3, 0x28, 0x7d]));
+    assert.throws(
+      () => readBoundedJsonFile(invalidUtf8Path, 64, "fixture"),
+      /encoded data|encoding/i,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("monitor rejects oversized round, episode, total, and member structures", () => {
+  const excessiveRounds = Array.from(
+    { length: MAP_MONITOR_LIMITS.rounds + 1 },
+    (_, index) => round(SIXTEEN_VARIANTS[0], index),
+  );
+  assert.throws(
+    () => buildMapMonitoringReport(contract, evidence(excessiveRounds)),
+    /evidence rounds length/,
+  );
+
+  const excessiveEpisodes = Array.from(
+    { length: MAP_MONITOR_LIMITS.episodesPerRound + 1 },
+    (_, index) => episode(index),
+  );
+  assert.throws(
+    () =>
+      buildMapMonitoringReport(
+        contract,
+        evidence([
+          round(SIXTEEN_VARIANTS[0], 0, { episodes: excessiveEpisodes }),
+        ]),
+      ),
+    /round episodes length/,
+  );
+
+  let remaining = MAP_MONITOR_LIMITS.totalEpisodes + 1;
+  let episodeIndex = 0;
+  const excessiveTotal = [];
+  while (remaining > 0) {
+    const count = Math.min(remaining, MAP_MONITOR_LIMITS.episodesPerRound);
+    excessiveTotal.push(
+      round(SIXTEEN_VARIANTS[0], excessiveTotal.length, {
+        episodes: Array.from({ length: count }, () =>
+          episode(episodeIndex++, { fallbackCount: 0 }),
+        ),
+      }),
+    );
+    remaining -= count;
+  }
+  assert.throws(
+    () => buildMapMonitoringReport(contract, evidence(excessiveTotal)),
+    /total episode limit/,
+  );
+
+  const excessiveMembers = evidence([]);
+  for (let index = 0; index <= MAP_MONITOR_LIMITS.objectMembers; index += 1) {
+    excessiveMembers[`unexpected${index}`] = index;
+  }
+  assert.throws(
+    () => buildMapMonitoringReport(contract, excessiveMembers),
+    /object member limit/,
   );
 });
