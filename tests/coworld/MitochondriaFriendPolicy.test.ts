@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { createProductionCommanderBrain } from "../../coworld-adapter/commander-starter/commander-player";
 import {
+  mitoMessageAgentName,
   mitoRelationshipOverride,
   mitoSpawnDecision,
   mitoTransportFallbackResponse,
@@ -161,6 +162,12 @@ function decide(
 }
 
 describe("MitochondriaFriend", () => {
+  it("uses the exact current Mito seat name for social generation", () => {
+    expect(
+      mitoMessageAgentName({ username: "MitochondriaFriend 2" }),
+    ).toBe("MitochondriaFriend 2");
+  });
+
   it("opens a friendly conversation while expanding in the primary lane", async () => {
     const { choose, messages } = await createPolicy();
     const decision = decide(choose, [ATTACK_AURI, EXPAND, HOLD, MESSAGE_AURI]);

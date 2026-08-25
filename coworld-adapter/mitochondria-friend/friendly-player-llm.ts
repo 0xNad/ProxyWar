@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type {
   AgentBrainInput,
   AgentDecision,
+  AgentObservation,
 } from "../../src/server/agents/AgentTypes";
 import {
   CommanderBedrockProvider,
@@ -32,6 +33,12 @@ import {
   createMitochondriaFriendLlmPolicy,
   type MitoLlmPreparation,
 } from "./friendly-policy.mjs";
+
+export function mitoMessageAgentName(
+  observation: Pick<AgentObservation, "username">,
+): string {
+  return observation.username;
+}
 
 export function withMitoDiplomacy(
   decision: AgentDecision,
@@ -234,7 +241,7 @@ async function main(): Promise<void> {
           const messagePromise = preparation.messageIntent
             ? generateOpenEndedMessage({
                 provider,
-                agentName: "MitochondriaFriend",
+                agentName: mitoMessageAgentName(input.observation),
                 personality:
                   "Warm, cooperative, specific, and trustworthy, but never gullible. Prefer peace, trade, reciprocal support, and durable alliances; ask concrete questions and make only promises you can honor.",
                 intent: preparation.messageIntent,
