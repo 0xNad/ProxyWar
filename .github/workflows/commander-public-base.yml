@@ -540,7 +540,9 @@ jobs:
             --arg provenance "sha256:$SOURCE_PROVENANCE_SHA256" \
             '{sourceSha:$source,sourceTreeSha:$tree,sourceProvenanceDigest:$provenance,buildProvenanceDigest:$build,ociImage:$image,ociDigest:$digest,runtimeEntrypoint:["node","--import","tsx","/app/proxywar/coworld-adapter/src/commander-player.ts"],purpose:"commander-public-base-materialization-v2"}')
           POLICY_IDENTITY_SHA256=$(printf '%s' "$POLICY_IDENTITY_JSON" | sha256sum | cut -d' ' -f1)
-          POLICY_NAME="proxywar-commander-public-base-v2-$POLICY_IDENTITY_SHA256"
+          # Coworld policy names are capped at 64 characters. Use the complete
+          # identity as the name so remote adoption never relies on a truncated hash.
+          POLICY_NAME="$POLICY_IDENTITY_SHA256"
           {
             echo "POLICY_IDENTITY_SHA256=$POLICY_IDENTITY_SHA256"
             echo "POLICY_NAME=$POLICY_NAME"
