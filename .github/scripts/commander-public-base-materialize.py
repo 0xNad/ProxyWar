@@ -53,6 +53,13 @@ POLICY_NAME = re.compile(r"^proxywar-commander-public-base-v2-[0-9a-f]{64}$")
 POLICY_PURPOSE = "commander-public-base-materialization-v2"
 PUBLIC_IMAGE_ATTEMPTS = 12
 PUBLIC_IMAGE_INTERVAL_SECONDS = 5
+VALIDATION_BODY_BYTES_MAX = 32 * 1024
+VALIDATION_DETAIL_COUNT_MAX = 8
+VALIDATION_LOCATION_COUNT_MAX = 8
+VALIDATION_LOCATION_INT_MAX = 2**31 - 1
+VALIDATION_LOCATION_TEXT_MAX = 64
+VALIDATION_TYPE_TEXT_MAX = 96
+VALIDATION_MESSAGE_TEXT_MAX = 240
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -69,6 +76,78 @@ def exact_json_response(response: Any) -> tuple[bytes, Any]:
     body = response.content
     response.raise_for_status()
     return body, response.json()
+
+
+def bounded_ascii_text(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return "".join(
+        character if " " <= character <= "~" else "?" for character in value
+    )[:limit]
+
+
+def fastapi_validation_projection(response: Any) -> dict[str, Any]:
+    projection: dict[str, Any] = {"status": 422, "detail": []}
+    body = response.content
+    if not isinstance(body, bytes) or len(body) > VALIDATION_BODY_BYTES_MAX:
+        return projection
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return projection
+    if not isinstance(payload, dict) or not isinstance(payload.get("detail"), list):
+        return projection
+    for raw_detail in payload["detail"][:VALIDATION_DETAIL_COUNT_MAX]:
+        if not isinstance(raw_detail, dict):
+            continue
+        raw_location = raw_detail.get("loc")
+        detail_type = bounded_ascii_text(
+            raw_detail.get("type"), VALIDATION_TYPE_TEXT_MAX
+        )
+        message = bounded_ascii_text(
+            raw_detail.get("msg"), VALIDATION_MESSAGE_TEXT_MAX
+        )
+        if (
+            not isinstance(raw_location, (list, tuple))
+            or detail_type is None
+            or message is None
+        ):
+            continue
+        location: list[str | int] = []
+        valid_location = True
+        for segment in raw_location[:VALIDATION_LOCATION_COUNT_MAX]:
+            if isinstance(segment, bool):
+                valid_location = False
+                break
+            if isinstance(segment, int):
+                if abs(segment) > VALIDATION_LOCATION_INT_MAX:
+                    valid_location = False
+                    break
+                location.append(segment)
+                continue
+            bounded_segment = bounded_ascii_text(
+                segment, VALIDATION_LOCATION_TEXT_MAX
+            )
+            if bounded_segment is None:
+                valid_location = False
+                break
+            location.append(bounded_segment)
+        if not valid_location:
+            continue
+        projection["detail"].append(
+            {"loc": location, "type": detail_type, "msg": message}
+        )
+    return projection
+
+
+def exact_policy_completion_response(response: Any) -> tuple[bytes, Any]:
+    if response.status_code == 422:
+        projection = fastapi_validation_projection(response)
+        raise RuntimeError(
+            "Commander public base policy validation failed: "
+            + json.dumps(projection, sort_keys=True, separators=(",", ":"))
+        )
+    return exact_json_response(response)
 
 
 def safe_image(image: ContainerImageResponse) -> dict[str, Any]:
@@ -331,7 +410,7 @@ def create_policy(
         json=payload,
         timeout=120.0,
     )
-    response_bytes, response_json = exact_json_response(response)
+    response_bytes, response_json = exact_policy_completion_response(response)
     completed = PolicyVersionResponse.model_validate(response_json)
     if completed.submit_error is not None:
         raise RuntimeError(
@@ -541,15 +620,16 @@ def materialize(args: argparse.Namespace) -> None:
         public_image, policy = validate_recovered_policy(policy_receipt, args)
         shutil.copyfile(recovered_policy_path, policy_path)
     else:
-        policy = discover_policy(args, image["id"])
+        with CoworldUploadClient.from_login(server_url=SERVER) as client:
+            public_image = refreshed_public_image(client, args, image["id"])
+        policy = discover_policy(args, public_image["id"])
         if policy is not None and not args.allow_remote_adoption:
             raise RuntimeError(
                 "Commander public base policy exists without recovery authority"
             )
         with CoworldUploadClient.from_login(server_url=SERVER) as client:
             if policy is None:
-                policy = create_policy(client, args, image["id"])
-            public_image = refreshed_public_image(client, args, image["id"])
+                policy = create_policy(client, args, public_image["id"])
         write_receipt(
             policy_path,
             {
