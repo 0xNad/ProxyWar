@@ -10,6 +10,7 @@ import {
   selectSuccessfulProductionRun,
   validateCanonicalSourceRelease,
   validateCommissionerImageInspection,
+  validateCommissionerOnlyManifestPatch,
   validateFinalMigration,
   validateReleaseArtifact,
 } from "../../.github/scripts/coworld-commissioner-production.mjs";
@@ -113,11 +114,41 @@ test("resolves only successful exact-source main CI and production runs", () => 
           display_title: `Coworld production ${sha}`,
           created_at: "2026-08-25T00:02:00Z",
         },
+        {
+          id: 4,
+          head_sha: sha,
+          head_branch: "main",
+          event: "schedule",
+          status: "completed",
+          conclusion: "success",
+          display_title: "Coworld production queue-drain",
+          created_at: "2026-08-25T00:03:00Z",
+        },
       ],
     },
     sha,
   );
-  assert.equal(release.releaseRunId, 3);
+  assert.equal(release.releaseRunId, 4);
+  assert.equal(
+    selectSuccessfulProductionRun(
+      {
+        workflow_runs: [
+          {
+            id: 5,
+            head_sha: sha,
+            head_branch: "main",
+            event: "workflow_dispatch",
+            status: "completed",
+            conclusion: "success",
+            display_title: "Coworld production issue-177",
+            created_at: "2026-08-25T00:04:00Z",
+          },
+        ],
+      },
+      sha,
+    ).releaseRunId,
+    5,
+  );
   assert.throws(
     () =>
       selectSuccessfulProductionRun(
@@ -180,6 +211,8 @@ test("validates certified canonical exact-source package and league binding", ()
     league: {
       id: leagueId,
       game: { coworld_id: sourceId },
+      commissioner_key: "platform",
+      rounds_paused_at: null,
       commissioner_migration_version: `sha256:${"5".repeat(64)}`,
     },
   });
@@ -195,6 +228,56 @@ test("validates certified canonical exact-source package and league binding", ()
       }),
     /canonical ProxyWar Coworld/,
   );
+});
+
+test("commissioner-only manifest comparison rejects every unrelated mutation", () => {
+  const sourceManifest = manifest("0.1.62", sourceImage);
+  const patchedManifest = manifest("0.1.63", patchedImage);
+  assert.doesNotThrow(() =>
+    validateCommissionerOnlyManifestPatch({
+      sourceManifest,
+      patchedManifest,
+      sourceCommissionerImage: sourceImage,
+      patchedCommissionerImage: patchedImage,
+    }),
+  );
+  const corruptions = [
+    (value) => {
+      value.game.runnable.image = "img_33333333-3333-3333-3333-333333333333";
+    },
+    (value) => {
+      value.player[0].image = "img_33333333-3333-3333-3333-333333333333";
+    },
+    (value) => {
+      value.optimizer.push({
+        id: "unexpected-optimizer",
+        image: "img_33333333-3333-3333-3333-333333333333",
+      });
+    },
+    (value) => {
+      value.game.replay_viewer.bundle = `sha256:${"8".repeat(64)}`;
+    },
+    (value) => {
+      value.game.environment = { PROXYWAR_UNEXPECTED: "1" };
+    },
+    (value) => {
+      value.game.docs.pages[0].content.value += "changed=true\n";
+    },
+  ];
+  for (const mutate of corruptions) {
+    const corrupted = structuredClone(patchedManifest);
+    mutate(corrupted);
+    assert.throws(
+      () =>
+        validateCommissionerOnlyManifestPatch({
+          sourceManifest,
+          patchedManifest: corrupted,
+          sourceCommissionerImage: sourceImage,
+          patchedCommissionerImage: patchedImage,
+        }),
+      /changed outside/,
+    );
+  }
 });
 
 test("release validation binds the exact local commissioner image and deduplicated image inventory", () => {
@@ -306,10 +389,13 @@ test("final migration requires changed migration identity and exact patched bind
     expectedVersion: "0.1.63",
     preflight,
     patch,
+    sourceStatus: status(sourceId, "0.1.62", sourceImage),
     status: patchedStatus,
     league: {
       id: leagueId,
       game: { coworld_id: patchedId },
+      commissioner_key: "platform",
+      rounds_paused_at: null,
       commissioner_migration_version: next,
     },
   });
@@ -322,10 +408,13 @@ test("final migration requires changed migration identity and exact patched bind
         expectedVersion: "0.1.63",
         preflight,
         patch,
+        sourceStatus: status(sourceId, "0.1.62", sourceImage),
         status: patchedStatus,
         league: {
           id: leagueId,
           game: { coworld_id: patchedId },
+          commissioner_key: "platform",
+          rounds_paused_at: null,
           commissioner_migration_version: previous,
         },
       }),

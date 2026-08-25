@@ -126,6 +126,7 @@ test("commissioner migration is an operator-only exact-source protected producti
       "COWORLD_API_TOKEN",
       "COWORLD_API_TOKEN",
       "COWORLD_API_TOKEN",
+      "COWORLD_API_TOKEN",
     ],
   );
 });
@@ -176,6 +177,17 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
   assert.match(commissionerProduction, /validate-final/);
   assert.match(
     commissionerProduction,
+    /coworld-commissioner-mutation-receipt\.json/,
+  );
+  assert.match(
+    commissionerProduction,
+    /coworld-commissioner-reconciliation-state\.json/,
+  );
+  assert.match(commissionerProduction, /recoveryProcedure/);
+  assert.match(commissionerProduction, /automaticRollback:false/);
+  assert.match(commissionerProduction, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(
+    commissionerProduction,
     /coworld-commissioner-migration-evidence\.json/,
   );
   assert.match(commissionerProduction, /state=success/);
@@ -185,7 +197,19 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
   assert.doesNotMatch(commissionerProduction, /echo.*COWORLD_API_TOKEN/);
   assert.doesNotMatch(
     commissionerProduction,
-    /upload-artifact[\s\S]{0,500}(credentials|\.softmax|COWORLD_API_TOKEN)/i,
+    /path:\s*.*(credentials|\.softmax|COWORLD_API_TOKEN)/i,
+  );
+  assert.deepEqual(
+    [
+      ...commissionerProduction.matchAll(
+        /path:\s*\$\{\{ runner\.temp \}\}\/([^\n]+)/g,
+      ),
+    ].map((match) => match[1]),
+    [
+      "coworld-commissioner-mutation-receipt.json",
+      "coworld-commissioner-reconciliation-state.json",
+      "coworld-commissioner-migration-evidence.json",
+    ],
   );
 });
 

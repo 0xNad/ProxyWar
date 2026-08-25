@@ -276,6 +276,20 @@ jobs:
           node .github/scripts/coworld-commissioner-production.mjs parse-patch "$OUTPUT" > "$RUNNER_TEMP/patch.json"
           test "$(jq -r .patchedCoworldVersion "$RUNNER_TEMP/patch.json")" = "$PATCH_VERSION"
           echo "patched_coworld_id=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")" >> "$GITHUB_OUTPUT"
+      - name: Write immediate resumable mutation receipt
+        run: |
+          set -euo pipefail
+          jq -s '.[0] + {patch:.[1],stage:"mutation-returned",workflowRunId:$run,recoveryProcedure:"Rerun this workflow with the same source_sha. It will re-resolve the current exact-source canonical Coworld, patch a fresh version with the same immutable commissioner image, recertify, and require a new platform migration identity plus league binding. No automatic rollback is claimed."}' \
+            --argjson run "$GITHUB_RUN_ID" \
+            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" \
+            > "$RUNNER_TEMP/coworld-commissioner-mutation-receipt.json"
+      - name: Upload immediate immutable mutation receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-mutation-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-mutation-receipt.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Wait for certification, canonicality, commissioner migration, and league binding
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
@@ -304,7 +318,8 @@ jobs:
           done
           test "$BOUND" = true
           node .github/scripts/coworld-commissioner-production.mjs validate-final "$SOURCE_SHA" "$PATCH_VERSION" \
-            "$RUNNER_TEMP/source-preflight.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
+            "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
             > "$RUNNER_TEMP/migration-evidence-core.json"
           jq -s '.[0] + .[1] + {controlSha:$control_sha,mainCiRunId:$main_ci,releaseRunId:$release_run,releaseArtifactId:$artifact_id,releaseArtifactName:$artifact_name,releaseArtifactBytes:$artifact_bytes,workflowRunId:$workflow_run}' \
             --arg control_sha "$CONTROL_SHA" --argjson main_ci "$MAIN_CI_RUN_ID" --argjson release_run "$RELEASE_RUN_ID" \
@@ -312,6 +327,53 @@ jobs:
             --argjson artifact_bytes "$RELEASE_ARTIFACT_BYTES" --argjson workflow_run "$GITHUB_RUN_ID" \
             "$RUNNER_TEMP/migration-evidence-core.json" "$RUNNER_TEMP/image-validation.json" \
             > "$RUNNER_TEMP/coworld-commissioner-migration-evidence.json"
+      - name: Capture resumable reconciliation state
+        if: ${{ always() }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          PATCHED_COWORLD_ID: ${{ steps.patch.outputs.patched_coworld_id }}
+        run: |
+          set -uo pipefail
+          for path in source-preflight-recheck.json patch.json patched-status.json patched-league.json; do
+            test -f "$RUNNER_TEMP/$path" || printf '{}\n' > "$RUNNER_TEMP/$path"
+          done
+          STATUS_EXIT=not-attempted
+          LEAGUE_EXIT=not-attempted
+          if [[ "$PATCHED_COWORLD_ID" =~ ^cow_[0-9a-f-]{36}$ ]]; then
+            node .github/scripts/coworld-authenticated-command.mjs status "$PATCHED_COWORLD_ID" --json \
+              > "$RUNNER_TEMP/reconciliation-status.json"
+            STATUS_CODE=$?
+            STATUS_EXIT=$STATUS_CODE
+            test "$STATUS_CODE" -eq 0 || printf '{}\n' > "$RUNNER_TEMP/reconciliation-status.json"
+            node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json \
+              > "$RUNNER_TEMP/reconciliation-league.json"
+            LEAGUE_CODE=$?
+            LEAGUE_EXIT=$LEAGUE_CODE
+            test "$LEAGUE_CODE" -eq 0 || printf '{}\n' > "$RUNNER_TEMP/reconciliation-league.json"
+          else
+            printf '{}\n' > "$RUNNER_TEMP/reconciliation-status.json"
+            printf '{}\n' > "$RUNNER_TEMP/reconciliation-league.json"
+          fi
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg controlSha "$CONTROL_SHA" \
+            --argjson workflowRunId "$GITHUB_RUN_ID" \
+            --arg statusExit "$STATUS_EXIT" \
+            --arg leagueExit "$LEAGUE_EXIT" \
+            --slurpfile source "$RUNNER_TEMP/source-preflight-recheck.json" \
+            --slurpfile patch "$RUNNER_TEMP/patch.json" \
+            --slurpfile observedStatus "$RUNNER_TEMP/reconciliation-status.json" \
+            --slurpfile observedLeague "$RUNNER_TEMP/reconciliation-league.json" \
+            '{schemaVersion:1,sourceSha:$sourceSha,controlSha:$controlSha,workflowRunId:$workflowRunId,source:($source[0]//{}),patch:($patch[0]//{}),observedStatus:($observedStatus[0]//{}),observedLeague:($observedLeague[0]//{}),observationExit:{status:$statusExit,league:$leagueExit},automaticRollback:false,recoveryProcedure:"Rerun this workflow with the same source_sha. It will re-resolve the current exact-source canonical Coworld, patch a fresh version with the same immutable commissioner image, recertify, and require a new platform migration identity plus league binding."}' \
+            > "$RUNNER_TEMP/coworld-commissioner-reconciliation-state.json"
+      - name: Upload resumable reconciliation state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-reconciliation-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-reconciliation-state.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload immutable non-secret deployment evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -343,7 +405,7 @@ jobs:
           if [ -n "$DEPLOYMENT_ID" ]; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
               -f state=failure -f environment=coworld-production -F auto_inactive=false \
-              -f description="Commissioner migration failed; reconcile hosted state" >/dev/null
+              -f description="Commissioner migration failed; use retained reconciliation artifact" >/dev/null
           fi
       - name: Remove any residual ephemeral credential directories
         if: always()

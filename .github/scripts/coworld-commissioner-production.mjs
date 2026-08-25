@@ -97,10 +97,9 @@ export function selectSuccessfulProductionRun(payload, expectedSourceSha) {
     (run) =>
       run?.head_sha === sha &&
       run?.head_branch === "main" &&
-      run?.event === "workflow_dispatch" &&
+      ["workflow_dispatch", "schedule"].includes(run?.event) &&
       run?.status === "completed" &&
       run?.conclusion === "success" &&
-      run?.display_title === `Coworld production ${sha}` &&
       Number.isSafeInteger(run?.id) &&
       run.id > 0,
   );
@@ -198,6 +197,10 @@ export function validateCanonicalSourceRelease({
     "status version does not match canonical inventory",
   );
   invariant(
+    status?.coworld?.id === canonical.id,
+    "status Coworld id does not match canonical inventory",
+  );
+  invariant(
     status?.coworld?.manifest?.game?.version === canonical.version,
     "status manifest version does not match canonical inventory",
   );
@@ -208,6 +211,14 @@ export function validateCanonicalSourceRelease({
   invariant(certifiedTenOfTen(status), "source Coworld is not certified 10/10");
   const hostedCommissioner = commissioner(status.coworld.manifest, IMAGE_ID);
   invariant(league?.id === LEAGUE_ID, "unexpected league id");
+  invariant(
+    league?.commissioner_key === "platform",
+    "league commissioner key is not platform",
+  );
+  invariant(
+    league?.rounds_paused_at === null,
+    "league platform ladder is not enabled",
+  );
   invariant(
     league?.game?.coworld_id === canonical.id,
     "league is not bound to the canonical source Coworld",
@@ -224,6 +235,48 @@ export function validateCanonicalSourceRelease({
     commissionerRunnableId: hostedCommissioner.id,
     previousCommissionerMigrationVersion: league.commissioner_migration_version,
   };
+}
+
+function commissionerPatchComparableManifest(
+  manifest,
+  expectedCommissionerImage,
+) {
+  invariant(
+    manifest !== null &&
+      typeof manifest === "object" &&
+      !Array.isArray(manifest),
+    "manifest must be an object",
+  );
+  const comparable = structuredClone(manifest);
+  semanticVersion(comparable?.game?.version, "manifest game version");
+  comparable.game.version = "__PACKAGE_VERSION__";
+  const runnable = commissioner(comparable, IMAGE_ID);
+  invariant(
+    runnable.image === expectedCommissionerImage,
+    "manifest commissioner image does not match the expected identity",
+  );
+  runnable.image = "__COMMISSIONER_IMAGE__";
+  return comparable;
+}
+
+export function validateCommissionerOnlyManifestPatch({
+  sourceManifest,
+  patchedManifest,
+  sourceCommissionerImage,
+  patchedCommissionerImage,
+}) {
+  const sourceComparable = commissionerPatchComparableManifest(
+    sourceManifest,
+    sourceCommissionerImage,
+  );
+  const patchedComparable = commissionerPatchComparableManifest(
+    patchedManifest,
+    patchedCommissionerImage,
+  );
+  invariant(
+    JSON.stringify(patchedComparable) === JSON.stringify(sourceComparable),
+    "patched manifest changed outside package version and commissioner image",
+  );
 }
 
 function manifestImageValues(manifest) {
@@ -352,6 +405,7 @@ export function validateFinalMigration({
   expectedVersion,
   preflight,
   patch,
+  sourceStatus,
   status,
   league,
 }) {
@@ -375,6 +429,10 @@ export function validateFinalMigration({
     "patched Coworld is not canonical",
   );
   invariant(
+    status?.coworld?.id === patch.patchedCoworldId,
+    "patched status Coworld id mismatch",
+  );
+  invariant(
     status?.coworld?.version === version,
     "patched status version mismatch",
   );
@@ -395,7 +453,29 @@ export function validateFinalMigration({
     hostedCommissioner.image === patch.patchedCommissionerImageId,
     "patched status commissioner image mismatch",
   );
+  invariant(
+    sourceStatus?.coworld?.id === preflight?.sourceCoworldId,
+    "source status Coworld id mismatch",
+  );
+  invariant(
+    sourceStatus?.coworld?.version === preflight?.sourceCoworldVersion,
+    "source status Coworld version mismatch",
+  );
+  validateCommissionerOnlyManifestPatch({
+    sourceManifest: sourceStatus?.coworld?.manifest,
+    patchedManifest: status?.coworld?.manifest,
+    sourceCommissionerImage: preflight?.sourceCommissionerImageId,
+    patchedCommissionerImage: patch.patchedCommissionerImageId,
+  });
   invariant(league?.id === LEAGUE_ID, "unexpected final league id");
+  invariant(
+    league?.commissioner_key === "platform",
+    "final league commissioner key is not platform",
+  );
+  invariant(
+    league?.rounds_paused_at === null,
+    "final league platform ladder is not enabled",
+  );
   invariant(
     league?.game?.coworld_id === patch.patchedCoworldId,
     "league did not bind the patched Coworld",
@@ -506,15 +586,16 @@ function main(argv) {
     process.stdout.write(`${certificationState(readJson(args[0]))}\n`);
     return;
   }
-  if (command === "validate-final" && args.length === 6) {
+  if (command === "validate-final" && args.length === 7) {
     print(
       validateFinalMigration({
         expectedSourceSha: args[0],
         expectedVersion: args[1],
         preflight: readJson(args[2]),
         patch: readJson(args[3]),
-        status: readJson(args[4]),
-        league: readJson(args[5]),
+        sourceStatus: readJson(args[4]),
+        status: readJson(args[5]),
+        league: readJson(args[6]),
       }),
     );
     return;
