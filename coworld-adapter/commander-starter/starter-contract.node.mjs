@@ -20,6 +20,7 @@ test("pins the hosted-tested image and installs the production Commander entrypo
   );
   assert.match(dockerfile, new RegExp(expectedPlayer.replaceAll("/", "\\/")));
   assert.match(dockerfile, /^COPY commander-player\.ts /m);
+  assert.match(dockerfile, /^COPY commander-production-runtime\.ts /m);
   assert.doesNotMatch(dockerfile, /commander-xp-player/);
   assert.doesNotMatch(dockerfile, /--arm=/);
 });
@@ -39,9 +40,11 @@ test("the public contract states the exact-action and fallback boundaries", asyn
   assert.match(readme, /exact\s+currently offered `LegalAction\.id`/);
   assert.match(readme, /explicit\s+deterministic fallback/);
   assert.match(readme, /19 of 74/);
+  assert.match(readme, /55-second inference budget/);
+  assert.match(readme, /60-second gameplay response window/);
   assert.match(readme, /removes the\s+canary's eval run key/);
   assert.match(
     readme,
-    /does\s+not send structured deals or free-form messages/,
+    /structured deals and bounded free-form message replies/,
   );
 });

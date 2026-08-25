@@ -8,4 +8,5 @@ LABEL org.opencontainers.image.source="https://github.com/0xNad/proxywar-command
 # The immutable base supplies the exact hosted-tested Commander modules. This
 # production entrypoint deliberately removes eval-only run-key/artifact gates.
 COPY commander-player.ts /app/proxywar/coworld-adapter/src/commander-player.ts
+COPY commander-production-runtime.ts /app/proxywar/coworld-adapter/src/commander-production-runtime.ts
 CMD ["node", "--import", "tsx", "/app/proxywar/coworld-adapter/src/commander-player.ts"]

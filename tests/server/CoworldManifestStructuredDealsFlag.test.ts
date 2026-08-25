@@ -42,6 +42,14 @@ interface Manifest {
     protocols: { player: { value: string } };
     docs: { readme: { value: string } };
   };
+  variants: Array<{
+    id: string;
+    game_config: {
+      max_decision_ms: number;
+      episode_timeout_seconds: number;
+    };
+  }>;
+  certification: { game_config: { max_decision_ms: number } };
 }
 
 function readManifest(filename: string): Manifest {
@@ -61,6 +69,31 @@ describe("Coworld manifests: canonical production capability activation", () => 
         PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
       });
       expect(env).not.toHaveProperty("PROXYWAR_TUNE_SPATIAL_MINIMAP");
+    },
+  );
+
+  it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
+    "%s gives asynchronous league gameplay enough time for LLM Commander inference",
+    (filename) => {
+      const manifest = readManifest(filename);
+      const tournament = manifest.variants.filter((variant) =>
+        variant.id.startsWith("tournament-"),
+      );
+      expect(tournament).toHaveLength(25);
+      expect(
+        tournament.every(
+          (variant) => variant.game_config.max_decision_ms === 60_000,
+        ),
+      ).toBe(true);
+      expect(
+        manifest.variants.find((variant) => variant.id === "qualifier")
+          ?.game_config.max_decision_ms,
+      ).toBe(60_000);
+      expect(
+        manifest.variants.find((variant) => variant.id === "qualifier")
+          ?.game_config.episode_timeout_seconds,
+      ).toBe(360);
+      expect(manifest.certification.game_config.max_decision_ms).toBe(15_000);
     },
   );
 

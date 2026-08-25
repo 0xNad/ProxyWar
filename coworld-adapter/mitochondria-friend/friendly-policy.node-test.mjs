@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  createMitochondriaFriendLlmPolicy,
   createMitochondriaFriendPolicy,
   MITOCHONDRIA_FRIEND_MESSAGES,
 } from "./friendly-policy.mjs";
@@ -138,8 +139,7 @@ test("alliance retries are persistent but do not consume every growth turn", () 
   );
   for (let decision = 0; decision < 5; decision += 1) {
     assert.equal(
-      decide(choose, [alliance, expand, hold, message])
-        .selectedLegalActionId,
+      decide(choose, [alliance, expand, hold, message]).selectedLegalActionId,
       expand.id,
     );
   }
@@ -195,4 +195,49 @@ test("returns only exact offered ids", () => {
   const offered = new Set(actions.map((action) => action.id));
   assert.equal(offered.has(result.selectedLegalActionId), true);
   assert.equal(offered.has(result.selectedMessageActionId), true);
+});
+
+test("LLM overlay keeps safe choices and filters hostility toward responders", () => {
+  const prepare = createMitochondriaFriendLlmPolicy();
+  const result = prepare({
+    legalActions: [attack, expand, hold, message],
+    observation: observation({
+      nonCombat: {
+        inboundMessages: [
+          {
+            messageEventID: "msg_llm",
+            senderID: "A",
+            senderName: "Auri",
+            text: "peace",
+            turnNumber: 2,
+          },
+        ],
+      },
+    }),
+    protocol,
+  });
+  assert.equal(result.mode, "llm");
+  assert.equal(result.allowedLegalActionIds.includes(attack.id), false);
+  assert.equal(result.allowedLegalActionIds.includes(expand.id), true);
+  assert.equal(result.allowedLegalActionIds.includes(hold.id), true);
+});
+
+test("LLM overlay returns an exact alliance override for an incoming request", () => {
+  const prepare = createMitochondriaFriendLlmPolicy();
+  const result = prepare({
+    legalActions: [alliance, expand, hold, message],
+    observation: observation({
+      visiblePlayers: [
+        {
+          playerID: "A",
+          isAlive: true,
+          isFriendly: false,
+          isAllied: false,
+          hasIncomingAllianceRequest: true,
+        },
+      ],
+    }),
+    protocol,
+  });
+  assert.equal(result.primaryOverrideActionId, alliance.id);
 });

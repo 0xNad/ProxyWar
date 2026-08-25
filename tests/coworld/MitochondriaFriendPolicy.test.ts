@@ -3,6 +3,15 @@ import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { createProductionCommanderBrain } from "../../coworld-adapter/commander-starter/commander-player";
+import {
+  mitoRelationshipOverride,
+  mitoSpawnDecision,
+  withMitoDiplomacy,
+} from "../../coworld-adapter/mitochondria-friend/friendly-player-llm";
+import type { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { makeCommanderStage2Fixture } from "../server/StrategicCommanderStage2TestHarness";
+
 const POLICY_FILE = resolve(
   process.cwd(),
   "coworld-adapter/mitochondria-friend/friendly-policy.mjs",
@@ -27,6 +36,25 @@ async function createPolicy() {
     choose: module.createMitochondriaFriendPolicy(),
     messages: module.MITOCHONDRIA_FRIEND_MESSAGES,
   };
+}
+
+async function createLlmPolicy() {
+  const module = (await import(pathToFileURL(POLICY_FILE).href)) as {
+    createMitochondriaFriendLlmPolicy: () => (
+      input: Record<string, unknown>,
+    ) => {
+      mode: "spawn" | "llm";
+      selectedLegalActionId?: string;
+      spawnPreferenceLegalActionIds?: string[];
+      allowedLegalActionIds?: string[];
+      primaryOverrideActionId?: string;
+      selectedDealActionId?: string;
+      selectedMessageActionId?: string;
+      messageText?: string;
+      reason: string;
+    };
+  };
+  return module.createMitochondriaFriendLlmPolicy();
 }
 
 const PROTOCOL = { maxMessageChars: 280 };
@@ -145,7 +173,11 @@ describe("MitochondriaFriend", () => {
         ],
       },
     });
-    const decision = decide(choose, [ATTACK_AURI, ALLY_AURI, HOLD, MESSAGE_AURI], obs);
+    const decision = decide(
+      choose,
+      [ATTACK_AURI, ALLY_AURI, HOLD, MESSAGE_AURI],
+      obs,
+    );
     expect(decision.selectedLegalActionId).toBe(ALLY_AURI.id);
     expect(decision.selectedMessageActionId).toBe(MESSAGE_AURI.id);
     expect(decision.messageText).toBe(messages.reply);
@@ -231,7 +263,11 @@ describe("MitochondriaFriend", () => {
         ],
       },
     });
-    const decision = decide(choose, [ALLY_AURI, EXPAND, MESSAGE_AURI, HOLD], obs);
+    const decision = decide(
+      choose,
+      [ALLY_AURI, EXPAND, MESSAGE_AURI, HOLD],
+      obs,
+    );
     expect(decision.selectedLegalActionId).toBe(ALLY_AURI.id);
     expect(decision.messageText).toBe(messages.reciprocal);
   });
@@ -259,9 +295,10 @@ describe("MitochondriaFriend", () => {
       kind: "deal_accept",
       metadata: { dealID: "D1" },
     };
-    expect(decide(first.choose, [EXPAND, HOLD, accept], incoming).selectedDealActionId).toBe(
-      accept.id,
-    );
+    expect(
+      decide(first.choose, [EXPAND, HOLD, accept], incoming)
+        .selectedDealActionId,
+    ).toBe(accept.id);
 
     const second = await createPolicy();
     decide(
@@ -380,5 +417,185 @@ describe("MitochondriaFriend", () => {
       "spawn:2",
       "spawn:1",
     ]);
+  });
+
+  it("gives the LLM every safe primary while removing attacks on a responder", async () => {
+    const prepare = await createLlmPolicy();
+    const result = prepare({
+      legalActions: [ATTACK_AURI, EXPAND, BUILD, HOLD, MESSAGE_AURI],
+      observation: observation({
+        nonCombat: {
+          inboundMessages: [
+            {
+              messageEventID: "msg_llm_friend",
+              senderID: "P_AURI",
+              senderName: "Auri",
+              text: "peace",
+              turnNumber: 12,
+            },
+          ],
+        },
+      }),
+      protocol: PROTOCOL,
+    });
+    expect(result.mode).toBe("llm");
+    expect(result.allowedLegalActionIds).toEqual(
+      expect.arrayContaining([EXPAND.id, BUILD.id, HOLD.id, MESSAGE_AURI.id]),
+    );
+    expect(result.allowedLegalActionIds).not.toContain(ATTACK_AURI.id);
+    expect(result.primaryOverrideActionId).toBeUndefined();
+    expect(result.selectedMessageActionId).toBe(MESSAGE_AURI.id);
+  });
+
+  it("keeps exact alliance reciprocity outside free-form LLM judgment", async () => {
+    const prepare = await createLlmPolicy();
+    const result = prepare({
+      legalActions: [ALLY_AURI, EXPAND, HOLD, MESSAGE_AURI],
+      observation: observation({
+        visiblePlayers: [
+          {
+            playerID: "P_AURI",
+            name: "Auri",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: true,
+          },
+        ],
+      }),
+      protocol: PROTOCOL,
+    });
+    expect(result.primaryOverrideActionId).toBe(ALLY_AURI.id);
+    expect(mitoRelationshipOverride(result, [ALLY_AURI] as any)?.actionID).toBe(
+      ALLY_AURI.id,
+    );
+  });
+
+  it("never synthesizes an alliance id when the visible target has no offered alliance action", async () => {
+    const prepare = await createLlmPolicy();
+    const legalActions = [EXPAND, HOLD, MESSAGE_AURI];
+    const result = prepare({
+      legalActions,
+      observation: observation({
+        visiblePlayers: [
+          {
+            playerID: "P_AURI",
+            name: "Auri",
+            isAlive: true,
+            isFriendly: false,
+            isAllied: false,
+            hasIncomingAllianceRequest: true,
+          },
+        ],
+      }),
+      protocol: PROTOCOL,
+    });
+    expect(result.primaryOverrideActionId).toBeUndefined();
+    expect(
+      mitoRelationshipOverride(
+        { ...result, primaryOverrideActionId: "alliance:P_AURI" },
+        legalActions as any,
+      ),
+    ).toBeNull();
+    expect(result.allowedLegalActionIds).toEqual(
+      expect.arrayContaining(legalActions.map((action) => action.id)),
+    );
+  });
+
+  it("turns LLM output plus social preparation into exact independent slots", async () => {
+    const decision = withMitoDiplomacy(
+      {
+        actionID: BUILD.id,
+        reason: "LLM chose economy",
+        metadata: { runtimeMode: "strategic-commander" },
+      } as any,
+      {
+        mode: "llm",
+        allowedLegalActionIds: [BUILD.id, HOLD.id],
+        selectedDealActionId: "deal_accept:D1",
+        selectedMessageActionId: MESSAGE_AURI.id,
+        messageText: "peace",
+        reason: "LLM Commander primary",
+      },
+    );
+    expect(decision).toMatchObject({
+      actionID: BUILD.id,
+      dealActionID: "deal_accept:D1",
+      messageActionID: MESSAGE_AURI.id,
+      messageText: "peace",
+      metadata: { runtimeMode: "strategic-commander" },
+    });
+  });
+
+  it("keeps spawn direct and inference-free", async () => {
+    const prepare = await createLlmPolicy();
+    const result = prepare({
+      legalActions: [
+        { id: "spawn:1", kind: "spawn", metadata: { tile: 1 } },
+        {
+          id: "spawn:2",
+          kind: "spawn",
+          metadata: { tile: 2, safetyScore: 0.8 },
+        },
+      ],
+      observation: observation(),
+      protocol: { maxSpawnPreferences: 2 },
+    });
+    expect(mitoSpawnDecision(result)).toMatchObject({
+      actionID: "spawn:2",
+      spawnPreferenceActionIDs: ["spawn:2", "spawn:1"],
+    });
+  });
+
+  it("routes ordinary Mito gameplay through the LLM Strategic Commander", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    const pressure = fixture.strategicOptions.exposed.find((option) =>
+      option.id.startsWith("pressure_rival:"),
+    );
+    expect(pressure).toBeDefined();
+    let providerCalls = 0;
+    const provider: LlmProvider = {
+      providerType: "custom",
+      model: "mito-llm-test-model",
+      async complete() {
+        providerCalls += 1;
+        return JSON.stringify({
+          selectedStrategicOptionId: pressure!.id,
+          horizonDecisions: 4,
+          intent: "pressure an unprotected rival while preserving diplomacy",
+          replanTriggers: [],
+        });
+      },
+    };
+    const brain = await createProductionCommanderBrain({
+      repoRoot: process.cwd(),
+      provider,
+      profile: "diplomatic",
+    });
+    const prepare = await createLlmPolicy();
+    const preparation = prepare({
+      legalActions: fixture.legalActions,
+      observation: fixture.observation,
+      protocol: PROTOCOL,
+    });
+    expect(preparation.mode).toBe("llm");
+    expect(preparation.primaryOverrideActionId).toBeUndefined();
+    const allowed = new Set(preparation.allowedLegalActionIds);
+    const decision = await brain.decide({
+      observation: fixture.observation,
+      legalActions: fixture.legalActions.filter((action) =>
+        allowed.has(action.id),
+      ),
+    });
+
+    expect(providerCalls).toBe(1);
+    expect(fixture.legalActions.map((action) => action.id)).toContain(
+      decision.actionID,
+    );
+    expect(decision.metadata).toMatchObject({
+      llmPlannerDegraded: false,
+      plannerFallbackUsed: false,
+      commanderPrimarySelectorSource: "llm",
+    });
   });
 });
