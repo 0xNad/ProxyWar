@@ -8,6 +8,7 @@ import {
   createProductionCommanderBrain,
   PRODUCTION_COMMANDER_DECISION_BUDGET_MS,
   PRODUCTION_COMMANDER_SELECTOR_TIMEOUT_MS,
+  productionCommanderMessageAgentName,
   productionCommanderReciprocalAlliance,
   productionCommanderTransportFallbackResponse,
   withCommanderProviderEvidence,
@@ -27,6 +28,12 @@ import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { makeCommanderStage2Fixture } from "../server/StrategicCommanderStage2TestHarness";
 
 describe("Commander production player", () => {
+  it("uses the exact current Commander seat name for social generation", () => {
+    expect(
+      productionCommanderMessageAgentName({ username: "Auri 2" }),
+    ).toBe("Auri 2");
+  });
+
   it("locks the provider request to the canary model and token cap", () => {
     expect(commanderBedrockRequest("choose")).toEqual({
       model: "us.anthropic.claude-sonnet-4-6",

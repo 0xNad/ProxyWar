@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import type {
   AgentBrainInput,
   AgentDecision,
+  AgentObservation,
 } from "../../src/server/agents/AgentTypes";
 import {
   chooseKeystoneDealMove,
@@ -56,6 +57,12 @@ export {
   PRODUCTION_COMMANDER_SELECTOR_TIMEOUT_MS,
   withCommanderProviderEvidence,
 };
+
+export function productionCommanderMessageAgentName(
+  observation: Pick<AgentObservation, "username">,
+): string {
+  return observation.username;
+}
 
 /**
  * Alliance acceptance is a returning alliance_request, not a separate action
@@ -251,7 +258,9 @@ async function main(): Promise<void> {
               ? Promise.resolve(null)
               : generateOpenEndedMessage({
                   provider,
-                  agentName: "Auri",
+                  agentName: productionCommanderMessageAgentName(
+                    input.observation,
+                  ),
                   personality:
                     "Concise, hard-nosed, strategically credible, and willing to cooperate when interests align. Negotiate concrete borders, timing, threats, and reciprocal commitments; do not flatter or make promises you cannot keep.",
                   intent: messageIntent,

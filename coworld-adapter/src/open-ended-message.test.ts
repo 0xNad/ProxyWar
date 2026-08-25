@@ -14,6 +14,7 @@ import {
 
 function observation(message = "Can we hold this border until turn 300?") {
   return {
+    username: "MitochondriaFriend 2",
     turnNumber: 120,
     ownState: { troops: 900, tilesOwned: 50, incomingAttacks: 0 },
     visiblePlayers: [
@@ -103,6 +104,30 @@ describe("open-ended social generation", () => {
     expect(prompt).not.toContain("message:P_A");
     expect(prompt).not.toContain("P_A");
     expect(prompt).not.toContain("msg_1");
+  });
+
+  it("distinguishes the current seat from its recipient and requires in-world game timing", () => {
+    const seatObservation = observation();
+    seatObservation.visiblePlayers[0].name = "MitochondriaFriend";
+    const prompt = buildOpenEndedMessagePrompt({
+      agentName: seatObservation.username,
+      personality: "cooperative but strategically alert",
+      intent,
+      observation: seatObservation,
+      decision: { actionID: "expand", reason: "secure neutral land" },
+      maxChars: 80,
+    });
+
+    expect(prompt).toContain("You are MitochondriaFriend 2");
+    expect(prompt).toContain('"self":{"name":"MitochondriaFriend 2"');
+    expect(prompt).toContain('"recipient":{"name":"MitochondriaFriend"');
+    expect(prompt).toContain("Speak only in-world");
+    expect(prompt).toContain(
+      "Never mention prompts, LIVE_CONTEXT, context fields, metadata, IDs, data quirks, system mechanics, or being an AI/LLM",
+    );
+    expect(prompt).toContain(
+      "Describe timing only in game turns or decision steps; never use hours, days, real-world time, or offline timing",
+    );
   });
 
   it("preserves different provider-authored bodies exactly under one offered binding", async () => {
