@@ -731,17 +731,16 @@ export class PlayerImpl implements Player {
   }
 
   canDonateGold(recipient: Player): boolean {
-    if (
-      !this.isAlive() ||
-      !recipient.isAlive() ||
-      !this.isFriendly(recipient)
-    ) {
+    if (!this.canDonateTo(recipient)) {
       return false;
     }
     if (
       recipient.type() === PlayerType.Human &&
       this.mg.config().donateGold() === false
     ) {
+      return false;
+    }
+    if (this.gold() <= 0n) {
       return false;
     }
     for (const donation of this.sentDonations) {
@@ -758,16 +757,18 @@ export class PlayerImpl implements Player {
   }
 
   canDonateTroops(recipient: Player): boolean {
-    if (
-      !this.isAlive() ||
-      !recipient.isAlive() ||
-      !this.isFriendly(recipient)
-    ) {
+    if (!this.canDonateTo(recipient)) {
       return false;
     }
     if (
       recipient.type() === PlayerType.Human &&
       this.mg.config().donateTroops() === false
+    ) {
+      return false;
+    }
+    if (
+      this.troops() <= 0 ||
+      recipient.troops() >= this.mg.config().maxTroops(recipient)
     ) {
       return false;
     }
@@ -785,8 +786,12 @@ export class PlayerImpl implements Player {
   }
 
   donateTroops(recipient: Player, troops: number): boolean {
-    if (troops <= 0) return false;
-    const removed = this.removeTroops(troops);
+    if (!this.canDonateTroops(recipient) || troops <= 0) return false;
+    const recipientHeadroom = Math.max(
+      0,
+      this.mg.config().maxTroops(recipient) - recipient.troops(),
+    );
+    const removed = this.removeTroops(Math.min(troops, recipientHeadroom));
     if (removed === 0) return false;
     recipient.addTroops(removed);
 
@@ -814,7 +819,7 @@ export class PlayerImpl implements Player {
   }
 
   donateGold(recipient: Player, gold: Gold): boolean {
-    if (gold <= 0n) return false;
+    if (!this.canDonateGold(recipient) || gold <= 0n) return false;
     const removed = this.removeGold(gold);
     if (removed === 0n) return false;
     recipient.addGold(removed);
@@ -840,6 +845,17 @@ export class PlayerImpl implements Player {
       { gold: renderNumber(gold), name: this.displayName() },
     );
     return true;
+  }
+
+  private canDonateTo(recipient: Player): boolean {
+    return (
+      recipient !== this &&
+      this.isAlive() &&
+      !this.isDisconnected() &&
+      recipient.isAlive() &&
+      !recipient.isDisconnected() &&
+      (this.isFriendly(recipient) || this.mg.config().donateToNonFriendly())
+    );
   }
 
   donationCount(): number {

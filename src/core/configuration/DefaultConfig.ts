@@ -261,6 +261,9 @@ export class DefaultConfig implements Config {
   donateTroops(): boolean {
     return this._gameConfig.donateTroops;
   }
+  donateToNonFriendly(): boolean {
+    return this._gameConfig.donateToNonFriendly ?? false;
+  }
   goldMultiplier(): number {
     return this._gameConfig.goldMultiplier ?? 1;
   }

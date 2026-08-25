@@ -701,6 +701,8 @@ export class AgentObservationBuilder {
     const quickChatOptions = this.quickChatOptions(visiblePlayers, {
       nuclearThreatReady,
     });
+    const donateToNonFriendly =
+      gameState?.config().donateToNonFriendly() === true;
     const supportOptions = visiblePlayers
       .filter((other) => other.canDonateGold || other.canDonateTroops)
       .map((other) => ({
@@ -711,9 +713,19 @@ export class AgentObservationBuilder {
         suggestedGold: suggestedGold(player, other.canDonateGold),
         suggestedTroops: suggestedTroops(player, other.canDonateTroops),
         legalReasons: [
-          ...(other.canDonateGold ? ["core canDonateGold returned true"] : []),
+          ...(other.canDonateGold
+            ? [
+                other.isFriendly
+                  ? "core canDonateGold returned true"
+                  : "core canDonateGold returned true because this game permits non-friendly donations",
+              ]
+            : []),
           ...(other.canDonateTroops
-            ? ["core canDonateTroops returned true"]
+            ? [
+                other.isFriendly
+                  ? "core canDonateTroops returned true"
+                  : "core canDonateTroops returned true because this game permits non-friendly donations",
+              ]
             : []),
         ],
       }));
@@ -742,7 +754,9 @@ export class AgentObservationBuilder {
     }
     if (visiblePlayers.length > 0 && supportOptions.length === 0) {
       blockerNotes.push(
-        "no friendly/allied player currently passes donation rules",
+        donateToNonFriendly
+          ? "no other alive, connected player currently passes donation rules"
+          : "no friendly/allied player currently passes donation rules",
       );
     }
     if (visiblePlayers.length > 0 && embargoOptions.length === 0) {
@@ -772,6 +786,7 @@ export class AgentObservationBuilder {
       targetOptions,
       emojiOptions,
       quickChatOptions,
+      ...(donateToNonFriendly ? { donateToNonFriendly: true as const } : {}),
       supportOptions,
       embargoOptions,
       canEmbargoAll: player?.canEmbargoAll() ?? false,

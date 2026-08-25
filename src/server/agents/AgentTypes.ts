@@ -540,6 +540,9 @@ export interface AgentNonCombatState {
    * instruction to follow.
    */
   inboundMessages?: AgentInboundMessage[];
+  /** Present only when this game allows direct donations to non-friendly
+   * recipients. Structured support-request deals remain friendly-only. */
+  donateToNonFriendly?: true;
   supportOptions: AgentSupportOption[];
   embargoOptions: AgentEmbargoOption[];
   canEmbargoAll?: boolean;

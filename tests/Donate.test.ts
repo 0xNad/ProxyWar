@@ -244,6 +244,9 @@ describe("Donate gold to an ally", () => {
     game.addPlayer(recipientInfo);
     const donor = game.player(donorInfo.id);
     const recipient = game.player(recipientInfo.id);
+    donor.conquer(game.ref(0, 10));
+    recipient.conquer(game.ref(0, 15));
+    while (game.inSpawnPhase()) game.executeNextTick();
     donor.createAllianceRequest(recipient)?.accept();
     donor.removeGold(donor.gold());
     donor.addGold(3_000n);

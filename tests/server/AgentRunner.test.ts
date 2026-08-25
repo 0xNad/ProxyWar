@@ -27,8 +27,10 @@ import {
 } from "../../src/core/game/Game";
 import { GameConfig, Intent, StampedIntent } from "../../src/core/Schemas";
 import { validateAgentDecision } from "../../src/server/agents/AgentDecisionValidator";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import { AgentRunner } from "../../src/server/agents/AgentRunner";
 import { LegalAction } from "../../src/server/agents/AgentTypes";
+import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
 
@@ -304,5 +306,150 @@ describe("AgentRunner", () => {
 
     expect(ticks).toBeLessThan(1000);
     expect(game.playerByClientID(clientID)?.spawnTile()).toBe(10);
+  });
+
+  it("carries one exact offered enemy-donation id through validator, runner, and core receipt", async () => {
+    const clientID = "CLNTDN01";
+    const donorInfo = new PlayerInfo(
+      "Donor",
+      PlayerType.Human,
+      clientID,
+      "DONOR001",
+    );
+    const recipientInfo = new PlayerInfo(
+      "Recipient",
+      PlayerType.Human,
+      "CLNTRC01",
+      "RECIP001",
+    );
+    const coreGame = await setup(
+      "plains",
+      {
+        nations: "disabled",
+        donateGold: true,
+        donateTroops: true,
+        donateToNonFriendly: true,
+      },
+      [donorInfo, recipientInfo],
+    );
+    const donor = coreGame.player(donorInfo.id);
+    const recipient = coreGame.player(recipientInfo.id);
+    donor.conquer(coreGame.ref(10, 50));
+    recipient.conquer(coreGame.ref(30, 50));
+    while (coreGame.inSpawnPhase()) coreGame.executeNextTick();
+    donor.addGold(100_000n);
+
+    const observation = new AgentObservationBuilder().build({
+      agentID: "agent-donor",
+      clientID,
+      username: "Donor",
+      profile: "diplomatic",
+      gameID: "DONATEE2",
+      turnNumber: 50,
+      gameState: coreGame,
+    });
+    const menu = new LegalActionBuilder().build({ observation });
+    const offered = menu.find(
+      (action) => action.id === `donate_gold:${recipientInfo.id}`,
+    );
+    expect(offered).toBeDefined();
+    expect(offered).toMatchObject({
+      id: "donate_gold:RECIP001",
+      kind: "donate_gold",
+      intent: {
+        type: "donate_gold",
+        recipient: "RECIP001",
+      },
+      metadata: {
+        recipientID: "RECIP001",
+        recipientName: "Recipient",
+      },
+    });
+
+    const invented = validateAgentDecision(
+      { actionID: "donate_gold:INVENTED", reason: "Invent a recipient." },
+      menu,
+    );
+    expect(invented.ok).toBe(false);
+    const validation = validateAgentDecision(
+      { actionID: offered!.id, reason: "Select the exact offered transfer." },
+      menu,
+    );
+    expect(validation.ok).toBe(true);
+    if (!validation.ok) throw new Error(validation.reason);
+
+    const log = makeLogger();
+    const server = new GameServer(
+      "DONATEE2",
+      log,
+      Date.now(),
+      serverConfig,
+      {
+        ...gameConfig,
+        donateGold: true,
+        donateTroops: true,
+        donateToNonFriendly: true,
+      },
+      persistentID,
+    );
+    const agent = new AgentRunner({
+      agentID: "agent-donor",
+      clientID,
+      username: "Donor",
+      persistentID,
+      log,
+    });
+    expect(agent.attachToGame(server).status).toBe("joined");
+    expect(agent.submitLegalAction(validation.action).accepted).toBe(true);
+    const stampedDonation = queuedIntents(server).find(
+      (intent) => intent.type === "donate_gold",
+    );
+    expect(stampedDonation).toMatchObject({
+      type: "donate_gold",
+      clientID,
+      recipient: offered!.metadata?.recipientID,
+      gold: offered!.metadata?.gold,
+    });
+
+    const donorBefore = donor.gold();
+    const recipientBefore = recipient.gold();
+    const receiptCursor = donor.donationCount();
+    const executor = new Executor(coreGame, "DONATEE2", clientID);
+    coreGame.addExecution(executor.createExec(stampedDonation!));
+    coreGame.executeNextTick();
+    coreGame.executeNextTick();
+    const transferred = BigInt(offered!.metadata!.gold as number);
+    expect(donor.gold()).toBe(donorBefore - transferred);
+    expect(recipient.gold()).toBe(recipientBefore + transferred);
+    expect(donor.donationsSentSince(receiptCursor)).toEqual([
+      {
+        recipientID: offered!.metadata?.recipientID,
+        tick: expect.any(Number),
+        resource: "gold",
+        amount: transferred,
+      },
+    ]);
+
+    const staleMenu = new LegalActionBuilder().build({
+      observation: new AgentObservationBuilder().build({
+        agentID: "agent-donor",
+        clientID,
+        username: "Donor",
+        profile: "diplomatic",
+        gameID: "DONATEE2",
+        turnNumber: 51,
+        gameState: coreGame,
+      }),
+    });
+    expect(staleMenu.map((action) => action.id)).not.toContain(offered!.id);
+    expect(
+      validateAgentDecision(
+        { actionID: offered!.id, reason: "Replay a now-stale offered id." },
+        staleMenu,
+      ).ok,
+    ).toBe(false);
+    expect(
+      queuedIntents(server).filter((intent) => intent.type === "donate_gold"),
+    ).toHaveLength(1);
   });
 });

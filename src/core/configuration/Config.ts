@@ -71,6 +71,7 @@ export interface Config {
   donateGold(): boolean;
   infiniteTroops(): boolean;
   donateTroops(): boolean;
+  donateToNonFriendly(): boolean;
   instantBuild(): boolean;
   disableNavMesh(): boolean;
   disableAlliances(): boolean;

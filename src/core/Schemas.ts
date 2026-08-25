@@ -230,6 +230,8 @@ export const GameConfigSchema = z.object({
   difficulty: z.enum(Difficulty),
   donateGold: z.boolean(), // Configures donations to humans only
   donateTroops: z.boolean(), // Configures donations to humans only
+  /** Allows donations to any other alive, connected player. Defaults false. */
+  donateToNonFriendly: z.boolean().optional(),
   gameType: z.enum(GameType),
   gameMode: z.enum(GameMode),
   rankedType: z.enum(RankedType).optional(), // Only set for ranked games.

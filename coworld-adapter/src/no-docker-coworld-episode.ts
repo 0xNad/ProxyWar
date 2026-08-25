@@ -938,6 +938,10 @@ async function runProxyWarEpisode(
     nations: "disabled",
     donateGold: true,
     donateTroops: true,
+    // Coworld agents may directly support any other live connected seat. The
+    // core default stays false, and structured support_request deals remain
+    // friendly-only.
+    donateToNonFriendly: true,
     bots: 0,
     infiniteGold: false,
     infiniteTroops: false,
