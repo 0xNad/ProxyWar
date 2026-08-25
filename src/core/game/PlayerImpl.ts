@@ -849,7 +849,7 @@ export class PlayerImpl implements Player {
 
   private canDonateTo(recipient: Player): boolean {
     return (
-      recipient !== this &&
+      recipient.id() !== this.id() &&
       this.isAlive() &&
       !this.isDisconnected() &&
       recipient.isAlive() &&
