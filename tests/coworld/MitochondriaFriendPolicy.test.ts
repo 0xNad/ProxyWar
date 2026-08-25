@@ -7,6 +7,7 @@ import { createProductionCommanderBrain } from "../../coworld-adapter/commander-
 import {
   mitoRelationshipOverride,
   mitoSpawnDecision,
+  mitoTransportFallbackResponse,
   withMitoDiplomacy,
 } from "../../coworld-adapter/mitochondria-friend/friendly-player-llm";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
@@ -614,6 +615,42 @@ describe("MitochondriaFriend", () => {
       messageActionID: MESSAGE_AURI.id,
       messageText: "peace",
       metadata: { runtimeMode: "strategic-commander" },
+    });
+  });
+
+  it("preserves a completed provider call when a later Mito step falls back", () => {
+    const response = mitoTransportFallbackResponse({
+      requestID: "req-mito-fallback",
+      request: { legalActions: [HOLD] },
+      errorMessage: "post-call reconstruction failed",
+      evidenceCursor: 4,
+      provider: {
+        providerEvidenceAfter(cursor) {
+          expect(cursor).toBe(4);
+          return {
+            provider: "bedrock-sidecar",
+            callKind: "planner",
+            requestedModel: "us.anthropic.claude-sonnet-4-6",
+            attemptedModels: ["us.anthropic.claude-sonnet-4-6"],
+            attemptCount: 1,
+            completedAttemptCount: 1,
+            failedAttemptCount: 0,
+            timedOutAttemptCount: 0,
+            rawOutputPresent: true,
+          };
+        },
+      },
+    });
+
+    expect(response).toMatchObject({
+      requestID: "req-mito-fallback",
+      selectedLegalActionId: HOLD.id,
+      providerEvidence: {
+        callKind: "planner",
+        attemptCount: 1,
+        completedAttemptCount: 1,
+        rawOutputPresent: true,
+      },
     });
   });
 

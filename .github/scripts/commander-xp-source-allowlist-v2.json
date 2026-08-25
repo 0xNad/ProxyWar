@@ -132,6 +132,8 @@
   "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
   "coworld-adapter/testing/owner-upgrade/verify-owner-upgrade.mjs",
   "coworld-adapter/tsconfig.json",
+  "deploy/mac/proxywar-beta-launchd-restart.mjs",
+  "deploy/mac/proxywar-beta-launchd-restart.test.mjs",
   "docs/AI_NATIONS_LEAGUE.md",
   "docs/COWORLD_LEAGUE_MIRROR.md",
   "index.html",

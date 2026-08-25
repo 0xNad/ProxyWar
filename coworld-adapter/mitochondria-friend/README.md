@@ -37,7 +37,8 @@ Build the hosted linux/amd64 policy image from the repository root with:
 
 ```sh
 docker build --platform linux/amd64 \
-  --build-arg MITO_SOURCE_SHA= \
-  coworld-adapter/mitochondria-friend/Dockerfile \
-  -t proxywar-mitochondria-friend:local . < exact-source-sha > -f
+  --build-arg "MITO_SOURCE_SHA=<exact-source-sha>" \
+  -f coworld-adapter/mitochondria-friend/Dockerfile \
+  -t proxywar-mitochondria-friend:local \
+  .
 ```

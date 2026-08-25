@@ -105,6 +105,26 @@ export function mitoRelationshipOverride(
   };
 }
 
+/**
+ * Preserve response-correlated provider activity when a later Mito diplomacy,
+ * reconstruction, or serialization step throws. A cursor with no subsequent
+ * provider call still produces no evidence.
+ */
+export function mitoTransportFallbackResponse(input: {
+  requestID: string;
+  request: unknown;
+  errorMessage: string;
+  provider: Pick<CommanderBedrockProvider, "providerEvidenceAfter">;
+  evidenceCursor: number;
+}): Record<string, unknown> {
+  return transportFallbackResponse(
+    input.requestID,
+    input.request,
+    input.errorMessage,
+    input.provider.providerEvidenceAfter(input.evidenceCursor),
+  );
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -169,8 +189,8 @@ async function main(): Promise<void> {
 
     decisionChain = decisionChain.then(async () => {
       const requestID = String(message.requestID ?? "");
+      const evidenceCursor = provider.evidenceCursor();
       try {
-        const evidenceCursor = provider.evidenceCursor();
         const input: AgentBrainInput = requestToBrainInput(
           message.request,
           runtime.profile,
@@ -229,7 +249,13 @@ async function main(): Promise<void> {
         console.error(`MitochondriaFriend decision failed: ${reason}`);
         socket.send(
           JSON.stringify(
-            transportFallbackResponse(requestID, message.request, reason),
+            mitoTransportFallbackResponse({
+              requestID,
+              request: message.request,
+              errorMessage: reason,
+              provider,
+              evidenceCursor,
+            }),
           ),
         );
       }

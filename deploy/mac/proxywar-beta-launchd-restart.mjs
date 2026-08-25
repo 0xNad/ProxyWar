@@ -12,6 +12,11 @@ const execFileAsync = promisify(execFile);
 const LABEL = "com.proxywar.beta";
 const SERVER_ENTRY = "src/scripts/ai-agent-demo-server.ts";
 const TARGET = `gui/${process.getuid()}/${LABEL}`;
+// The beta/showcase server listens on 8788. Port 8787 belongs to the separate
+// local Agent Relay status board, whose root page can return 200 even when the
+// ProxyWar beta process is absent. Keep the default probe bound to the managed
+// service so restart admission cannot be satisfied by that unrelated process.
+export const PROXYWAR_BETA_READY_URL = "http://127.0.0.1:8788/";
 export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS = 46_000;
 export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS = 49_000;
 export const PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS = 49_000;
@@ -188,7 +193,7 @@ export async function restartBeta({
   host,
   plistPath = DEFAULT_PLIST,
   writerLockPath = DEFAULT_WRITER_LOCK,
-  readyUrl = "http://127.0.0.1:8787/league",
+  readyUrl = PROXYWAR_BETA_READY_URL,
   graceMs = 5_000,
   forceWaitMs = 2_000,
   startTimeoutMs = 20_000,

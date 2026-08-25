@@ -16,6 +16,7 @@ import {
   PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
   PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS,
   PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
+  PROXYWAR_BETA_READY_URL,
   restartBeta,
   terminateOwnedGroup,
   validateDirectServer,
@@ -28,6 +29,10 @@ const DRILL_READY_URL =
   "http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest";
 const temporaryRoots = [];
 const liveGroups = new Set();
+
+test("default readiness is bound to the beta server, not Agent Relay", () => {
+  assert.equal(PROXYWAR_BETA_READY_URL, "http://127.0.0.1:8788/");
+});
 
 afterEach(async () => {
   for (const pgid of liveGroups) {
