@@ -227,6 +227,72 @@ test("maps exact Commander XP policy provision without exposing the token", () =
   });
 });
 
+test("maps one exact Commander public-base materialization without credentials", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const output = path.join(privateOutputParent(root), "public-base-receipts");
+    const digest = `sha256:${"1".repeat(64)}`;
+    const args = [
+      "commander-public-base-materialize",
+      "upload",
+      `--image=ghcr.io/0xnad/proxywar-commander-public-base@${digest}`,
+      `--policy-name=proxywar-commander-public-base-${"2".repeat(20)}`,
+      `--source-sha=${"3".repeat(40)}`,
+      `--source-tree-sha=${"4".repeat(40)}`,
+      `--source-provenance-digest=sha256:${"5".repeat(64)}`,
+      `--build-provenance-digest=sha256:${"6".repeat(64)}`,
+      `--oci-digest=${digest}`,
+      `--output=${output}`,
+    ];
+    const result = spawnSync(process.execPath, [wrapper, ...args], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      /python\|.*commander-public-base-materialize\.py upload --image=ghcr\.io\/0xnad\/proxywar-commander-public-base@sha256:/,
+    );
+    assert.doesNotMatch(lines[1], /token/);
+  });
+});
+
+test("maps only an exact retained public-base recovery directory", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const recovery = path.join(root, "public-base-recovery");
+    fs.mkdirSync(recovery, { mode: 0o700 });
+    const output = path.join(privateOutputParent(root), "public-base-receipts");
+    const digest = `sha256:${"1".repeat(64)}`;
+    const args = [
+      "commander-public-base-materialize",
+      "upload",
+      `--image=ghcr.io/0xnad/proxywar-commander-public-base@${digest}`,
+      `--policy-name=proxywar-commander-public-base-${"2".repeat(20)}`,
+      `--source-sha=${"3".repeat(40)}`,
+      `--source-tree-sha=${"4".repeat(40)}`,
+      `--source-provenance-digest=sha256:${"5".repeat(64)}`,
+      `--build-provenance-digest=sha256:${"6".repeat(64)}`,
+      `--oci-digest=${digest}`,
+      `--output=${output}`,
+      `--recovery=${recovery}`,
+    ];
+    const result = spawnSync(process.execPath, [wrapper, ...args], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.ok(lines[1].includes(`--recovery=${recovery}`));
+
+    const outside = spawnSync(
+      process.execPath,
+      [wrapper, ...args.slice(0, -1), "--recovery=/tmp/outside"],
+      { encoding: "utf8", env },
+    );
+    assert.notEqual(outside.status, 0);
+  });
+});
+
 test("maps an exact retained policy recovery directory without exposing credentials", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const recovery = path.join(root, "policy-recovery");

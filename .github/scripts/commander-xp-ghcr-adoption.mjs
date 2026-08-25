@@ -11,7 +11,7 @@ export function inspectSinglePlatformManifest({
   rawBytes,
 }) {
   if (
-    !/^ghcr\.io\/0xnad\/proxywar-commander-xp-(?:policy|game):[0-9a-f]{40}$/.test(
+    !/^ghcr\.io\/0xnad\/proxywar-commander-(?:xp-(?:policy|game)|public-base):[0-9a-f]{40}$/.test(
       tag,
     ) ||
     !/^sha256:[0-9a-f]{64}$/.test(expectedConfigDigest) ||

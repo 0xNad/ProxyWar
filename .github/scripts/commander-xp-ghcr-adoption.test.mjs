@@ -48,3 +48,13 @@ test("GHCR adoption rejects a different image and a multi-platform index", () =>
     }),
   );
 });
+
+test("GHCR adoption accepts the isolated public-base package", () => {
+  const publicTag = `ghcr.io/0xnad/proxywar-commander-public-base:${"4".repeat(40)}`;
+  const result = inspectSinglePlatformManifest({
+    tag: publicTag,
+    expectedConfigDigest: configDigest,
+    rawBytes: manifest(),
+  });
+  assert.equal(result.tag, publicTag);
+});

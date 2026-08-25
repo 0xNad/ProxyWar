@@ -36,7 +36,7 @@ function collectRunBlocks(value, location, output) {
 test("every Commander workflow run block parses as Bash after expression substitution", () => {
   const workflowNames = fs
     .readdirSync(workflowDirectory)
-    .filter((name) => /^commander-xp-.*\.yml$/.test(name))
+    .filter((name) => /^commander-(?:xp-.*|public-base)\.yml$/.test(name))
     .sort();
   assert.ok(workflowNames.length >= 4);
 
