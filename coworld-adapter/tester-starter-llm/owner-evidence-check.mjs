@@ -6,6 +6,8 @@ const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_FILES = 25;
 const MAX_EVENTS_PER_KIND_PER_FILE = 64;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const MESSAGE_EVENT_ID =
+  /^msg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
 const ALLOWED_KINDS = new Set([
@@ -53,6 +55,7 @@ const ALLOWED_KEYS = new Map([
     "message_observation",
     new Set([
       ...COMMON_KEYS,
+      "messageEventID",
       "senderID",
       "senderTurn",
       "messageBodySHA256",
@@ -138,6 +141,8 @@ function exactEventSchema(event, file) {
     }
   } else if (event.kind === "message_observation") {
     if (
+      (Object.hasOwn(event, "messageEventID") &&
+        !MESSAGE_EVENT_ID.test(event.messageEventID)) ||
       !isBoundedString(event.senderID) ||
       !Number.isSafeInteger(event.senderTurn) ||
       event.senderTurn < 0
@@ -157,6 +162,29 @@ function exactEventSchema(event, file) {
     ) {
       fail(`${file}: malformed spatial evidence fields`);
     }
+  }
+}
+
+function exactMessageEventIDChecks(events, required) {
+  const observations = events.filter(
+    (event) => event.kind === "message_observation",
+  );
+  const seen = new Set();
+  for (const observation of observations) {
+    if (!Object.hasOwn(observation, "messageEventID")) {
+      if (required) {
+        fail(
+          `${observation.sourceFile}: required message observation is missing its server-owned messageEventID`,
+        );
+      }
+      continue;
+    }
+    if (seen.has(observation.messageEventID)) {
+      fail(
+        `${observation.sourceFile}: duplicate server-owned messageEventID ${observation.messageEventID}`,
+      );
+    }
+    seen.add(observation.messageEventID);
   }
 }
 
@@ -323,11 +351,11 @@ function joinedMessageChecks(events) {
       "message selection and recipient-observation evidence are both required",
     );
   }
-  const joinedObservationIndexes = new Set();
+  const joinedObservationIDs = new Set();
   for (const selection of selections) {
-    const joinedIndex = observations.findIndex(
-      (observation, index) =>
-        !joinedObservationIndexes.has(index) &&
+    const joinedObservation = observations.find(
+      (observation) =>
+        !joinedObservationIDs.has(observation.messageEventID) &&
         observation.messageBodySHA256 === selection.messageBodySHA256 &&
         observation.messageBodyUTF8Bytes === selection.messageBodyUTF8Bytes &&
         observation.messageBodyUTF16CodeUnits ===
@@ -335,12 +363,12 @@ function joinedMessageChecks(events) {
         observation.senderID === selection.ownPlayerID &&
         observation.ownPlayerID === selection.selectedMessageRecipientID,
     );
-    if (joinedIndex < 0) {
+    if (!joinedObservation) {
       fail(
         `${selection.sourceFile}: no recipient observation joined the selected message digest`,
       );
     }
-    joinedObservationIndexes.add(joinedIndex);
+    joinedObservationIDs.add(joinedObservation.messageEventID);
   }
 }
 
@@ -466,6 +494,7 @@ function main() {
     fail("at least one exact deal selection is required");
   }
   exactSelectionChecks(events);
+  exactMessageEventIDChecks(events, messages === "required");
   if (messages === "required") joinedMessageChecks(events);
   spatialChecks(events, spatial, files);
   process.stdout.write(

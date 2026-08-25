@@ -12,6 +12,8 @@ const CHECKER = path.join(HERE, "owner-evidence-check.mjs");
 const PREFIX = "PROXYWAR_OWNER_CAPABILITY_EVIDENCE ";
 const body = "Hold the shared border exactly.";
 const digest = createHash("sha256").update(body, "utf8").digest("hex");
+const firstMessageEventID = "msg_00000000-0000-4000-8000-000000000001";
+const secondMessageEventID = "msg_00000000-0000-4000-8000-000000000002";
 
 function common(ownPlayerID, requestID) {
   return {
@@ -49,6 +51,7 @@ function validEvents() {
     {
       kind: "message_observation",
       ...common("P_B", "req_recipient"),
+      messageEventID: firstMessageEventID,
       senderID: "P_A",
       senderTurn: 42,
       messageBodySHA256: digest,
@@ -373,7 +376,7 @@ test("owner evidence checker enforces independent rich spatial byte ceilings", (
   }
 });
 
-test("owner evidence checker accepts exact bounded joined evidence", () => {
+test("owner evidence checker accepts joined evidence with an exact current message ID", () => {
   const result = runChecker(validEvents());
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
@@ -395,6 +398,37 @@ test("owner evidence checker rejects a missing or tampered recipient join", () =
   const result = runChecker(events);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /no recipient observation joined/u);
+});
+
+test("owner evidence checker requires exact unique server message IDs", () => {
+  const missing = validEvents();
+  delete missing[3].messageEventID;
+  const missingResult = runChecker(missing);
+  assert.equal(missingResult.status, 1);
+  assert.match(missingResult.stderr, /missing.*messageEventID/u);
+
+  for (const tamperedID of [
+    "msg_tampered",
+    "MSG_00000000-0000-4000-8000-000000000001",
+    "msg_00000000-0000-3000-8000-000000000001",
+  ]) {
+    const tampered = validEvents();
+    tampered[3].messageEventID = tamperedID;
+    const tamperedResult = runChecker(tampered);
+    assert.equal(tamperedResult.status, 1);
+    assert.match(tamperedResult.stderr, /malformed message-observation/u);
+  }
+
+  const duplicate = validEvents();
+  duplicate.splice(4, 0, {
+    ...structuredClone(duplicate[3]),
+    requestID: "req_recipient_duplicate",
+    messageEventID: secondMessageEventID,
+  });
+  duplicate[4].messageEventID = firstMessageEventID;
+  const duplicateResult = runChecker(duplicate);
+  assert.equal(duplicateResult.status, 1);
+  assert.match(duplicateResult.stderr, /duplicate.*messageEventID/u);
 });
 
 test("owner evidence checker rejects impossible UTF-8 and UTF-16 counts", () => {
