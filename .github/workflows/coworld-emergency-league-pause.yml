@@ -35,6 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test "$GITHUB_REF" = "refs/heads/main"
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]

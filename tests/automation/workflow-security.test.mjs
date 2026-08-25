@@ -107,6 +107,10 @@ test("emergency league pause is operator-only, exact-source, and fail-closed", (
   assert.match(emergencyLeaguePause, /test "\$GITHUB_ACTOR" = "0xNad"/);
   assert.match(
     emergencyLeaguePause,
+    /test "\$GITHUB_TRIGGERING_ACTOR" = "0xNad"/,
+  );
+  assert.match(
+    emergencyLeaguePause,
     /test "\$GITHUB_REF" = "refs\/heads\/main"/,
   );
   assert.match(emergencyLeaguePause, /test "\$GITHUB_SHA" = "\$SOURCE_SHA"/);
