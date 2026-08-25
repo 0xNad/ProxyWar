@@ -5,11 +5,12 @@ import test from "node:test";
 const expectedBase =
   "public.ecr.aws/q5f4m8t9/cogames@sha256:6cb946c338fa3d58685f280a4e6853e2194b2a6a0cbb60001a99342094d9a244";
 
-test("pins the dependency graph and immutable Node base", async () => {
-  const [packageJsonText, lockText, dockerfile] = await Promise.all([
+test("pins the dependency graph, immutable base, and executable build docs", async () => {
+  const [packageJsonText, lockText, dockerfile, readme] = await Promise.all([
     readFile(new URL("package.json", import.meta.url), "utf8"),
     readFile(new URL("package-lock.json", import.meta.url), "utf8"),
     readFile(new URL("Dockerfile", import.meta.url), "utf8"),
+    readFile(new URL("README.md", import.meta.url), "utf8"),
   ]);
   const packageJson = JSON.parse(packageJsonText);
   const lock = JSON.parse(lockText);
@@ -29,4 +30,9 @@ test("pins the dependency graph and immutable Node base", async () => {
     /org\.opencontainers\.image\.revision="\$\{MITO_SOURCE_SHA\}"/,
   );
   assert.doesNotMatch(dockerfile, /\bnpm install\b/);
+  assert.match(
+    readme,
+    /--build-arg "MITO_SOURCE_SHA=<exact-source-sha>"[\s\S]*-f coworld-adapter\/mitochondria-friend\/Dockerfile[\s\S]*-t proxywar-mitochondria-friend:local[\s\S]*\n  \./,
+  );
+  assert.doesNotMatch(readme, /\. < exact-source-sha > -f/);
 });
