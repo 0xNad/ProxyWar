@@ -1,8 +1,11 @@
 # MitochondriaFriend
 
-MitochondriaFriend is a deterministic diplomacy-first ProxyWar league policy.
-It is intentionally cheap and auditable: it does not call an LLM and it never
-constructs a raw game intent.
+MitochondriaFriend is an LLM-powered diplomacy-first ProxyWar league policy.
+Claude Sonnet's Strategic Commander chooses its ordinary primary gameplay with
+the diplomatic strategy profile. A deterministic relationship layer still
+keeps explicit promises, filters attacks against responders/allies/pact
+partners, and owns the independent message and deal slots. It never constructs
+or emits a raw game intent.
 
 Behavior:
 
@@ -14,8 +17,9 @@ Behavior:
   non-aggression pacts;
 - never attacks a responder, ally, incoming alliance requester, or active pact
   partner;
-- keeps expanding into neutral land and building while it chats, because
-  messages and deals use independent optional slots.
+- lets the LLM Commander decide how to expand, build, defend, and pressure
+  unprotected rivals while it chats, because messages and deals use independent
+  optional slots.
 
 Run the pure policy checks with:
 

@@ -45,21 +45,23 @@ uvx --from coworld coworld submit my-commander --league <league_id>
 6. The production wrapper independently uses the offered social slots: it
    replies to inbound messages, selects structured deals, and reciprocates a
    visible alliance request with the exact offered alliance action.
-7. A provider timeout, transport error, or malformed response uses an explicit
-   deterministic fallback; it is never silent.
+7. Gameplay variants give the policy 60 seconds to respond and the provider 55
+   seconds to finish. A provider timeout, transport error, or malformed
+   response uses an explicit deterministic fallback; it is never silent.
 
 The initial four-game hosted canary proved non-hold play, all four strategic
 families, and exact offered-ID fidelity. It also found 19 of 74 selector calls
-timed out at the 12-second boundary. The fallback kept every game functional,
-but this is a real reliability cost rather than a hidden success.
+timed out at the original 12-second boundary. Production therefore uses a
+55-second inference budget inside a 60-second gameplay response window rather
+than treating an asynchronous league episode like an interactive game.
 
 ## Current scope
 
 This public Commander release is a pinned, deployable reference. Its primary
 strategy remains the tested Commander planner, while the production wrapper
 also uses structured deals and bounded free-form message replies in their
-separate social slots. Its spatial observation flags remain off so Commander
-behavior stays isolated from the separate spatial treatment.
+separate social slots. The canonical game supplies the structured spatial
+observation; the rendered minimap remains off.
 
 For a fully editable JavaScript policy with strategy text, deal selection, and
 messages, use the original

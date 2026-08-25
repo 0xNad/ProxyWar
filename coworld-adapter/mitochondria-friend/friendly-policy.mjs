@@ -1,10 +1,11 @@
 /**
- * MitochondriaFriend: a deterministic diplomacy-first ProxyWar policy.
+ * MitochondriaFriend's diplomacy and safety layer.
  *
- * The policy speaks through the optional message slot, negotiates through the
- * optional structured-deal slot, and always selects an exact offered primary
- * LegalAction.id. Rival-authored text is treated only as evidence that the
- * sender engaged; its contents never control an action or get copied.
+ * Production primary gameplay is selected by the LLM Strategic Commander.
+ * This module owns the persistent relationship state, exact alliance/support
+ * overrides, hostile-action filtering, and the independent message/deal slots.
+ * Rival-authored text is treated only as evidence that the sender engaged; its
+ * contents never become an instruction or get copied.
  */
 
 const DEAL_KINDS = new Set([
@@ -12,6 +13,16 @@ const DEAL_KINDS = new Set([
   "deal_reject",
   "deal_propose",
   "deal_withdraw",
+]);
+
+const HOSTILE_PRIMARY_KINDS = new Set([
+  "attack",
+  "boat",
+  "warship",
+  "nuke",
+  "embargo",
+  "target_player",
+  "break_alliance",
 ]);
 
 const FRIENDLY_DEAL_TEMPLATES = new Set([
@@ -35,8 +46,7 @@ export const MITOCHONDRIA_FRIEND_MESSAGES = Object.freeze({
     "Thanks for reaching out. I am returning your alliance request now. Let's grow together instead of fighting.",
   allied:
     "Our alliance is active. I will protect our peace, keep my promises, and grow beside you.",
-  pact:
-    "I am offering a non-aggression pact so we can invest in growth instead of wasting troops on each other.",
+  pact: "I am offering a non-aggression pact so we can invest in growth instead of wasting troops on each other.",
   followUp:
     "I am still committed to peace and an alliance. Reply anytime; cooperation is my default.",
 });
@@ -88,12 +98,7 @@ export function createMitochondriaFriendPolicy() {
       decisionNumber,
       allianceAttempts,
     );
-    const deal = chooseDeal(
-      actions,
-      observation,
-      responders,
-      proposalAttempts,
-    );
+    const deal = chooseDeal(actions, observation, responders, proposalAttempts);
     const message = chooseMessage({
       actions,
       observation,
@@ -121,6 +126,119 @@ export function createMitochondriaFriendPolicy() {
       confidence: primary.kind === "hold" ? 0.62 : 0.9,
       fallbackUsed: false,
       llmPlannerDegraded: false,
+    };
+  };
+}
+
+/**
+ * Persistent Mito overlay for an LLM primary brain.
+ *
+ * The return value contains the exact subset of offered action ids the
+ * Commander is allowed to see. An exact primary override is present only for
+ * a relationship promise that should not be delegated to free-form planning.
+ */
+export function createMitochondriaFriendLlmPolicy() {
+  const responders = new Set();
+  const answeredMessages = new Set();
+  const openedConversation = new Set();
+  const outboundCounts = new Map();
+  const lastOutboundDecision = new Map();
+  const proposalAttempts = new Map();
+  const allianceAttempts = new Map();
+  let decisionNumber = 0;
+
+  return function prepareMitochondriaFriendLlmDecision(input = {}) {
+    decisionNumber += 1;
+    const actions = validActions(input.legalActions);
+    if (actions.length === 0) {
+      throw new Error("decision_request contained no legalActions");
+    }
+    const observation = input.observation ?? {};
+    const inbound = validInboundMessages(observation);
+    for (const message of inbound) responders.add(message.senderID);
+    for (const player of visiblePlayers(observation)) {
+      if (player.hasIncomingAllianceRequest === true) {
+        responders.add(player.playerID);
+      }
+    }
+
+    const spawnPreferences = spawnPreferenceRanking(
+      actions,
+      input.protocol?.maxSpawnPreferences,
+    );
+    if (spawnPreferences !== null) {
+      return {
+        mode: "spawn",
+        selectedLegalActionId: spawnPreferences[0].id,
+        spawnPreferenceLegalActionIds: spawnPreferences.map(
+          (action) => action.id,
+        ),
+        reason: "ranked offered spawn locations for safe diplomatic growth",
+      };
+    }
+
+    const primary = actions.filter(
+      (action) => !DEAL_KINDS.has(action.kind) && action.kind !== "message",
+    );
+    if (primary.length === 0) {
+      throw new Error("decision_request contained no primary LegalAction");
+    }
+    const relationshipOverride = chooseAlliancePrimary(
+      primary,
+      observation,
+      responders,
+      decisionNumber,
+      allianceAttempts,
+    );
+    const supportOverride = primary.find(
+      (action) =>
+        (action.kind === "donate_gold" || action.kind === "donate_troops") &&
+        fulfillsSupportPromise(action, observation),
+    );
+    const protectedIDs = protectedPlayerIDs(observation, responders);
+    const allowedActions = actions.filter(
+      (action) => !targetsProtectedRelationship(action, protectedIDs),
+    );
+    const allowedPrimary = allowedActions.filter(
+      (action) => !DEAL_KINDS.has(action.kind) && action.kind !== "message",
+    );
+    if (allowedPrimary.length === 0) {
+      const hold = primary.find((action) => action.kind === "hold");
+      if (!hold) {
+        throw new Error("Mito relationship guard removed every primary action");
+      }
+      allowedActions.push(hold);
+    }
+
+    const deal = chooseDeal(actions, observation, responders, proposalAttempts);
+    const message = chooseMessage({
+      actions,
+      observation,
+      inbound,
+      responders,
+      answeredMessages,
+      openedConversation,
+      outboundCounts,
+      lastOutboundDecision,
+      decisionNumber,
+      deal,
+      maxChars: advertisedMessageLimit(input.protocol),
+    });
+    const override = relationshipOverride ?? supportOverride ?? null;
+    return {
+      mode: "llm",
+      allowedLegalActionIds: allowedActions.map((action) => action.id),
+      ...(override ? { primaryOverrideActionId: override.id } : {}),
+      ...(deal ? { selectedDealActionId: deal.id } : {}),
+      ...(message
+        ? {
+            selectedMessageActionId: message.id,
+            messageText: message.text,
+          }
+        : {}),
+      reason: override
+        ? `relationship promise override=${override.kind}`
+        : `LLM Commander primary; protected relationships=${protectedIDs.size}`,
     };
   };
 }
@@ -187,63 +305,18 @@ function choosePrimary(
   }
 
   const players = visiblePlayers(observation);
-  const playerByID = new Map(players.map((player) => [player.playerID, player]));
+  const playerByID = new Map(
+    players.map((player) => [player.playerID, player]),
+  );
   const protectedIDs = protectedPlayerIDs(observation, responders);
-
-  const pendingRenewal = primary.find((action) => {
-    if (action.kind !== "alliance_extend") return false;
-    return (
-      playerByID.get(recipientID(action))?.allianceOtherAgreedToExtend === true
-    );
-  });
-  if (pendingRenewal) return pendingRenewal;
-
-  const incomingTargets = new Set(
-    players
-      .filter((player) => player.hasIncomingAllianceRequest === true)
-      .map((player) => player.playerID),
+  const alliancePrimary = chooseAlliancePrimary(
+    primary,
+    observation,
+    responders,
+    decisionNumber,
+    allianceAttempts,
   );
-  const reciprocalAlliance = primary.find(
-    (action) =>
-      action.kind === "alliance_request" &&
-      incomingTargets.has(recipientID(action)),
-  );
-  if (reciprocalAlliance) {
-    recordAllianceAttempt(
-      recipientID(reciprocalAlliance),
-      allianceAttempts,
-      decisionNumber,
-    );
-    return reciprocalAlliance;
-  }
-
-  const responderAlliance = primary.find((action) => {
-    if (action.kind !== "alliance_request") return false;
-    const targetID = recipientID(action);
-    if (!responders.has(targetID)) return false;
-    const rival = playerByID.get(targetID);
-    if (
-      rival?.isAllied === true ||
-      rival?.isFriendly === true ||
-      rival?.hasOutgoingAllianceRequest === true
-    ) {
-      return false;
-    }
-    const previous = allianceAttempts.get(targetID);
-    return (
-      previous === undefined ||
-      (previous.count < MAX_ALLIANCE_ATTEMPTS_PER_RIVAL &&
-        decisionNumber - previous.lastDecision >= ALLIANCE_RETRY_DECISIONS)
-    );
-  });
-  if (responderAlliance) {
-    recordAllianceAttempt(
-      recipientID(responderAlliance),
-      allianceAttempts,
-      decisionNumber,
-    );
-    return responderAlliance;
-  }
+  if (alliancePrimary) return alliancePrimary;
 
   if (Number(observation?.ownState?.incomingAttacks ?? 0) > 0) {
     const retreat = primary.find(
@@ -315,6 +388,81 @@ function choosePrimary(
     primary.find((action) => action.risk?.level !== "high") ??
     primary[0]
   );
+}
+
+function chooseAlliancePrimary(
+  primary,
+  observation,
+  responders,
+  decisionNumber,
+  allianceAttempts,
+) {
+  const players = visiblePlayers(observation);
+  const playerByID = new Map(
+    players.map((player) => [player.playerID, player]),
+  );
+  const pendingRenewal = primary.find((action) => {
+    if (action.kind !== "alliance_extend") return false;
+    return (
+      playerByID.get(recipientID(action))?.allianceOtherAgreedToExtend === true
+    );
+  });
+  if (pendingRenewal) return pendingRenewal;
+
+  const incomingTargets = new Set(
+    players
+      .filter((player) => player.hasIncomingAllianceRequest === true)
+      .map((player) => player.playerID),
+  );
+  const reciprocalAlliance = primary.find(
+    (action) =>
+      action.kind === "alliance_request" &&
+      incomingTargets.has(recipientID(action)),
+  );
+  if (reciprocalAlliance) {
+    recordAllianceAttempt(
+      recipientID(reciprocalAlliance),
+      allianceAttempts,
+      decisionNumber,
+    );
+    return reciprocalAlliance;
+  }
+
+  const responderAlliance = primary.find((action) => {
+    if (action.kind !== "alliance_request") return false;
+    const targetID = recipientID(action);
+    if (!responders.has(targetID)) return false;
+    const rival = playerByID.get(targetID);
+    if (
+      rival?.isAllied === true ||
+      rival?.isFriendly === true ||
+      rival?.hasOutgoingAllianceRequest === true
+    ) {
+      return false;
+    }
+    const previous = allianceAttempts.get(targetID);
+    return (
+      previous === undefined ||
+      (previous.count < MAX_ALLIANCE_ATTEMPTS_PER_RIVAL &&
+        decisionNumber - previous.lastDecision >= ALLIANCE_RETRY_DECISIONS)
+    );
+  });
+  if (responderAlliance) {
+    recordAllianceAttempt(
+      recipientID(responderAlliance),
+      allianceAttempts,
+      decisionNumber,
+    );
+    return responderAlliance;
+  }
+  return null;
+}
+
+function targetsProtectedRelationship(action, protectedIDs) {
+  if (action.kind === "embargo_all") return protectedIDs.size > 0;
+  if (!HOSTILE_PRIMARY_KINDS.has(action.kind)) return false;
+  const targetID = recipientID(action);
+  return typeof targetID === "string" && protectedIDs.has(targetID);
 }
 
 function recordAllianceAttempt(targetID, allianceAttempts, decisionNumber) {
@@ -406,10 +554,7 @@ function chooseDeal(actions, observation, responders, proposalAttempts) {
     );
     if (!action) continue;
     const previous = proposalAttempts.get(targetID);
-    if (
-      previous !== undefined &&
-      decisionStep - previous < DEAL_RETRY_STEPS
-    ) {
+    if (previous !== undefined && decisionStep - previous < DEAL_RETRY_STEPS) {
       continue;
     }
     proposalAttempts.set(targetID, decisionStep);
@@ -425,9 +570,7 @@ function hasFriendlyDeal(observation, targetID) {
     ...(observation?.deals?.activeDeals ?? []),
   ].some(
     (deal) =>
-      FRIENDLY_DEAL_TEMPLATES.has(
-        deal?.terms?.template ?? deal?.template,
-      ) &&
+      FRIENDLY_DEAL_TEMPLATES.has(deal?.terms?.template ?? deal?.template) &&
       (deal?.proposerPlayerID === targetID ||
         deal?.recipientPlayerID === targetID),
   );
@@ -485,7 +628,10 @@ function chooseMessage({
     const offer = offers.find(
       (action) => action.metadata?.recipientID === dealTarget,
     );
-    if (offer && safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.pact, maxChars)) {
+    if (
+      offer &&
+      safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.pact, maxChars)
+    ) {
       openedConversation.add(dealTarget);
       recordOutbound(
         dealTarget,
