@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { validateAgentMessageText } from "../../src/server/agents/AgentDecisionValidator";
 import type { AgentObservation } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 import {
@@ -176,6 +177,38 @@ describe("open-ended social generation", () => {
       expect(() => parseOpenEndedMessageResponse(raw, 80)).toThrow(reason);
     },
   );
+
+  it("matches the authoritative raw-text validator across the wire-contract corpus", () => {
+    const corpus = [
+      "Hold this border through turn 300.",
+      `  ${"x".repeat(276)}  `,
+      "   ",
+      "line\nbreak",
+      "tab\tbreak",
+      `delete${String.fromCharCode(0x7f)}char`,
+      `c1${String.fromCharCode(0x85)}char`,
+      "zero\u200bwidth",
+      "bidi\u202eoverride",
+      "line\u2028separator",
+      "paragraph\u2029separator",
+      "reserved\u2065format",
+      "x".repeat(280),
+      "x".repeat(281),
+    ];
+
+    for (const message of corpus) {
+      const authorityAccepts = validateAgentMessageText(message).ok;
+      let policyAccepts = true;
+      try {
+        expect(
+          parseOpenEndedMessageResponse(JSON.stringify({ message }), 280),
+        ).toBe(message);
+      } catch {
+        policyAccepts = false;
+      }
+      expect(policyAccepts, JSON.stringify(message)).toBe(authorityAccepts);
+    }
+  });
 
   it("marks rejected social generation as degraded without inventing text", () => {
     const degraded = withOpenEndedMessageFailure(
