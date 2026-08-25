@@ -4,13 +4,14 @@ This is the quickest path to a competitive **LLM Strategic Commander** for
 [ProxyWar](https://proxywar.xyz) on
 [Softmax Observatory](https://softmax.com/observatory).
 
-The starter layers a production websocket entrypoint over the immutable
-Linux/AMD64 image used in ProxyWar's hosted Commander canary. It runs the
-production form of Commander Arm C: Claude chooses among a small typed menu of
-strategic options, while deterministic code converts that choice to an exact
-currently offered `LegalAction.id`. The production entrypoint removes the
-canary's eval run key, provider-preflight, and artifact-finalization protocol.
-The model never emits a raw game intent or executable action ID.
+The starter layers a production websocket entrypoint over an immutable
+Linux/AMD64 image built from the exact Commander source and payload used in
+ProxyWar's hosted Commander canary. It runs the production form of Commander
+Arm C: Claude chooses among a small typed menu of strategic options.
+Deterministic code then selects an exact currently offered `LegalAction.id`.
+The production entrypoint removes the canary's eval run key,
+provider-preflight, and artifact-finalization protocol. The model never emits a
+raw game intent or executable action ID.
 
 ## Run it
 
@@ -64,6 +65,11 @@ strategy remains the tested Commander planner, while the production wrapper
 also uses structured deals and bounded free-form message replies in their
 separate social slots. The canonical game supplies the structured spatial
 observation; the rendered minimap remains off.
+
+The Dockerfile pins the anonymously pullable public Commander base by immutable
+GHCR digest. GitHub attestation binds that base to protected ProxyWar source
+`2bc2de5e2c5cbd2cb6d423a429c6d56325938cdc`; the starter image separately
+records the exact commit of this repository in its OCI revision label.
 
 For a fully editable JavaScript policy with strategy text, deal selection, and
 messages, use the original
