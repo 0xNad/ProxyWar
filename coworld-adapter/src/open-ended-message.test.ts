@@ -9,7 +9,7 @@ import {
   parseOpenEndedMessageResponse,
   withGeneratedOpenEndedMessage,
   withOpenEndedMessageFailure,
-} from "./open-ended-message";
+} from "../commander-starter/open-ended-message";
 
 function observation(message = "Can we hold this border until turn 300?") {
   return {
