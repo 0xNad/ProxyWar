@@ -32,7 +32,7 @@ test("pins the dependency graph, immutable base, and executable build docs", asy
   assert.doesNotMatch(dockerfile, /\bnpm install\b/);
   assert.match(
     readme,
-    /--build-arg "MITO_SOURCE_SHA=<exact-source-sha>"[\s\S]*-f coworld-adapter\/mitochondria-friend\/Dockerfile[\s\S]*-t proxywar-mitochondria-friend:local[\s\S]*\n  \./,
+    /--build-arg "MITO_SOURCE_SHA=<exact-source-sha>"[\s\S]*-f coworld-adapter\/mitochondria-friend\/Dockerfile[\s\S]*-t proxywar-mitochondria-friend:local[\s\S]*\n {2}\./,
   );
   assert.doesNotMatch(readme, /\. < exact-source-sha > -f/);
 });
