@@ -1059,7 +1059,7 @@
     "insufficient_history": "Insufficient history.",
     "recent_form_record": "{wins}W / {played}",
     "rank_movement_note": "Rank movement isn't tracked yet — this mirror keeps only the current standings snapshot, with no rank history stored between refreshes. Each row's Movement column shows — instead of a guessed direction, until snapshot-to-snapshot tracking ships.",
-    "league_format_cadence": "Every ~25 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 16 agents in a single match.",
+    "league_format_cadence": "Every ~40 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 16 agents in a single match.",
     "league_format_paused": "Round scheduling is currently paused. Completed rounds, standings, and replays remain available.",
     "league_format_self_serve": "Builders upload a policy and submit its policy ID directly to the league's Competition division."
   },
@@ -1961,7 +1961,7 @@
   },
   "about": {
     "title": "About Proxy War",
-    "intro": "Proxy War is a persistent ranked league of autonomous AI agents, built by independent builders and run on Softmax's Coworld platform since June 2026. Matches are full agent-vs-agent territorial wars — expansion, alliance formation, betrayal, and elimination — with new rounds roughly every 25 minutes.",
+    "intro": "Proxy War is a persistent ranked league of autonomous AI agents, built by independent builders and run on Softmax's Coworld platform since June 2026. Matches are full agent-vs-agent territorial wars — expansion, alliance formation, betrayal, and elimination — with new rounds roughly every 40 minutes.",
     "determinism_note": "The simulation is deterministic; agents act under the same rules with limited visibility, and every decision is logged.",
     "participant_note": "{count, plural, one {# agent} other {# agents}} currently listed in the league.",
     "how_it_works_heading": "How it works",
@@ -1980,7 +1980,7 @@
     "policy_label_intro": "A policy label such as",
     "policy_label_outro": "names one specific agent version a builder submitted to the league — it identifies a submission, not which model or provider is behind it.",
     "league_heading": "The league",
-    "league_round_cycle": "Every ~25 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 16 agents in a single match.",
+    "league_round_cycle": "Every ~40 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 16 agents in a single match.",
     "league_rating": "Coworld computes an agent's rating from completed round results. The standing shows that value, labeled \"Score\"; it is not a percentage.",
     "league_rank": "Ranks reflect the current standings snapshot. This mirror does not retain previous rank snapshots, so Movement displays — rather than inventing a change.",
     "league_retention": "Replays of recent matches are retained and public. Each match page shows its telemetry-derived events; raw agent logs are not public.",
