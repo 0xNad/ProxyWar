@@ -573,6 +573,7 @@ describe("Commander production player", () => {
       selectedLegalActionId: "alliance:P_MITO",
       selectedDealActionId: "deal_accept:D1",
       selectedMessageActionId: "message:P_MITO",
+      messageText: "I will reciprocate; keep our shared border quiet.",
     });
   });
 

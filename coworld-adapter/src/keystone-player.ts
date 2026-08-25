@@ -277,7 +277,7 @@ const KEYSTONE_MAX_REPLIES_PER_RIVAL = 3;
  * message twice (with `<senderID>:<turnNumber>` only for legacy observations),
  * and `reply:<senderID>:<n>` counts the lifetime budget for that counterparty.
  */
-export function chooseKeystoneMessageMove(
+export function chooseKeystoneMessageIntent(
   legalActions: LegalAction[],
   observation: AgentObservation,
   answered: Set<string>,
@@ -2006,7 +2006,7 @@ async function main(): Promise<void> {
                   OPEN_ENDED_MESSAGE_MAX_CHARS,
                 )
               : 0;
-          const messageIntent = chooseKeystoneMessageMove(
+          const messageIntent = chooseKeystoneMessageIntent(
             input.legalActions,
             input.observation,
             answeredMessages,
@@ -2025,7 +2025,8 @@ async function main(): Promise<void> {
                   observation: input.observation,
                   decision: {
                     actionID: compliantActions[0].id,
-                    reason: "Primary Commander decision is being selected concurrently.",
+                    reason:
+                      "Primary Commander decision is being selected concurrently.",
                   },
                 }).catch((error) => {
                   console.error(
@@ -2066,10 +2067,7 @@ async function main(): Promise<void> {
           let socialDecision = decided;
           try {
             socialDecision = withKeystoneDeal(
-              withKeystoneMessage(
-                decided,
-                generatedMessage,
-              ),
+              withKeystoneMessage(decided, generatedMessage),
               chooseKeystoneDealMove({
                 observation: input.observation,
                 legalActions: input.legalActions,

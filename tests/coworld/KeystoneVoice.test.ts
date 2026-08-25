@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  chooseKeystoneMessageMove,
+  chooseKeystoneMessageIntent,
   decisionToResponse,
   withKeystoneMessage,
 } from "../../coworld-adapter/src/keystone-player";
@@ -55,12 +55,12 @@ const holdAction = {
 describe("keystone free-text voice", () => {
   it("stays silent when the menu offers no comms slot (flag off, or spawn phase)", () => {
     expect(
-      chooseKeystoneMessageMove([holdAction], observation(), new Set()),
+      chooseKeystoneMessageIntent([holdAction], observation(), new Set()),
     ).toBeNull();
   });
 
   it("answers the newest inbound message from a rival that offered a slot", () => {
-    const move = chooseKeystoneMessageMove(
+    const move = chooseKeystoneMessageIntent(
       [holdAction, messageOffer("rival-a")],
       observation({ inbound: [{ senderID: "rival-a", turnNumber: 120 }] }),
       new Set(),
@@ -76,10 +76,10 @@ describe("keystone free-text voice", () => {
     const obs = observation({
       inbound: [{ senderID: "rival-a", turnNumber: 120 }],
     });
-    const first = chooseKeystoneMessageMove(actions, obs, answered);
+    const first = chooseKeystoneMessageIntent(actions, obs, answered);
     expect(first).not.toBeNull();
     first?.commit?.();
-    expect(chooseKeystoneMessageMove(actions, obs, answered)).toBeNull();
+    expect(chooseKeystoneMessageIntent(actions, obs, answered)).toBeNull();
   });
 
   // The defect this budget exists for: every reply becomes a NEW inbound turn
@@ -90,7 +90,7 @@ describe("keystone free-text voice", () => {
     const actions = [messageOffer("rival-a")];
     let sent = 0;
     for (let turn = 100; turn < 100 + 200 * 10; turn += 10) {
-      const move = chooseKeystoneMessageMove(
+      const move = chooseKeystoneMessageIntent(
         actions,
         observation({ inbound: [{ senderID: "rival-a", turnNumber: turn }] }),
         answered,
@@ -106,13 +106,13 @@ describe("keystone free-text voice", () => {
   it("keeps the budget per counterparty", () => {
     const answered = new Set<string>();
     for (let turn = 100; turn < 200; turn += 10) {
-      chooseKeystoneMessageMove(
+      chooseKeystoneMessageIntent(
         [messageOffer("rival-a")],
         observation({ inbound: [{ senderID: "rival-a", turnNumber: turn }] }),
         answered,
       )?.commit?.();
     }
-    const other = chooseKeystoneMessageMove(
+    const other = chooseKeystoneMessageIntent(
       [messageOffer("rival-b")],
       observation({ inbound: [{ senderID: "rival-b", turnNumber: 300 }] }),
       answered,
@@ -129,15 +129,15 @@ describe("keystone free-text voice", () => {
         { playerID: "ally-b", sharesBorder: true, isAllied: true },
       ],
     });
-    const opener = chooseKeystoneMessageMove(actions, obs, answered);
+    const opener = chooseKeystoneMessageIntent(actions, obs, answered);
     expect(opener?.actionID).toBe("message:rival-a");
     opener?.commit?.();
-    expect(chooseKeystoneMessageMove(actions, obs, answered)).toBeNull();
+    expect(chooseKeystoneMessageIntent(actions, obs, answered)).toBeNull();
   });
 
   it("does not open to a rival it shares no border with", () => {
     expect(
-      chooseKeystoneMessageMove(
+      chooseKeystoneMessageIntent(
         [messageOffer("far-c")],
         observation({
           rivals: [{ playerID: "far-c", sharesBorder: false, isAllied: false }],
@@ -156,15 +156,18 @@ describe("keystone free-text voice", () => {
         rivals: [{ playerID: "rival-b", sharesBorder: true, isAllied: false }],
       });
     for (let turn = 100; turn < 180; turn += 10) {
-      chooseKeystoneMessageMove(actions, obs(turn), answered)?.commit?.();
+      chooseKeystoneMessageIntent(actions, obs(turn), answered)?.commit?.();
     }
     // rival-a is exhausted; rival-b borders us and is unwritten — but an
     // unanswered inbound must not be stepped over to start a new conversation.
-    expect(chooseKeystoneMessageMove(actions, obs(500), answered)).toBeNull();
+    expect(chooseKeystoneMessageIntent(actions, obs(500), answered)).toBeNull();
   });
 
   it("a generated line survives the server-side message validator", () => {
-    const move = { actionID: "message:rival-a", text: "Hold west until turn 240; I will keep my troops east." };
+    const move = {
+      actionID: "message:rival-a",
+      text: "Hold west until turn 240; I will keep my troops east.",
+    };
     const validation = validateAgentMessageDecision(
       { messageActionID: move.actionID, messageText: move.text } as never,
       [messageOffer("rival-a")],

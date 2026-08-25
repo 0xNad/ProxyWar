@@ -16,7 +16,6 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import {
   chooseKeystoneDealMove,
-  chooseKeystoneMessageMove,
   decisionToResponse,
   requestToBrainInput,
   spawnPreferenceDecision,
@@ -24,13 +23,8 @@ import {
   wireMaxActionsPerDecision,
   wireMaxSpawnPreferences,
   withKeystoneDeal,
-  withKeystoneMessage,
   withoutKeystoneTreatyBreaches,
 } from "../src/keystone-player";
-import {
-  generateOpenEndedMessage,
-  OPEN_ENDED_MESSAGE_MAX_CHARS,
-} from "./open-ended-message";
 import {
   CommanderBedrockProvider,
   commanderBedrockRequest,
@@ -43,6 +37,13 @@ import {
   PRODUCTION_COMMANDER_SELECTOR_TIMEOUT_MS,
   withCommanderProviderEvidence,
 } from "./commander-production-runtime";
+import {
+  chooseOpenEndedMessageIntent,
+  generateOpenEndedMessage,
+  OPEN_ENDED_MESSAGE_MAX_CHARS,
+  withGeneratedOpenEndedMessage,
+  withOpenEndedMessageFailure,
+} from "./open-ended-message";
 
 export {
   commanderBedrockRequest,
@@ -103,7 +104,7 @@ export function withProductionCommanderSocial(input: {
   generatedMessage: { actionID: string; text: string } | null;
 }): AgentDecision {
   return withKeystoneDeal(
-    withKeystoneMessage(input.decision, input.generatedMessage),
+    withGeneratedOpenEndedMessage(input.decision, input.generatedMessage),
     chooseKeystoneDealMove({
       observation: input.brainInput.observation,
       legalActions: input.brainInput.legalActions,
@@ -234,7 +235,7 @@ async function main(): Promise<void> {
                   OPEN_ENDED_MESSAGE_MAX_CHARS,
                 )
               : 0;
-          const messageIntent = chooseKeystoneMessageMove(
+          const messageIntent = chooseOpenEndedMessageIntent(
             input.legalActions,
             input.observation,
             answeredMessages,
@@ -244,6 +245,7 @@ async function main(): Promise<void> {
             reciprocal === null
               ? Promise.resolve(brain.decide(compliantInput))
               : Promise.resolve(reciprocal);
+          let socialGenerationFailed = false;
           const messagePromise =
             messageIntent === null
               ? Promise.resolve(null)
@@ -254,13 +256,13 @@ async function main(): Promise<void> {
                     "Concise, hard-nosed, strategically credible, and willing to cooperate when interests align. Negotiate concrete borders, timing, threats, and reciprocal commitments; do not flatter or make promises you cannot keep.",
                   intent: messageIntent,
                   observation: input.observation,
-                  decision:
-                    reciprocal ?? {
-                      actionID: compliantActions[0].id,
-                      reason:
-                        "Primary Commander decision is being selected concurrently.",
-                    },
+                  decision: reciprocal ?? {
+                    actionID: compliantActions[0].id,
+                    reason:
+                      "Primary Commander decision is being selected concurrently.",
+                  },
                 }).catch((error) => {
+                  socialGenerationFailed = true;
                   console.error(
                     `commander social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
                   );
@@ -271,9 +273,13 @@ async function main(): Promise<void> {
             messagePromise,
           ]);
           if (generatedMessage !== null) messageIntent?.commit?.();
+          const socialDecision = withOpenEndedMessageFailure(
+            decided,
+            socialGenerationFailed,
+          );
           try {
             decision = withProductionCommanderSocial({
-              decision: decided,
+              decision: socialDecision,
               brainInput: input,
               proposedDeals,
               generatedMessage,
@@ -282,7 +288,7 @@ async function main(): Promise<void> {
             console.error(
               `commander social slots skipped: ${socialError instanceof Error ? socialError.message : String(socialError)}`,
             );
-            decision = decided;
+            decision = socialDecision;
           }
         }
         const response = withCommanderProviderEvidence(

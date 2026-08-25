@@ -16,6 +16,10 @@ import {
   withCommanderProviderEvidence,
 } from "../commander-starter/commander-production-runtime";
 import {
+  generateOpenEndedMessage,
+  withOpenEndedMessageFailure,
+} from "../commander-starter/open-ended-message";
+import {
   decisionToResponse,
   requestToBrainInput,
   transportFallbackResponse,
@@ -23,7 +27,6 @@ import {
   wireMaxSpawnPreferences,
   withoutKeystoneTreatyBreaches,
 } from "../src/keystone-player";
-import { generateOpenEndedMessage } from "../commander-starter/open-ended-message";
 import { createOwnerCapabilityEvidenceLogger } from "../tester-starter-llm/owner-capabilities.mjs";
 import {
   createMitochondriaFriendLlmPolicy,
@@ -227,6 +230,7 @@ async function main(): Promise<void> {
                   brain.decide({ ...input, legalActions: compliantActions }),
                 )
               : Promise.resolve(override);
+          let socialGenerationFailed = false;
           const messagePromise = preparation.messageIntent
             ? generateOpenEndedMessage({
                 provider,
@@ -235,12 +239,13 @@ async function main(): Promise<void> {
                   "Warm, cooperative, specific, and trustworthy, but never gullible. Prefer peace, trade, reciprocal support, and durable alliances; ask concrete questions and make only promises you can honor.",
                 intent: preparation.messageIntent,
                 observation: input.observation,
-                decision:
-                  override ?? {
-                    actionID: compliantActions[0].id,
-                    reason: "Primary Commander decision is being selected concurrently.",
-                  },
+                decision: override ?? {
+                  actionID: compliantActions[0].id,
+                  reason:
+                    "Primary Commander decision is being selected concurrently.",
+                },
               }).catch((error) => {
+                socialGenerationFailed = true;
                 console.error(
                   `MitochondriaFriend social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
                 );
@@ -253,7 +258,7 @@ async function main(): Promise<void> {
           ]);
           if (generatedMessage !== null) preparation.messageIntent?.commit?.();
           decision = withMitoDiplomacy(
-            primary,
+            withOpenEndedMessageFailure(primary, socialGenerationFailed),
             preparation,
             generatedMessage,
           );
