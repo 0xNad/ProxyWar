@@ -97,6 +97,8 @@
   "coworld-adapter/src/commander-xp-player.ts",
   "coworld-adapter/src/coworld-decision-wire.test.ts",
   "coworld-adapter/src/coworld-decision-wire.ts",
+  "coworld-adapter/src/coworld-global-ping-barrier.test.ts",
+  "coworld-adapter/src/coworld-global-ping-barrier.ts",
   "coworld-adapter/src/coworld-manifest-protocol.test.ts",
   "coworld-adapter/src/coworld-seat-specs.test.ts",
   "coworld-adapter/src/coworld-seat-specs.ts",

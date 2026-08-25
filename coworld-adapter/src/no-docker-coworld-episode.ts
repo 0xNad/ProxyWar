@@ -21,6 +21,7 @@ import {
   type ComposedCoworldDecision,
 } from "./coworld-decision-wire.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
+import { CoworldGlobalPingBarrier } from "./coworld-global-ping-barrier.ts";
 import {
   coworldResults,
   resolveWinnerSlot,
@@ -152,6 +153,7 @@ class CoworldProtocolServer {
   private readonly players = new Map<number, InstanceType<typeof WebSocket>>();
   private readonly pending = new Map<string, PendingDecision>();
   private readonly globalSockets = new Set<InstanceType<typeof WebSocket>>();
+  private readonly globalPingBarrier = new CoworldGlobalPingBarrier();
   private readonly replaySockets = new Set<InstanceType<typeof WebSocket>>();
   // Live-episode snapshots are latest-only: the /global broadcast and status
   // only ever read the newest frame + the count, and the results/replay artifacts
@@ -184,7 +186,14 @@ class CoworldProtocolServer {
       if (url.pathname === "/global") {
         this.wsServer.handleUpgrade(request, socket, head, (websocket) => {
           this.globalSockets.add(websocket);
-          websocket.on("close", () => this.globalSockets.delete(websocket));
+          const pingConnectionID = this.globalPingBarrier.connected();
+          websocket.on("ping", () =>
+            this.globalPingBarrier.observedPing(pingConnectionID),
+          );
+          websocket.on("close", () => {
+            this.globalSockets.delete(websocket);
+            this.globalPingBarrier.disconnected(pingConnectionID);
+          });
           websocket.send(
             JSON.stringify(
               this.statusSnapshot("global-connected", this.latestSnapshot()),
@@ -240,6 +249,10 @@ class CoworldProtocolServer {
       websocket.close();
     }
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+
+  async waitForGlobalProtocolProbe(): Promise<void> {
+    await this.globalPingBarrier.waitForPingOrGrace();
   }
 
   port(): number {
@@ -807,6 +820,12 @@ async function runCoworldGameContainer(): Promise<void> {
       "application/json",
     );
     await server.sendFinal();
+    // Coworld certification opens /global, reads the first state frame, then
+    // sends an RFC 6455 Ping. A two-step certification episode can otherwise
+    // finish and close the socket between those operations. Keep only an
+    // already-connected global socket alive for a bounded grace window; ws
+    // automatically answers the Ping with an identical Pong payload.
+    await server.waitForGlobalProtocolProbe();
     console.log(
       JSON.stringify(
         {
