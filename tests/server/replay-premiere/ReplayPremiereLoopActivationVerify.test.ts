@@ -43,7 +43,6 @@ import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
   PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
-  PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS,
   derivePremiereId,
   foldLoopJournal,
@@ -526,6 +525,7 @@ async function createRetainedTransaction(
   current: LoopHoldState,
   loopConfig: LoopConfig,
   prefix: string,
+  createdAt = NOW.toISOString(),
 ): Promise<RetainedAdmissionTransaction> {
   await Promise.all([
     mkdir(loopConfig.ingestScratchDir, { recursive: true }),
@@ -537,7 +537,7 @@ async function createRetainedTransaction(
     premiereId: current.premiereId,
     episodeRequestId: current.episodeRequestId,
     bundleSha256: "d".repeat(64),
-    createdAt: NOW.toISOString(),
+    createdAt,
     rawReplayPath: scratch("replay"),
     divisionFile: scratch("divisions.json"),
     episodeFile: scratch("episode.json"),
@@ -1096,6 +1096,7 @@ describe("admission projection deadline", () => {
       phase: "claimed",
       activatedAt: null,
       premierePageLive: false,
+      holdExpiresAt: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
     });
     const loopConfig = config();
     await Promise.all([
@@ -1167,6 +1168,7 @@ describe("admission projection deadline", () => {
     expect(journal.holdUpdates).toHaveLength(1);
     const preserved = journal.holdUpdates[0];
     expect(preserved.phase).toBe("claimed");
+    expect(preserved.holdExpiresAt).toBe(current.holdExpiresAt);
 
     await progressHold(
       preserved,
@@ -1190,6 +1192,9 @@ describe("admission projection deadline", () => {
     expect(storageFloor).toHaveBeenCalledTimes(2);
     expect(journal.released).toEqual([]);
     expect(journal.holdUpdates.at(-1)?.phase).toBe("admitted");
+    expect(journal.holdUpdates.at(-1)?.holdExpiresAt).toBe(
+      current.holdExpiresAt,
+    );
     expect(activate).toHaveBeenCalledTimes(1);
     expect(track).not.toHaveBeenCalled();
     expect(await retainedFileSnapshot(loopConfig)).toEqual({});
@@ -1315,49 +1320,138 @@ describe("admission projection deadline", () => {
     expect(journal.released).toEqual([]);
   });
 
-  test("an expired claimed hold with a retained marker extends instead of releasing", async () => {
+  test("a multi-day retained claim keeps its fixed expiry across one unsafe read, then terminally releases on proven absence", async () => {
+    const scheduledAt = new Date(
+      NOW.getTime() - 4 * 24 * 60 * 60_000,
+    ).toISOString();
     const current = hold({
       phase: "claimed",
       activatedAt: null,
       premierePageLive: false,
-      holdExpiresAt: new Date(NOW.getTime() - 1).toISOString(),
+      scheduledAt,
+      holdExpiresAt: holdExpiresAtForScheduled(scheduledAt),
+      createdAt: scheduledAt,
     });
     const loopConfig = config();
-    await Promise.all([
-      mkdir(loopConfig.ingestScratchDir, { recursive: true }),
-      mkdir(loopConfig.nonceDir, { recursive: true }),
-    ]);
-    const scratch = (name: string) =>
-      path.join(loopConfig.ingestScratchDir, name);
-    const transaction: RetainedAdmissionTransaction = {
-      premiereId: current.premiereId,
-      episodeRequestId: current.episodeRequestId,
-      bundleSha256: "c".repeat(64),
-      createdAt: NOW.toISOString(),
-      rawReplayPath: scratch("expired.replay"),
-      divisionFile: scratch("expired.divisions.json"),
-      episodeFile: scratch("expired.episode.json"),
-      sourceFile: scratch("expired.source.json"),
-      eligibilityFile: scratch("expired.eligibility.json"),
-      definitionFile: scratch("expired.definition.json"),
-      nonceFile: path.join(loopConfig.nonceDir, "expired-nonce.bin"),
-      markerPath: scratch(`${current.premiereId}.retained-admission.json`),
-    };
-    await persistRetainedAdmissionTransaction(transaction, loopConfig);
+    await createRetainedTransaction(
+      current,
+      loopConfig,
+      "multi-day-absent",
+      scheduledAt,
+    );
+    const retained = await retainedFileSnapshot(loopConfig);
     const journal = captureJournal();
     const reconcile = vi.fn();
+    const readAdmission = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient catalog read refusal"))
+      .mockResolvedValueOnce(null);
+    const persistRetirement = vi.fn(async () => null);
+    const operationNow = new Date(NOW.getTime() + 30_000);
 
     await progressHold(current, null, loopConfig, journal.writer, NOW, {
       reconcileRetainedAdmission: reconcile,
-      hasStorageFloor: async () => true,
+      readAdmission,
+      persistRetirement,
+      now: () => operationNow,
     });
 
     expect(reconcile).not.toHaveBeenCalled();
     expect(journal.released).toEqual([]);
-    expect(journal.holdUpdates).toHaveLength(1);
-    expect(Date.parse(journal.holdUpdates[0].holdExpiresAt)).toBe(
-      NOW.getTime() + PREMIERE_LOOP_HOLD_WINDOW_MS,
+    expect(journal.holdUpdates).toEqual([current]);
+    expect(journal.holdUpdates[0].holdExpiresAt).toBe(current.holdExpiresAt);
+    expect(await retainedFileSnapshot(loopConfig)).toEqual(retained);
+    expect(persistRetirement).not.toHaveBeenCalled();
+
+    await progressHold(
+      journal.holdUpdates[0],
+      null,
+      loopConfig,
+      journal.writer,
+      new Date(NOW.getTime() + 60_000),
+      {
+        reconcileRetainedAdmission: reconcile,
+        readAdmission,
+        persistRetirement,
+        now: () => new Date(operationNow.getTime() + 60_000),
+      },
     );
+
+    expect(readAdmission).toHaveBeenCalledTimes(2);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(journal.released).toHaveLength(1);
+    expect(journal.released[0]).toMatchObject({
+      hold: { phase: "claimed", holdExpiresAt: current.holdExpiresAt },
+      outcome: "expired",
+      terminal: true,
+    });
+    expect(persistRetirement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        premiereId: current.premiereId,
+        phase: "claimed",
+        outcome: "expired",
+        terminal: true,
+      }),
+    );
+    expect(await retainedFileSnapshot(loopConfig)).toEqual(retained);
+    const standing = JSON.parse(
+      await readFile(loopConfig.contractPath, "utf8"),
+    ) as { holds: unknown[] };
+    expect(standing.holds).toEqual([]);
+  });
+
+  test("an expired retained claim with a present admission tombstones as admitted and preserves recovery evidence", async () => {
+    const scheduledAt = new Date(
+      NOW.getTime() - 4 * 24 * 60 * 60_000,
+    ).toISOString();
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+      scheduledAt,
+      holdExpiresAt: holdExpiresAtForScheduled(scheduledAt),
+      createdAt: scheduledAt,
+    });
+    const loopConfig = config();
+    await createRetainedTransaction(
+      current,
+      loopConfig,
+      "multi-day-present",
+      scheduledAt,
+    );
+    const retained = await retainedFileSnapshot(loopConfig);
+    const journal = captureJournal();
+    const reconcile = vi.fn();
+    const persistRetirement = vi.fn(async () => null);
+
+    await progressHold(current, null, loopConfig, journal.writer, NOW, {
+      reconcileRetainedAdmission: reconcile,
+      readAdmission: async () => ({}) as ReplayPremiereAdmissionRecordV1,
+      persistRetirement,
+      now: () => new Date(NOW.getTime() + 30_000),
+    });
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(journal.holdUpdates).toHaveLength(1);
+    expect(journal.holdUpdates[0]).toMatchObject({
+      phase: "admitted",
+      holdExpiresAt: current.holdExpiresAt,
+    });
+    expect(journal.released).toHaveLength(1);
+    expect(journal.released[0]).toMatchObject({
+      hold: { phase: "admitted", holdExpiresAt: current.holdExpiresAt },
+      outcome: "expired",
+      terminal: true,
+    });
+    expect(persistRetirement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        premiereId: current.premiereId,
+        phase: "admitted",
+        outcome: "expired",
+        terminal: true,
+      }),
+    );
+    expect(await retainedFileSnapshot(loopConfig)).toEqual(retained);
   });
 
   test("maps an uncertain Catalog-to-CLI result to hold, never admit_failed", async () => {

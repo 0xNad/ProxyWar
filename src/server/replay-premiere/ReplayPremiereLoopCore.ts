@@ -36,8 +36,12 @@ export const PREMIERE_LOOP_DIVISION_ID =
 /** Lead time from "now" to the scheduled reveal window (ceil-to-minute). */
 export const PREMIERE_LOOP_SCHEDULE_LEAD_MS = 5 * 60_000;
 /**
- * Hard per-episode availability valve: an episode auto-publishes at
- * scheduledAt + this, even if the premiere never revealed. Never extended.
+ * Hard per-episode public-availability valve: an episode may publish at
+ * scheduledAt + this, even if the premiere never revealed. The timestamp is
+ * fixed at claim and never extended. A private retained-admission recovery may
+ * remain journal-active past this instant only while its bounded catalog read
+ * is unsafe; the emitted suppression still carries this original expired
+ * deadline and the loop retries at its next scheduled tick.
  *
  * Derivation (2026-07-22 real-speed retune): the 5-minute schedule lead sits
  * BEFORE scheduledAt, so this window must cover the worst admitted show plus
@@ -419,7 +423,12 @@ export interface LoopHoldState {
   roundNumber: number | null;
   /** Fixed at claim; reused verbatim by every retry so re-admission dedups. */
   scheduledAt: string;
-  /** scheduledAt + hold window; the hard availability valve. Never extended. */
+  /**
+   * scheduledAt + hold window; the fixed public-availability valve. Never
+   * moved. A private recovery claim may remain journal-active past it only
+   * while catalog state cannot be read safely; suppression still carries this
+   * timestamp.
+   */
   holdExpiresAt: string;
   premierePageLive: boolean;
   mapLabel: string;
@@ -899,8 +908,10 @@ export function loopSideEffectPlan(shadow: boolean): LoopSideEffectPlan {
 }
 
 /**
- * Terminal availability check: a hold whose hard expiry has passed must be
- * released and the episode published, regardless of premiere progress.
+ * Terminal public-availability check. Once this fixed deadline passes, the
+ * episode may publish even if a private retained-admission proof is temporarily
+ * unreadable. The loop releases the journal hold as soon as that bounded proof
+ * read can safely distinguish an admitted premiere from a claim-only record.
  */
 export function isHoldExpired(hold: LoopHoldState, now: Date): boolean {
   const expiresMs = Date.parse(hold.holdExpiresAt);

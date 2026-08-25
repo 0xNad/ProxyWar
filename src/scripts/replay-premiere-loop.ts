@@ -39,7 +39,6 @@ import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
   PREMIERE_LOOP_DIVISION_ID,
-  PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_LEAGUE_ID,
   PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS,
   PREMIERE_LOOP_MAX_RAW_REPLAY_CACHE,
@@ -2228,6 +2227,7 @@ export interface ProgressHoldDependencies {
   activateHold?: typeof activateHold;
   trackHold?: typeof trackHold;
   persistRetirement?: typeof persistReplayPremiereTerminalTombstone;
+  readAdmission?: typeof readReplayPremiereAdmissionRecord;
   /** Refreshes timestamps after the potentially long admission projection. */
   now?: () => Date;
 }
@@ -2250,7 +2250,54 @@ export async function progressHold(
     hold.phase === "claimed" ? await loadRetained(hold, config) : null;
   if (isHoldExpired(hold, now)) {
     if (claimedTransaction !== null) {
-      await preserveUncertainAdmissionHold(hold, config, journal, now);
+      const expirationNow = dependencies.now?.() ?? new Date();
+      let recoveredAdmission: Awaited<
+        ReturnType<typeof readReplayPremiereAdmissionRecord>
+      >;
+      try {
+        recoveredAdmission = await (
+          dependencies.readAdmission ?? readReplayPremiereAdmissionRecord
+        )({
+          privateStateRoot: config.privateStateRoot,
+          premiereId: hold.premiereId,
+        });
+      } catch (error) {
+        // A bounded validated read is the only fact that distinguishes a
+        // tombstone-requiring admission from a never-committed claim. Do not
+        // guess across a transient unsafe read. The one-shot loop provides the
+        // retry backoff; keep the original expired public valve unchanged and
+        // retry no sooner than the next scheduled tick.
+        log(
+          `expired retained admission ${hold.premiereId} catalog proof unavailable; retrying next tick without extending holdExpiresAt: ${operatorCodeOf(error)}`,
+        );
+        await preserveUncertainAdmissionHold(
+          hold,
+          config,
+          journal,
+          expirationNow,
+        );
+        return;
+      }
+      // Preserve the marker and scratch independently for later reconciliation
+      // or reclamation. A present immutable admission is recovered truthfully
+      // as `admitted` so releaseHold persists its terminal tombstone first; a
+      // proven absence stays `claimed` and needs no fabricated tombstone.
+      const expired =
+        recoveredAdmission === null
+          ? hold
+          : { ...hold, phase: "admitted" as const };
+      if (recoveredAdmission !== null) {
+        await journal.appendHoldUpdate(expired);
+      }
+      await releaseHold(
+        expired,
+        "expired",
+        true,
+        config,
+        journal,
+        expirationNow,
+        persistRetirement,
+      );
       return;
     }
     await releaseHold(
@@ -2395,18 +2442,11 @@ async function preserveUncertainAdmissionHold(
   journal: JournalWriter,
   now: Date,
 ): Promise<LoopHoldState> {
-  const preserved = {
-    ...hold,
-    holdExpiresAt: new Date(
-      Math.max(
-        Date.parse(hold.holdExpiresAt),
-        now.getTime() + PREMIERE_LOOP_HOLD_WINDOW_MS,
-      ),
-    ).toISOString(),
-  };
-  await journal.appendHoldUpdate(preserved);
-  await writeContractForHold(preserved, config, now);
-  return preserved;
+  // Retained evidence changes what may be cleaned up or terminally released;
+  // it never changes the claim-time public availability deadline.
+  await journal.appendHoldUpdate(hold);
+  await writeContractForHold(hold, config, now);
+  return hold;
 }
 
 async function loadResumeMaterials(
