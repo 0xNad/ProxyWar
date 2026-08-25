@@ -563,13 +563,17 @@ describe("Commander production player", () => {
     const social = withProductionCommanderSocial({
       decision: reciprocal!,
       brainInput,
-      answeredMessages: new Set(),
       proposedDeals: new Set(),
+      generatedMessage: {
+        actionID: "message:P_MITO",
+        text: "I will reciprocate; keep our shared border quiet.",
+      },
     });
     expect(decisionToResponse("req", social)).toMatchObject({
       selectedLegalActionId: "alliance:P_MITO",
       selectedDealActionId: "deal_accept:D1",
       selectedMessageActionId: "message:P_MITO",
+      messageText: "I will reciprocate; keep our shared border quiet.",
     });
   });
 

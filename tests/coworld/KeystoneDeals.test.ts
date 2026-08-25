@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   chooseKeystoneDealMove,
-  chooseKeystoneMessageMove,
+  chooseKeystoneMessageIntent,
   decisionToResponse,
   keystoneAbstentionPartners,
   withKeystoneDeal,
@@ -129,7 +129,15 @@ describe("keystone structured deals", () => {
     const composed = withKeystoneDeal(
       withKeystoneMessage(
         commanderDecision,
-        chooseKeystoneMessageMove(offered, obs, new Set()),
+        (() => {
+          const intent = chooseKeystoneMessageIntent(offered, obs, new Set());
+          return intent === null
+            ? null
+            : {
+                actionID: intent.actionID,
+                text: "I cannot fund that request.",
+              };
+        })(),
       ),
       chooseKeystoneDealMove({
         observation: obs,
@@ -596,9 +604,7 @@ describe("keystone message identity", () => {
   it("answers the newest event first, then an older unanswered same-rival event", () => {
     const olderID = "msg_00000000-0000-4000-8000-000000000021";
     const newerID = "msg_00000000-0000-4000-8000-000000000022";
-    const offered = [
-      action("message", "message:r1", { recipientID: "r1" }),
-    ];
+    const offered = [action("message", "message:r1", { recipientID: "r1" })];
     const obs = observation({ rivals: [liveRival("r1")] });
     obs.nonCombat = {
       inboundMessages: [
@@ -608,11 +614,15 @@ describe("keystone message identity", () => {
     } as AgentObservation["nonCombat"];
     const answered = new Set<string>();
 
-    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    const newest = chooseKeystoneMessageIntent(offered, obs, answered);
+    expect(newest).not.toBeNull();
+    newest?.commit?.();
     expect(answered).toContain(newerID);
     expect(answered).not.toContain(olderID);
 
-    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    const older = chooseKeystoneMessageIntent(offered, obs, answered);
+    expect(older).not.toBeNull();
+    older?.commit?.();
     expect(answered).toContain(olderID);
   });
 });

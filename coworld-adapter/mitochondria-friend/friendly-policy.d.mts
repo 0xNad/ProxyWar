@@ -5,8 +5,19 @@ export interface MitoLlmPreparation {
   allowedLegalActionIds?: string[];
   primaryOverrideActionId?: string;
   selectedDealActionId?: string;
-  selectedMessageActionId?: string;
-  messageText?: string;
+  messageIntent?: {
+    actionID: string;
+    recipientID: string;
+    purpose:
+      | "reply"
+      | "border_opener"
+      | "diplomatic_opener"
+      | "deal_proposal"
+      | "relationship_follow_up";
+    maxChars: number;
+    inboundMessageEventID?: string;
+    commit?: () => void;
+  };
   reason: string;
 }
 

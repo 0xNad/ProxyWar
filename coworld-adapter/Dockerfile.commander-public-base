@@ -33,6 +33,8 @@ RUN npm ci --ignore-scripts --omit=dev && npm cache clean --force
 COPY coworld-adapter/src ./src
 COPY coworld-adapter/commander-starter/commander-player.ts ./src/commander-player.ts
 COPY coworld-adapter/commander-starter/commander-production-runtime.ts ./src/commander-production-runtime.ts
+COPY coworld-adapter/commander-starter/open-ended-message.ts ./src/open-ended-message.ts
+COPY coworld-adapter/commander-starter/open-ended-message.ts ./commander-starter/open-ended-message.ts
 
 WORKDIR /app/proxywar
 ENV NODE_ENV=production

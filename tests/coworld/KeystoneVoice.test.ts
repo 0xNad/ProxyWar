@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { withOpenEndedMessageFailure } from "../../coworld-adapter/commander-starter/open-ended-message";
 import {
-  chooseKeystoneMessageMove,
+  chooseKeystoneMessageIntent,
   decisionToResponse,
   withKeystoneMessage,
 } from "../../coworld-adapter/src/keystone-player";
@@ -55,19 +56,19 @@ const holdAction = {
 describe("keystone free-text voice", () => {
   it("stays silent when the menu offers no comms slot (flag off, or spawn phase)", () => {
     expect(
-      chooseKeystoneMessageMove([holdAction], observation(), new Set()),
+      chooseKeystoneMessageIntent([holdAction], observation(), new Set()),
     ).toBeNull();
   });
 
   it("answers the newest inbound message from a rival that offered a slot", () => {
-    const move = chooseKeystoneMessageMove(
+    const move = chooseKeystoneMessageIntent(
       [holdAction, messageOffer("rival-a")],
       observation({ inbound: [{ senderID: "rival-a", turnNumber: 120 }] }),
       new Set(),
     );
-    expect(move?.id).toBe("message:rival-a");
-    expect(move?.text.length).toBeGreaterThan(0);
-    expect(move?.text.length).toBeLessThanOrEqual(280);
+    expect(move?.actionID).toBe("message:rival-a");
+    expect(move?.purpose).toBe("reply");
+    expect(move).not.toHaveProperty("text");
   });
 
   it("never answers the same inbound turn twice", () => {
@@ -76,8 +77,10 @@ describe("keystone free-text voice", () => {
     const obs = observation({
       inbound: [{ senderID: "rival-a", turnNumber: 120 }],
     });
-    expect(chooseKeystoneMessageMove(actions, obs, answered)).not.toBeNull();
-    expect(chooseKeystoneMessageMove(actions, obs, answered)).toBeNull();
+    const first = chooseKeystoneMessageIntent(actions, obs, answered);
+    expect(first).not.toBeNull();
+    first?.commit?.();
+    expect(chooseKeystoneMessageIntent(actions, obs, answered)).toBeNull();
   });
 
   // The defect this budget exists for: every reply becomes a NEW inbound turn
@@ -88,12 +91,15 @@ describe("keystone free-text voice", () => {
     const actions = [messageOffer("rival-a")];
     let sent = 0;
     for (let turn = 100; turn < 100 + 200 * 10; turn += 10) {
-      const move = chooseKeystoneMessageMove(
+      const move = chooseKeystoneMessageIntent(
         actions,
         observation({ inbound: [{ senderID: "rival-a", turnNumber: turn }] }),
         answered,
       );
-      if (move !== null) sent += 1;
+      if (move !== null) {
+        sent += 1;
+        move.commit?.();
+      }
     }
     expect(sent).toBe(3);
   });
@@ -101,18 +107,18 @@ describe("keystone free-text voice", () => {
   it("keeps the budget per counterparty", () => {
     const answered = new Set<string>();
     for (let turn = 100; turn < 200; turn += 10) {
-      chooseKeystoneMessageMove(
+      chooseKeystoneMessageIntent(
         [messageOffer("rival-a")],
         observation({ inbound: [{ senderID: "rival-a", turnNumber: turn }] }),
         answered,
-      );
+      )?.commit?.();
     }
-    const other = chooseKeystoneMessageMove(
+    const other = chooseKeystoneMessageIntent(
       [messageOffer("rival-b")],
       observation({ inbound: [{ senderID: "rival-b", turnNumber: 300 }] }),
       answered,
     );
-    expect(other?.id).toBe("message:rival-b");
+    expect(other?.actionID).toBe("message:rival-b");
   });
 
   it("opens to a bordering rival once per match, and never to an ally", () => {
@@ -124,15 +130,15 @@ describe("keystone free-text voice", () => {
         { playerID: "ally-b", sharesBorder: true, isAllied: true },
       ],
     });
-    expect(chooseKeystoneMessageMove(actions, obs, answered)?.id).toBe(
-      "message:rival-a",
-    );
-    expect(chooseKeystoneMessageMove(actions, obs, answered)).toBeNull();
+    const opener = chooseKeystoneMessageIntent(actions, obs, answered);
+    expect(opener?.actionID).toBe("message:rival-a");
+    opener?.commit?.();
+    expect(chooseKeystoneMessageIntent(actions, obs, answered)).toBeNull();
   });
 
   it("does not open to a rival it shares no border with", () => {
     expect(
-      chooseKeystoneMessageMove(
+      chooseKeystoneMessageIntent(
         [messageOffer("far-c")],
         observation({
           rivals: [{ playerID: "far-c", sharesBorder: false, isAllied: false }],
@@ -151,72 +157,35 @@ describe("keystone free-text voice", () => {
         rivals: [{ playerID: "rival-b", sharesBorder: true, isAllied: false }],
       });
     for (let turn = 100; turn < 180; turn += 10) {
-      chooseKeystoneMessageMove(actions, obs(turn), answered);
+      chooseKeystoneMessageIntent(actions, obs(turn), answered)?.commit?.();
     }
     // rival-a is exhausted; rival-b borders us and is unwritten — but an
     // unanswered inbound must not be stepped over to start a new conversation.
-    expect(chooseKeystoneMessageMove(actions, obs(500), answered)).toBeNull();
+    expect(chooseKeystoneMessageIntent(actions, obs(500), answered)).toBeNull();
   });
 
-  // Round-trip through the REAL validator: keystone's canned lines are the
-  // only text our champion will ever publish, and the validator rejects
-  // (never trims) control, bidi and zero-width characters. Reading them is
-  // not proof; this is.
-  it("every canned line survives the server-side message validator", () => {
-    const rivals = ["rival-a"];
-    const cases: Array<{ inbound?: boolean; allied?: boolean }> = [
-      { inbound: true },
-      { inbound: true, allied: true },
-      { inbound: false },
-    ];
-    const seen = new Set<string>();
-    for (const testCase of cases) {
-      const move = chooseKeystoneMessageMove(
-        [messageOffer("rival-a")],
-        observation({
-          inbound: testCase.inbound
-            ? [{ senderID: "rival-a", turnNumber: 10 }]
-            : [],
-          rivals: rivals.map((id) => ({
-            playerID: id,
-            sharesBorder: true,
-            isAllied: testCase.allied === true,
-          })),
-        }),
-        new Set(),
+  it("a generated line survives the server-side message validator", () => {
+    const move = {
+      actionID: "message:rival-a",
+      text: "Hold west until turn 240; I will keep my troops east.",
+    };
+    const validation = validateAgentMessageDecision(
+      { messageActionID: move.actionID, messageText: move.text } as never,
+      [messageOffer("rival-a")],
+    );
+    expect(validation).not.toBeNull();
+    if (validation === null || validation.ok !== true) {
+      throw new Error(
+        `validator rejected generated prose: ${validation === null ? "null" : validation.reason}`,
       );
-      if (move === null) continue;
-      seen.add(move.text);
-      const validation = validateAgentMessageDecision(
-        { messageActionID: move.id, messageText: move.text } as never,
-        [
-          {
-            id: move.id,
-            kind: "message",
-            label: "m",
-            intent: null,
-            risk: { level: "none", score: 0 },
-            metadata: { recipientID: "rival-a" },
-          } as never,
-        ],
-      );
-      // Narrow rather than optional-chain: the failure arm carries `reason`,
-      // and asserting through `?.` would pass vacuously if it ever failed.
-      expect(validation).not.toBeNull();
-      if (validation === null || validation.ok !== true) {
-        throw new Error(
-          `validator rejected a canned line: ${validation === null ? "null" : validation.reason}`,
-        );
-      }
-      expect(validation.text).toBe(move.text);
     }
-    expect(seen.size).toBeGreaterThan(1);
+    expect(validation.text).toBe(move.text);
   });
 
   it("attaches the pair to a decision without clobbering a brain that already spoke", () => {
     const base = { actionID: "hold", reason: "r" } as unknown as AgentDecision;
     expect(
-      withKeystoneMessage(base, { id: "message:x", text: "hi" }),
+      withKeystoneMessage(base, { actionID: "message:x", text: "hi" }),
     ).toMatchObject({ messageActionID: "message:x", messageText: "hi" });
     expect(withKeystoneMessage(base, null)).toBe(base);
     const spoken = {
@@ -225,7 +194,7 @@ describe("keystone free-text voice", () => {
       messageText: "mine",
     } as AgentDecision;
     expect(
-      withKeystoneMessage(spoken, { id: "message:x", text: "hi" })
+      withKeystoneMessage(spoken, { actionID: "message:x", text: "hi" })
         .messageActionID,
     ).toBe("message:own");
   });
@@ -256,5 +225,22 @@ describe("keystone free-text voice", () => {
       messageActionID: "message:rival-a",
     } as unknown as AgentDecision);
     expect(idOnly).not.toHaveProperty("selectedMessageActionId");
+  });
+
+  it("makes rejected LLM social generation loud without inventing a body", () => {
+    const response = decisionToResponse(
+      "req-social-failure",
+      withOpenEndedMessageFailure(
+        { actionID: "hold", reason: "primary remains valid" },
+        true,
+      ),
+    );
+    expect(response).toMatchObject({
+      selectedLegalActionId: "hold",
+      llmPlannerDegraded: true,
+      degradedCause: "policy-error",
+    });
+    expect(response).not.toHaveProperty("selectedMessageActionId");
+    expect(response).not.toHaveProperty("messageText");
   });
 });

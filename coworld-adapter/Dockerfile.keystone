@@ -98,6 +98,7 @@ COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev \
     && npm cache clean --force
 COPY coworld-adapter/src /app/integration/src
+COPY coworld-adapter/commander-starter/open-ended-message.ts /app/integration/commander-starter/open-ended-message.ts
 
 # WORKDIR IS LOAD-BEARING, NOT COSMETIC. The run command imports tsx by BARE
 # specifier (`--import tsx`), which Node resolves from the working

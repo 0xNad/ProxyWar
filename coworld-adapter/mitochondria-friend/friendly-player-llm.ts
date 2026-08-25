@@ -16,6 +16,10 @@ import {
   withCommanderProviderEvidence,
 } from "../commander-starter/commander-production-runtime";
 import {
+  generateOpenEndedMessage,
+  withOpenEndedMessageFailure,
+} from "../commander-starter/open-ended-message";
+import {
   decisionToResponse,
   requestToBrainInput,
   transportFallbackResponse,
@@ -32,17 +36,17 @@ import {
 export function withMitoDiplomacy(
   decision: AgentDecision,
   preparation: MitoLlmPreparation,
+  generatedMessage?: { actionID: string; text: string } | null,
 ): AgentDecision {
   return {
     ...decision,
     ...(typeof preparation.selectedDealActionId === "string"
       ? { dealActionID: preparation.selectedDealActionId }
       : {}),
-    ...(typeof preparation.selectedMessageActionId === "string" &&
-    typeof preparation.messageText === "string"
+    ...(generatedMessage !== undefined && generatedMessage !== null
       ? {
-          messageActionID: preparation.selectedMessageActionId,
-          messageText: preparation.messageText,
+          messageActionID: generatedMessage.actionID,
+          messageText: generatedMessage.text,
         }
       : {}),
   };
@@ -220,10 +224,44 @@ async function main(): Promise<void> {
             preparation,
             input.legalActions,
           );
-          const primary =
-            override ??
-            (await brain.decide({ ...input, legalActions: compliantActions }));
-          decision = withMitoDiplomacy(primary, preparation);
+          const primaryPromise =
+            override === null
+              ? Promise.resolve(
+                  brain.decide({ ...input, legalActions: compliantActions }),
+                )
+              : Promise.resolve(override);
+          let socialGenerationFailed = false;
+          const messagePromise = preparation.messageIntent
+            ? generateOpenEndedMessage({
+                provider,
+                agentName: "MitochondriaFriend",
+                personality:
+                  "Warm, cooperative, specific, and trustworthy, but never gullible. Prefer peace, trade, reciprocal support, and durable alliances; ask concrete questions and make only promises you can honor.",
+                intent: preparation.messageIntent,
+                observation: input.observation,
+                decision: override ?? {
+                  actionID: compliantActions[0].id,
+                  reason:
+                    "Primary Commander decision is being selected concurrently.",
+                },
+              }).catch((error) => {
+                socialGenerationFailed = true;
+                console.error(
+                  `MitochondriaFriend social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                return null;
+              })
+            : Promise.resolve(null);
+          const [primary, generatedMessage] = await Promise.all([
+            primaryPromise,
+            messagePromise,
+          ]);
+          if (generatedMessage !== null) preparation.messageIntent?.commit?.();
+          decision = withMitoDiplomacy(
+            withOpenEndedMessageFailure(primary, socialGenerationFailed),
+            preparation,
+            generatedMessage,
+          );
         }
         const response = withCommanderProviderEvidence(
           decisionToResponse(

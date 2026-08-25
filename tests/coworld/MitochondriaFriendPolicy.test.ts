@@ -50,8 +50,19 @@ async function createLlmPolicy() {
       allowedLegalActionIds?: string[];
       primaryOverrideActionId?: string;
       selectedDealActionId?: string;
-      selectedMessageActionId?: string;
-      messageText?: string;
+      messageIntent?: {
+        actionID: string;
+        recipientID: string;
+        purpose:
+          | "reply"
+          | "border_opener"
+          | "diplomatic_opener"
+          | "deal_proposal"
+          | "relationship_follow_up";
+        maxChars: number;
+        inboundMessageEventID?: string;
+        commit?: () => void;
+      };
       reason: string;
     };
   };
@@ -445,7 +456,8 @@ describe("MitochondriaFriend", () => {
     );
     expect(result.allowedLegalActionIds).not.toContain(ATTACK_AURI.id);
     expect(result.primaryOverrideActionId).toBeUndefined();
-    expect(result.selectedMessageActionId).toBe(MESSAGE_AURI.id);
+    expect(result.messageIntent?.actionID).toBe(MESSAGE_AURI.id);
+    expect(result).not.toHaveProperty("messageText");
   });
 
   it("keeps exact alliance reciprocity outside free-form LLM judgment", async () => {
@@ -604,10 +616,15 @@ describe("MitochondriaFriend", () => {
         mode: "llm",
         allowedLegalActionIds: [BUILD.id, HOLD.id],
         selectedDealActionId: "deal_accept:D1",
-        selectedMessageActionId: MESSAGE_AURI.id,
-        messageText: "peace",
+        messageIntent: {
+          actionID: MESSAGE_AURI.id,
+          recipientID: "P_AURI",
+          purpose: "reply",
+          maxChars: 280,
+        },
         reason: "LLM Commander primary",
       },
+      { actionID: MESSAGE_AURI.id, text: "peace" },
     );
     expect(decision).toMatchObject({
       actionID: BUILD.id,
