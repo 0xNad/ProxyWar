@@ -1136,6 +1136,47 @@ describe("parseMirroredSpectatorTelemetry (product overhaul spec Stage 5 mirror 
     );
   });
 
+  test("preserves additive deal coverage while accepting legacy telemetry without it", () => {
+    const legacy = parseMirroredSpectatorTelemetry(realTelemetryFixtureRaw);
+    expect(legacy).not.toBeNull();
+    expect(legacy?.dealEventCoverage).toBeUndefined();
+
+    const completeCoverage = {
+      authority: "finalized_deal_ledger",
+      complete: true,
+      sourceEventCount: 0,
+      emittedEventCount: 0,
+      droppedEventCount: 0,
+      sourceCountsByKind: {
+        deal_proposed: 0,
+        deal_accepted: 0,
+        deal_rejected: 0,
+        deal_superseded: 0,
+        deal_expired: 0,
+        deal_fulfilled: 0,
+        deal_violated: 0,
+      },
+      emittedCountsByKind: {
+        deal_proposed: 0,
+        deal_accepted: 0,
+        deal_rejected: 0,
+        deal_superseded: 0,
+        deal_expired: 0,
+        deal_fulfilled: 0,
+        deal_violated: 0,
+      },
+    };
+    const parsed = parseMirroredSpectatorTelemetry(
+      JSON.stringify({
+        version: 1,
+        agents: [{ agentID: "a1", username: "Alice" }],
+        events: [],
+        dealEventCoverage: completeCoverage,
+      }),
+    );
+    expect(parsed?.dealEventCoverage).toEqual(completeCoverage);
+  });
+
   test("rejects malformed JSON, wrong version, no agents, and a malshaped event", () => {
     expect(parseMirroredSpectatorTelemetry("not json")).toBeNull();
     expect(

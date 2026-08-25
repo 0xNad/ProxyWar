@@ -218,8 +218,9 @@ export interface AgentDealLedgerEvent {
    */
   statedReason?: string;
   step: number;
-  /** Origin decision for immediate fulfilled/violated verdicts. Absent on passive lifecycle events. */
+  /** Origin decision sequence, present only for an immediate auditable verdict. */
   sourceSequence?: number;
+  /** Exact event-origin turn when stamped; required for passive lifecycle events and immediate auditable verdicts. */
   sourceTurnNumber?: number;
   sourceFallbackUsed?: boolean;
   sourceLlmPlannerDegraded?: boolean;

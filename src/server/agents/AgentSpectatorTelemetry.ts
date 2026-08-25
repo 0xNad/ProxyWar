@@ -1,7 +1,9 @@
 import {
   sanitizeDealStatedReason,
+  type AgentDealEventKind,
   type AgentDealLedgerEvent,
 } from "./AgentDealCompliance";
+import type { AgentDealLedgerSnapshot } from "./AgentDealManager";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
@@ -77,10 +79,10 @@ export type SpectatorEventKind =
   | "trade_severed"
   | "economy_dependency"
   // Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF):
-  // derived from the deal-ledger stamps on decision records
-  // (dealAction/dealID/dealPublicText and the dealComplianceEvent JSON),
-  // bounded per agent. publicText is server-authored by AgentDealCompliance —
-  // the referee narrates follow-through, it never punishes.
+  // the finalized ledger is authoritative for complete public artifacts;
+  // bounded decision-record stamps remain a legacy mirror/backfill fallback
+  // and carry explicit partial coverage. publicText is server-authored by
+  // AgentDealCompliance — the referee narrates follow-through, it never punishes.
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
@@ -192,6 +194,29 @@ export interface SpectatorTimelineBucket {
   events: SpectatorEvent[];
 }
 
+export type SpectatorDealEventCounts = Record<AgentDealEventKind, number>;
+
+/**
+ * Explicit completeness contract for the public structured-deal event stream.
+ * Old version-1 telemetry legitimately has no such field; recap generation
+ * must therefore treat legacy deal counts as a lower bound, never as a full
+ * lifecycle total.
+ */
+export interface SpectatorDealEventCoverage {
+  /** Finalized ledger is authoritative; decision records are a legacy fallback. */
+  authority: "finalized_deal_ledger" | "decision_records";
+  /** True only when every authoritative ledger event reached public telemetry. */
+  complete: boolean;
+  /** Valid events observed at the named source before any public projection cap. */
+  sourceEventCount: number;
+  /** Deal events actually present in this telemetry artifact. */
+  emittedEventCount: number;
+  /** Explicitly non-zero when a bounded fallback dropped observed events. */
+  droppedEventCount: number;
+  sourceCountsByKind: SpectatorDealEventCounts;
+  emittedCountsByKind: SpectatorDealEventCounts;
+}
+
 export interface SpectatorTelemetry {
   version: 1;
   runID: string;
@@ -201,6 +226,8 @@ export interface SpectatorTelemetry {
   events: SpectatorEvent[];
   communicationThreads: SpectatorCommunicationThread[];
   timelineBuckets: SpectatorTimelineBucket[];
+  /** Additive version-1 field; absent on legacy/structured-deals-off artifacts. */
+  dealEventCoverage?: SpectatorDealEventCoverage;
 }
 
 interface BuildAgentSpectatorTelemetryInput {
@@ -208,6 +235,8 @@ interface BuildAgentSpectatorTelemetryInput {
   records: AgentDecisionRecord[];
   roster: AgentRunRosterEntry[];
   finalState?: AgentRunFinalState;
+  /** Finalized authoritative ledger supplied by the run-artifact writer. */
+  dealLedger?: AgentDealLedgerSnapshot;
 }
 
 interface MutableRelationship {
@@ -236,6 +265,11 @@ export function buildAgentSpectatorTelemetry(
       agent.playerID === null ? [] : [[agent.playerID, agent] as const],
     ),
   );
+  addFinalizedLedgerPlayerMappings({
+    agents,
+    agentByPlayerID,
+    dealLedger: input.dealLedger,
+  });
   const relationshipMap = buildRelationshipMap(agents);
   // Accepted reciprocal requests remain a truthful action-level beat even
   // when retained artifacts lack effect audits. The boolean remembers which
@@ -274,11 +308,12 @@ export function buildAgentSpectatorTelemetry(
     agentByPlayerID,
     events,
   });
-  addDealEvents({
+  const dealEventCoverage = addDealEvents({
     records: input.records,
     agentByID,
     agentByPlayerID,
     events,
+    dealLedger: input.dealLedger,
   });
   addEliminationEvents({ input, agents, events });
 
@@ -302,7 +337,44 @@ export function buildAgentSpectatorTelemetry(
     events: sortedEvents,
     communicationThreads: buildCommunicationThreads(sortedEvents),
     timelineBuckets: buildTimelineBuckets(sortedEvents),
+    ...(dealEventCoverage !== undefined ? { dealEventCoverage } : {}),
   };
+}
+
+function addFinalizedLedgerPlayerMappings(input: {
+  agents: readonly SpectatorAgent[];
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  dealLedger?: AgentDealLedgerSnapshot;
+}): void {
+  if (input.dealLedger?.finalized !== true) {
+    return;
+  }
+  const candidates: Array<{ playerID: string; username: string }> = [];
+  for (const evidence of input.dealLedger.actionEvidence) {
+    if (evidence.actorPlayerID !== null) {
+      candidates.push({
+        playerID: evidence.actorPlayerID,
+        username: evidence.actorName,
+      });
+    }
+  }
+  for (const deal of input.dealLedger.deals) {
+    candidates.push(
+      { playerID: deal.proposerPlayerID, username: deal.proposerName },
+      { playerID: deal.recipientPlayerID, username: deal.recipientName },
+    );
+  }
+  for (const candidate of candidates) {
+    if (input.agentByPlayerID.has(candidate.playerID)) {
+      continue;
+    }
+    const rosterMatches = input.agents.filter(
+      (agent) => agent.username === candidate.username,
+    );
+    if (rosterMatches.length === 1) {
+      input.agentByPlayerID.set(candidate.playerID, rosterMatches[0]);
+    }
+  }
 }
 
 function buildSpectatorAgents(
@@ -841,6 +913,34 @@ function decisionEventProvenance(
   };
 }
 
+function acceptedDealActionProvenance(
+  record: AgentDecisionRecord,
+): Pick<
+  SpectatorEvent,
+  | "evidenceLevel"
+  | "fallbackUsed"
+  | "llmPlannerDegraded"
+  | "degradedCause"
+  | "auditStatus"
+  | "auditReason"
+> {
+  const decision = decisionEventProvenance(record);
+  return {
+    evidenceLevel: "accepted_action",
+    fallbackUsed: decision.fallbackUsed,
+    llmPlannerDegraded: decision.llmPlannerDegraded,
+    ...(decision.degradedCause !== undefined
+      ? { degradedCause: decision.degradedCause }
+      : {}),
+    // A dedicated deal-slot selection can share a record with a separate
+    // gameplay action. That primary action's effect audit says nothing about
+    // whether the validator/manager accepted this deal transition.
+    auditStatus: "not_applicable",
+    auditReason:
+      "deal action was accepted by the deal validator and manager; the primary gameplay action audit does not apply",
+  };
+}
+
 function applyCommunicationRelationship(input: {
   relationshipMap: Map<string, MutableRelationship>;
   actor: SpectatorAgent;
@@ -1290,13 +1390,14 @@ function tradeSeveredText(
 }
 
 /**
- * Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF — with
- * the flag off this function emits nothing and telemetry is byte-identical to
- * shipped behavior). Derived from records alone (the mirror-backfill path
- * rebuilds telemetry from decisions.jsonl), following the Phase A economy
- * pattern: flag-gated and bounded per agent per match. Accepted deal-action
- * stamps retain record provenance; ledger lifecycle transitions are marked as
- * state-derived. Two record surfaces feed it:
+ * Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF). New
+ * run artifacts project the FINALIZED deal ledger, which is the only source
+ * that can prove the complete lifecycle including match-end force resolution.
+ * Decision-record stamps remain a compatibility fallback for old mirrored
+ * runs; that path is explicitly marked incomplete and bounded per agent.
+ * Accepted deal-action stamps retain record provenance; ledger lifecycle
+ * transitions are marked as state-derived. Two record surfaces feed the
+ * fallback:
  *
  * 1. Deal ACTION stamps (dealAction/dealID/dealPublicText, stamped by the
  *    deal manager on accepted propose/accept/reject records) become
@@ -1307,17 +1408,13 @@ function tradeSeveredText(
  *    deal_expired / deal_fulfilled / deal_violated (tone betrayal, high
  *    importance), with tone/importance/publicText carried in the stamp.
  *
- * Force-resolution events emitted after the final record are ledger-only by
- * construction (no record exists to carry them) — the full ledger remains
- * available through AgentLeagueMatchRunner.dealLedger().
- *
  * Both surfaces may carry the acting agent's OWN stated reason (the
  * `dealStatedReason` stamp / the ledger event's `statedReason`). It lands in
  * the event's separate `statedReason` field — never merged into the
  * server-authored publicText — and is re-sanitized here because this path
  * also rebuilds telemetry from an on-disk decisions.jsonl.
  */
-const DEAL_EVENT_LIMIT_PER_AGENT = 24;
+const FALLBACK_DEAL_EVENT_LIMIT_PER_AGENT = 24;
 
 const DEAL_ACTION_EVENTS: Record<
   string,
@@ -1350,6 +1447,23 @@ const DEAL_EVENT_TONES: ReadonlySet<string> = new Set([
   "betrayal",
   "war",
 ]);
+
+const EMPTY_DEAL_EVENT_COUNTS = (): SpectatorDealEventCounts => ({
+  deal_proposed: 0,
+  deal_accepted: 0,
+  deal_rejected: 0,
+  deal_superseded: 0,
+  deal_expired: 0,
+  deal_fulfilled: 0,
+  deal_violated: 0,
+});
+
+function countDealEvent(
+  counts: SpectatorDealEventCounts,
+  kind: AgentDealEventKind,
+): void {
+  counts[kind] += 1;
+}
 
 function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
   if (typeof value !== "string" || value.length === 0) {
@@ -1418,14 +1532,26 @@ function addDealEvents(input: {
   agentByID: Map<string, SpectatorAgent>;
   agentByPlayerID: Map<string, SpectatorAgent>;
   events: SpectatorEvent[];
-}) {
+  dealLedger?: AgentDealLedgerSnapshot;
+}): SpectatorDealEventCoverage | undefined {
+  if (input.dealLedger?.finalized === true) {
+    return addAuthoritativeDealEvents({
+      ...input,
+      dealLedger: input.dealLedger,
+    });
+  }
   if (!structuredDealsEnabled()) {
-    return;
+    return undefined;
   }
   const emittedByAgent = new Map<string, number>();
+  const sourceCountsByKind = EMPTY_DEAL_EVENT_COUNTS();
+  const emittedCountsByKind = EMPTY_DEAL_EVENT_COUNTS();
+  let sourceEventCount = 0;
+  let emittedEventCount = 0;
+  let droppedEventCount = 0;
   const emit = (
     record: AgentDecisionRecord,
-    actor: SpectatorAgent,
+    actor: SpectatorAgent | null,
     target: SpectatorAgent | null,
     kind: SpectatorEventKind,
     tone: SpectatorEvent["tone"],
@@ -1439,24 +1565,37 @@ function addDealEvents(input: {
     actionKind: LegalActionKind | "none" = "none",
     origin: AgentDealLedgerEvent | null = null,
   ) => {
+    const dealKind = kind as AgentDealEventKind;
+    sourceEventCount += 1;
+    countDealEvent(sourceCountsByKind, dealKind);
+    if (actor === null) {
+      // A compliance stamp belongs to its own actorPlayerID, not whichever
+      // record happened to carry it. Never fabricate that join from the
+      // carrier; coverage records the observed-but-unemitted lifecycle fact.
+      droppedEventCount += 1;
+      return;
+    }
     const emitted = emittedByAgent.get(actor.agentID) ?? 0;
-    if (emitted >= DEAL_EVENT_LIMIT_PER_AGENT) {
+    if (emitted >= FALLBACK_DEAL_EVENT_LIMIT_PER_AGENT) {
+      droppedEventCount += 1;
       return;
     }
     emittedByAgent.set(actor.agentID, emitted + 1);
+    emittedEventCount += 1;
+    countDealEvent(emittedCountsByKind, dealKind);
     const claim = sanitizeDealStatedReason(statedReason);
-    const immediateDecisionVerdict =
-      kind === "deal_fulfilled" || kind === "deal_violated";
-    const sourceSequence =
-      immediateDecisionVerdict && Number.isInteger(origin?.sourceSequence)
-        ? origin!.sourceSequence!
-        : record.sequence;
-    const sourceTurnNumber =
-      immediateDecisionVerdict && Number.isInteger(origin?.sourceTurnNumber)
-        ? origin!.sourceTurnNumber!
-        : record.turnNumber;
+    const decisionVerdictProvenance =
+      (kind === "deal_fulfilled" || kind === "deal_violated") &&
+      Number.isInteger(origin?.sourceSequence) &&
+      Number.isInteger(origin?.sourceTurnNumber);
+    const sourceSequence = decisionVerdictProvenance
+      ? origin!.sourceSequence!
+      : record.sequence;
+    const sourceTurnNumber = Number.isInteger(origin?.sourceTurnNumber)
+      ? origin!.sourceTurnNumber!
+      : record.turnNumber;
     const sourceAuditStatus =
-      immediateDecisionVerdict &&
+      decisionVerdictProvenance &&
       ["confirmed", "unknown", "failed", "not_applicable", "missing"].includes(
         origin?.sourceAuditStatus ?? "",
       )
@@ -1465,10 +1604,9 @@ function addDealEvents(input: {
     const provenance =
       source === "accepted_action"
         ? {
-            ...decisionEventProvenance(record),
-            evidenceLevel: "accepted_action" as const,
+            ...acceptedDealActionProvenance(record),
           }
-        : immediateDecisionVerdict
+        : decisionVerdictProvenance
           ? {
               evidenceLevel: "state_derived" as const,
               fallbackUsed: origin?.sourceFallbackUsed === true,
@@ -1566,7 +1704,7 @@ function addDealEvents(input: {
     for (const item of parseDealComplianceEvents(
       metadata.dealComplianceEvent,
     )) {
-      const eventActor = input.agentByPlayerID.get(item.actorPlayerID) ?? actor;
+      const eventActor = input.agentByPlayerID.get(item.actorPlayerID) ?? null;
       const target =
         item.targetPlayerID === null
           ? null
@@ -1588,6 +1726,192 @@ function addDealEvents(input: {
       );
     }
   }
+
+  return {
+    authority: "decision_records",
+    // A decisions.jsonl projection cannot prove that final force-resolution
+    // or every queued lifecycle event had a carrier record, even when the
+    // observed subset stayed below its compatibility cap.
+    complete: false,
+    sourceEventCount,
+    emittedEventCount,
+    droppedEventCount,
+    sourceCountsByKind,
+    emittedCountsByKind,
+  };
+}
+
+function actionRecordForLedgerEvent(
+  event: AgentDealLedgerEvent,
+  records: readonly AgentDecisionRecord[],
+): AgentDecisionRecord | undefined {
+  if (
+    event.event !== "deal_proposed" &&
+    event.event !== "deal_accepted" &&
+    event.event !== "deal_rejected" &&
+    event.event !== "deal_superseded"
+  ) {
+    return undefined;
+  }
+  const expectedAction = {
+    deal_proposed: "propose",
+    deal_accepted: "accept",
+    deal_rejected: "reject",
+    deal_superseded: "accept",
+  }[event.event];
+  return records.find((record) => {
+    const metadata = record.decisionMetadata ?? {};
+    if (
+      metadata.dealID !== event.dealID ||
+      metadata.dealAction !== expectedAction
+    ) {
+      return false;
+    }
+    return event.event === "deal_superseded"
+      ? metadata.dealTerminalCause === "redundant_accept_superseded" &&
+          metadata.dealSupersededByDealID === event.supersededByDealID
+      : metadata.dealApplyAccepted === true;
+  });
+}
+
+function addAuthoritativeDealEvents(input: {
+  records: readonly AgentDecisionRecord[];
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  events: SpectatorEvent[];
+  dealLedger: AgentDealLedgerSnapshot;
+}): SpectatorDealEventCoverage {
+  const sourceCountsByKind = EMPTY_DEAL_EVENT_COUNTS();
+  const emittedCountsByKind = EMPTY_DEAL_EVENT_COUNTS();
+  const turnByStep = new Map(
+    input.dealLedger.decisionSteps.map((entry) => [
+      entry.step,
+      entry.turnNumber,
+    ]),
+  );
+  const lastRecord = [...input.records].sort(recordSort).at(-1);
+  const syntheticSequenceBase = input.records.reduce(
+    (maximum, record) => Math.max(maximum, record.sequence),
+    0,
+  );
+  let emittedEventCount = 0;
+  let droppedEventCount = 0;
+
+  for (const [ledgerIndex, origin] of input.dealLedger.events.entries()) {
+    countDealEvent(sourceCountsByKind, origin.event);
+    const actor = input.agentByPlayerID.get(origin.actorPlayerID);
+    if (actor === undefined) {
+      // A malformed roster/ledger join must not fabricate an agent identity.
+      // Coverage makes the omitted event loud to every recap consumer.
+      droppedEventCount += 1;
+      continue;
+    }
+    const target =
+      origin.targetPlayerID === null
+        ? null
+        : (input.agentByPlayerID.get(origin.targetPlayerID) ?? null);
+    const actionRecord = actionRecordForLedgerEvent(origin, input.records);
+    const decisionVerdictProvenance =
+      (origin.event === "deal_fulfilled" || origin.event === "deal_violated") &&
+      Number.isInteger(origin.sourceSequence) &&
+      Number.isInteger(origin.sourceTurnNumber);
+    let turnNumber = origin.sourceTurnNumber ?? actionRecord?.turnNumber;
+    turnNumber ??=
+      turnByStep.get(origin.step) ??
+      input.dealLedger.finalizedAtTurn ??
+      lastRecord?.turnNumber ??
+      0;
+    const sequence =
+      origin.sourceSequence ??
+      actionRecord?.sequence ??
+      syntheticSequenceBase + ledgerIndex + 1;
+    const acceptedAction =
+      actionRecord !== undefined &&
+      (origin.event === "deal_proposed" ||
+        origin.event === "deal_accepted" ||
+        origin.event === "deal_rejected");
+    let actionKind: LegalActionKind | "none" = "none";
+    if (acceptedAction) {
+      if (origin.event === "deal_proposed") actionKind = "deal_propose";
+      if (origin.event === "deal_accepted") actionKind = "deal_accept";
+      if (origin.event === "deal_rejected") actionKind = "deal_reject";
+    }
+    const sourceAuditStatus = [
+      "confirmed",
+      "unknown",
+      "failed",
+      "not_applicable",
+      "missing",
+    ].includes(origin.sourceAuditStatus ?? "")
+      ? (origin.sourceAuditStatus as SpectatorEventAuditStatus)
+      : "missing";
+    const provenance = acceptedAction
+      ? {
+          ...acceptedDealActionProvenance(actionRecord!),
+        }
+      : decisionVerdictProvenance
+        ? {
+            evidenceLevel: "state_derived" as const,
+            fallbackUsed: origin.sourceFallbackUsed === true,
+            llmPlannerDegraded: origin.sourceLlmPlannerDegraded === true,
+            auditStatus: sourceAuditStatus,
+            auditReason:
+              origin.sourceAuditReason ??
+              "verdict source provenance was missing from the ledger event",
+          }
+        : {
+            evidenceLevel: "state_derived" as const,
+            fallbackUsed: false,
+            llmPlannerDegraded: false,
+            auditStatus: "not_applicable" as const,
+            auditReason:
+              "event derived from authoritative deal lifecycle state",
+          };
+    const claim = sanitizeDealStatedReason(origin.statedReason);
+    // Preserve the shipped record-derived external shape. `event.id` already
+    // carries turn/sequence uniqueness; actionID names the underlying deal
+    // fact and must not drift merely because the finalized ledger supplied it.
+    const actionID =
+      origin.event === "deal_proposed" ||
+      origin.event === "deal_accepted" ||
+      origin.event === "deal_rejected"
+        ? `deal:${origin.event}:${origin.dealID}`
+        : `deal:${origin.event}:${origin.dealID}:${origin.actorPlayerID}`;
+    input.events.push({
+      id: `${turnNumber}:${sequence}:${actionID}`,
+      sequence,
+      turnNumber,
+      kind: origin.event,
+      tone: origin.tone,
+      actorAgentID: actor.agentID,
+      actorName: actor.username,
+      targetAgentID: target?.agentID ?? null,
+      targetName: target?.username ?? origin.targetName,
+      message: origin.publicText,
+      publicText: origin.publicText,
+      ...(claim !== null ? { statedReason: claim } : {}),
+      ...(origin.supersededByDealID !== undefined
+        ? { supersededByDealID: origin.supersededByDealID }
+        : {}),
+      actionKind,
+      actionID,
+      ...provenance,
+      importance: origin.importance,
+    });
+    emittedEventCount += 1;
+    countDealEvent(emittedCountsByKind, origin.event);
+  }
+
+  return {
+    authority: "finalized_deal_ledger",
+    complete:
+      droppedEventCount === 0 &&
+      emittedEventCount === input.dealLedger.events.length,
+    sourceEventCount: input.dealLedger.events.length,
+    emittedEventCount,
+    droppedEventCount,
+    sourceCountsByKind,
+    emittedCountsByKind,
+  };
 }
 
 function lastRecordTurnPerAgent(

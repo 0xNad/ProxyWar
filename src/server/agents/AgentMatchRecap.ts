@@ -9,6 +9,7 @@ import {
 } from "./AgentMatchStateDerivations";
 import type { MatchStateSeries } from "./AgentMatchStateSeries";
 import type {
+  SpectatorDealEventCoverage,
   SpectatorEvent,
   SpectatorTelemetry,
 } from "./AgentSpectatorTelemetry";
@@ -66,11 +67,10 @@ import type {
  * correct, matching the client's own dedupe rule) so no further
  * aggregation applies there. (2) `MAX_PUBLIC_RECAP_BEATS` caps the final
  * public beat list, trimming lowest-priority categories first (see
- * `applyImportanceCap`'s doc) while the `summary` line keeps reporting
- * the FULL raw counts (every alliance formation, not just aggregated
- * beats) so nothing is hidden — a reader can always see "this match had
- * 37 alliance formations" even though only a handful of alliance beats
- * made the cut.
+ * `applyImportanceCap`'s doc). Non-deal summary counts retain their full raw
+ * event totals. Structured-deal totals are exact only when telemetry carries
+ * complete finalized-ledger coverage; legacy/partial evidence is explicitly
+ * described as a lower bound.
  *
  * 2026-08-01 "best battles" ranking fix: this module also now computes
  * `curatedDramaScore` (see `computeCuratedDramaScore`'s doc) from the legacy
@@ -134,14 +134,16 @@ export interface AgentMatchRecapBeat {
  * `evidenceLevel === "confirmed_effect"` before alliance, first-strike,
  * betrayal, or final-confrontation effect claims enter the recap. Then 7 -> 8
  * adds the engine-authored `deal_superseded` lifecycle fact without folding
- * it into rejection or expiry counts. Every bump means exactly
+ * it into rejection or expiry counts. Then 8 -> 9 adds the finalized-ledger
+ * deal coverage contract: exact lifecycle totals only when complete, with
+ * legacy/partial telemetry qualified as an observed lower bound. Every bump means exactly
  * that: `CoworldLeagueMatchNarrativeBackfill.ts`'s `recapNeedsRegeneration`
  * compares against this constant to force re-curation, and
  * `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact` refuses to parse
  * anything but the current version (a stale artifact reads as "no recap
  * yet", never as spammy/scoreless content, until the backfill upgrades it).
  */
-export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 8;
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 9;
 
 export interface AgentMatchRecap {
   schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
@@ -149,6 +151,8 @@ export interface AgentMatchRecap {
   generatedAt: string;
   summary: string;
   beats: AgentMatchRecapBeat[];
+  /** Explicit source/completeness of the deal counts narrated in `summary`. */
+  dealEventCoverage: SpectatorDealEventCoverage | null;
   /** 0..100 — see `computeCuratedDramaScore`'s doc. The PUBLIC drama ranking/badge input; `AgentDramaReport.dramaScore` stays the untouched legacy metric, unaffected by this field. */
   curatedDramaScore: number;
   /** Human-readable formula string carried alongside the score — same "ship the formula as free text" convention `AgentStatsPipeline.ts`'s `AgentMetric.methodology` uses for its own metrics. */
@@ -188,7 +192,92 @@ const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   reversal: "reversal",
 };
 
-/** Lower sorts first when trimming — betrayals, terminal deal verdicts, eliminations, and the final clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the categories that DO get trimmed. `lead_change`/`reversal` sort ahead of the higher-volume War Room categories. */
+const DEAL_EVENT_KINDS = [
+  "deal_proposed",
+  "deal_accepted",
+  "deal_rejected",
+  "deal_superseded",
+  "deal_expired",
+  "deal_fulfilled",
+  "deal_violated",
+] as const;
+
+function validatedDealEventCoverage(
+  value: unknown,
+  events: readonly SpectatorEvent[],
+): SpectatorDealEventCoverage | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (
+    (candidate.authority !== "finalized_deal_ledger" &&
+      candidate.authority !== "decision_records") ||
+    typeof candidate.complete !== "boolean"
+  ) {
+    return undefined;
+  }
+  const integer = (input: unknown): input is number =>
+    typeof input === "number" && Number.isSafeInteger(input) && input >= 0;
+  if (
+    !integer(candidate.sourceEventCount) ||
+    !integer(candidate.emittedEventCount) ||
+    !integer(candidate.droppedEventCount)
+  ) {
+    return undefined;
+  }
+  const counts = (
+    input: unknown,
+  ): SpectatorDealEventCoverage["sourceCountsByKind"] | null => {
+    if (typeof input !== "object" || input === null) return null;
+    const record = input as Record<string, unknown>;
+    const result = {} as SpectatorDealEventCoverage["sourceCountsByKind"];
+    for (const kind of DEAL_EVENT_KINDS) {
+      if (!integer(record[kind])) return null;
+      result[kind] = record[kind];
+    }
+    return result;
+  };
+  const sourceCountsByKind = counts(candidate.sourceCountsByKind);
+  const emittedCountsByKind = counts(candidate.emittedCountsByKind);
+  if (sourceCountsByKind === null || emittedCountsByKind === null) {
+    return undefined;
+  }
+  const sum = (input: SpectatorDealEventCoverage["sourceCountsByKind"]) =>
+    DEAL_EVENT_KINDS.reduce((total, kind) => total + input[kind], 0);
+  const actualEmittedCounts = Object.fromEntries(
+    DEAL_EVENT_KINDS.map((kind) => [
+      kind,
+      events.filter((event) => event.kind === kind).length,
+    ]),
+  ) as SpectatorDealEventCoverage["emittedCountsByKind"];
+  const sameCounts = (
+    left: SpectatorDealEventCoverage["sourceCountsByKind"],
+    right: SpectatorDealEventCoverage["sourceCountsByKind"],
+  ) => DEAL_EVENT_KINDS.every((kind) => left[kind] === right[kind]);
+  const commonValid =
+    sum(sourceCountsByKind) === candidate.sourceEventCount &&
+    sum(emittedCountsByKind) === candidate.emittedEventCount &&
+    candidate.sourceEventCount - candidate.emittedEventCount ===
+      candidate.droppedEventCount &&
+    sameCounts(emittedCountsByKind, actualEmittedCounts);
+  const completeValid =
+    candidate.complete === false ||
+    (candidate.authority === "finalized_deal_ledger" &&
+      candidate.droppedEventCount === 0 &&
+      candidate.sourceEventCount === candidate.emittedEventCount &&
+      sameCounts(sourceCountsByKind, emittedCountsByKind));
+  if (!commonValid || !completeValid) return undefined;
+  return {
+    authority: candidate.authority,
+    complete: candidate.complete,
+    sourceEventCount: candidate.sourceEventCount,
+    emittedEventCount: candidate.emittedEventCount,
+    droppedEventCount: candidate.droppedEventCount,
+    sourceCountsByKind,
+    emittedCountsByKind,
+  };
+}
+
+/** Lower sorts first when trimming the ordinary War Room categories. `lead_change`/`reversal` sort ahead of the higher-volume categories. */
 const TRIMMABLE_KIND_PRIORITY: Record<
   | "alliance"
   | "first_strike"
@@ -210,6 +299,22 @@ const TRIMMABLE_KIND_PRIORITY: Record<
   deal_proposed: 6,
   alliance: 7,
   first_strike: 8,
+};
+
+/** Terminal/high-salience kinds retained ahead of every ordinary beat. */
+const PRIORITY_KIND_ORDER: Record<
+  | "deal_violated"
+  | "betrayal"
+  | "elimination"
+  | "final_confrontation"
+  | "deal_fulfilled",
+  number
+> = {
+  deal_violated: 0,
+  betrayal: 1,
+  elimination: 2,
+  final_confrontation: 3,
+  deal_fulfilled: 4,
 };
 
 interface AllianceRun {
@@ -272,13 +377,13 @@ export interface CuratedWarRoomBeats {
   allianceBeats: AgentMatchRecapBeat[];
   /** One per ordered actor/target pair's first attack — already deduped, unchanged by the 2026-08-01 fix. */
   firstStrikeBeats: AgentMatchRecapBeat[];
-  /** The FIRST betrayal per pair individually, plus at most one aggregated "breaks their alliance again" beat per pair covering every later betrayal of that same pair — see `BetrayalRun`'s doc. Every entry here is still never dropped by the cap. */
+  /** The FIRST betrayal per pair individually, plus at most one aggregated "breaks their alliance again" beat per pair covering every later betrayal of that same pair — see `BetrayalRun`'s doc. These receive high retention priority but still obey the hard public cap. */
   betrayalBeats: AgentMatchRecapBeat[];
-  /** Every elimination individually — never dropped by the cap. Simultaneous match-end eliminations are compressed separately, in `buildAgentMatchRecap` (needs `totalTurns`, not available at this layer) — see `compressTerminalEliminations`. */
+  /** Every elimination individually before final curation. They receive high retention priority but still obey the hard cap. Simultaneous match-end eliminations are compressed separately, in `buildAgentMatchRecap` (needs `totalTurns`, not available at this layer) — see `compressTerminalEliminations`. */
   eliminationBeats: AgentMatchRecapBeat[];
   /** Structured deal lifecycle facts, already deduplicated across equivalent action-stamp/ledger projections. */
   dealBeats: AgentMatchRecapBeat[];
-  /** Raw per-category counts for the summary line — BEFORE aggregation/capping, so the summary always reports the full picture even when the beat list is trimmed. */
+  /** Raw pre-aggregation/cap counts. Non-deal summary totals use these directly; deal totals are exact only with validated complete ledger coverage and otherwise become a qualified observed lower bound. */
   rawCounts: {
     alliance: number;
     betrayal: number;
@@ -743,22 +848,27 @@ function reversalBeats(series: MatchStateSeries | null): AgentMatchRecapBeat[] {
 
 /**
  * Trims to `MAX_PUBLIC_RECAP_BEATS`, chronologically ordered on output.
- * Betrayal, fulfilled/violated deal verdict, elimination, and
- * final-confrontation beats are ALWAYS kept in full
- * — they never count against the cap's trimming, only against its total
- * (in the practically-impossible case where those three categories alone
- * exceed the cap, every one of them still survives; the cap is then
- * exceeded honestly rather than dropping a terminal fact). Remaining deal,
- * alliance, and first-strike beats are priority-trimmed when they do not fit
- * the remaining budget, each category itself kept in chronological order.
+ * Terminal/high-salience beats consume the budget first in the explicit
+ * priority above; if they alone exceed the cap, they are deterministically
+ * sampled by kind then chronology. Complete lifecycle truth remains in
+ * telemetry and exact totals remain in the coverage-aware summary — this list
+ * is a curated War Room digest, not a second event log. Ordinary deal,
+ * alliance, and first-strike beats use their separate priority order.
  */
 function applyImportanceCap(
-  neverTrimmed: readonly AgentMatchRecapBeat[],
+  priorityBeats: readonly AgentMatchRecapBeat[],
   trimmable: readonly AgentMatchRecapBeat[],
 ): AgentMatchRecapBeat[] {
+  const orderedPriority = [...priorityBeats].sort(
+    (a, b) =>
+      PRIORITY_KIND_ORDER[a.kind as keyof typeof PRIORITY_KIND_ORDER] -
+        PRIORITY_KIND_ORDER[b.kind as keyof typeof PRIORITY_KIND_ORDER] ||
+      a.turnNumber - b.turnNumber,
+  );
+  const keptPriority = orderedPriority.slice(0, MAX_PUBLIC_RECAP_BEATS);
   const remainingBudget = Math.max(
     0,
-    MAX_PUBLIC_RECAP_BEATS - neverTrimmed.length,
+    MAX_PUBLIC_RECAP_BEATS - keptPriority.length,
   );
   const orderedTrimmable = [...trimmable].sort(
     (a, b) =>
@@ -767,7 +877,7 @@ function applyImportanceCap(
           b.kind as keyof typeof TRIMMABLE_KIND_PRIORITY
         ] || a.turnNumber - b.turnNumber,
   );
-  const kept = [...neverTrimmed, ...orderedTrimmable.slice(0, remainingBudget)];
+  const kept = [...keptPriority, ...orderedTrimmable.slice(0, remainingBudget)];
   return kept.sort((a, b) => a.turnNumber - b.turnNumber);
 }
 
@@ -776,9 +886,9 @@ function buildSummary(
   hasFinalConfrontation: boolean,
   leadChangeCount: number,
   reversalCount: number,
+  dealCoverage: SpectatorDealEventCoverage | undefined,
 ): string {
-  const parts: string[] = [];
-  const entries: [AgentMatchRecapBeat["kind"], number][] = [
+  const nonDealEntries: [AgentMatchRecapBeat["kind"], number][] = [
     ["alliance", counts.alliance],
     ["betrayal", counts.betrayal],
     ["first_strike", counts.firstStrike],
@@ -786,24 +896,60 @@ function buildSummary(
     ["final_confrontation", hasFinalConfrontation ? 1 : 0],
     ["lead_change", leadChangeCount],
     ["reversal", reversalCount],
-    ["deal_proposed", counts.dealProposed],
-    ["deal_accepted", counts.dealAccepted],
-    ["deal_rejected", counts.dealRejected],
-    ["deal_superseded", counts.dealSuperseded],
-    ["deal_expired", counts.dealExpired],
-    ["deal_fulfilled", counts.dealFulfilled],
-    ["deal_violated", counts.dealViolated],
   ];
-  for (const [kind, count] of entries) {
-    if (count === 0) continue;
-    const label = BEAT_KIND_LABEL[kind];
-    parts.push(count === 1 ? `1 ${label}` : `${count} ${label}s`);
+  const exactDealCounts =
+    dealCoverage?.complete === true
+      ? dealCoverage.sourceCountsByKind
+      : undefined;
+  const dealEntries: [AgentMatchRecapBeat["kind"], number][] = [
+    ["deal_proposed", exactDealCounts?.deal_proposed ?? counts.dealProposed],
+    ["deal_accepted", exactDealCounts?.deal_accepted ?? counts.dealAccepted],
+    ["deal_rejected", exactDealCounts?.deal_rejected ?? counts.dealRejected],
+    [
+      "deal_superseded",
+      exactDealCounts?.deal_superseded ?? counts.dealSuperseded,
+    ],
+    ["deal_expired", exactDealCounts?.deal_expired ?? counts.dealExpired],
+    ["deal_fulfilled", exactDealCounts?.deal_fulfilled ?? counts.dealFulfilled],
+    ["deal_violated", exactDealCounts?.deal_violated ?? counts.dealViolated],
+  ];
+
+  const partsFor = (
+    entries: [AgentMatchRecapBeat["kind"], number][],
+  ): string[] => {
+    const parts: string[] = [];
+    for (const [kind, count] of entries) {
+      if (count === 0) continue;
+      const label = BEAT_KIND_LABEL[kind];
+      parts.push(count === 1 ? `1 ${label}` : `${count} ${label}s`);
+    }
+    return parts;
+  };
+  const joinParts = (parts: string[]): string => {
+    if (parts.length === 1) return parts[0];
+    return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+  };
+  const nonDealParts = partsFor(nonDealEntries);
+  const dealParts = partsFor(dealEntries);
+  if (dealCoverage?.complete === true) {
+    const exactParts = [...nonDealParts, ...dealParts];
+    return exactParts.length === 0
+      ? ""
+      : `This match featured ${joinParts(exactParts)}.`;
   }
-  if (parts.length === 0) return "";
-  if (parts.length === 1) return `This match featured ${parts[0]}.`;
-  const last = parts[parts.length - 1];
-  const rest = parts.slice(0, -1);
-  return `This match featured ${rest.join(", ")} and ${last}.`;
+
+  const sentences: string[] = [];
+  if (nonDealParts.length > 0) {
+    sentences.push(`This match featured ${joinParts(nonDealParts)}.`);
+  }
+  if (dealParts.length > 0) {
+    sentences.push(
+      `Available public deal evidence includes at least ${joinParts(dealParts)}.`,
+    );
+  } else if (dealCoverage !== undefined) {
+    sentences.push("Complete public deal-lifecycle coverage was unavailable.");
+  }
+  return sentences.join(" ");
 }
 
 /** `null` when the curated pass finds zero beats — see the module doc's "never padded" rule. */
@@ -812,6 +958,10 @@ export function buildAgentMatchRecap(
 ): AgentMatchRecap | null {
   const orderedEvents = [...input.telemetry.events].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
+  );
+  const dealEventCoverage = validatedDealEventCoverage(
+    input.telemetry.dealEventCoverage,
+    orderedEvents,
   );
   const curated = curateWarRoomBeats(orderedEvents);
   const totalTurns =
@@ -830,7 +980,7 @@ export function buildAgentMatchRecap(
     curated.eliminationBeats,
     totalTurns,
   );
-  const neverTrimmed = [
+  const priorityBeats = [
     ...curated.betrayalBeats,
     ...curated.dealBeats.filter(
       (beat) => beat.kind === "deal_fulfilled" || beat.kind === "deal_violated",
@@ -849,7 +999,7 @@ export function buildAgentMatchRecap(
       (beat) => beat.kind !== "deal_fulfilled" && beat.kind !== "deal_violated",
     ),
   ];
-  const beats = applyImportanceCap(neverTrimmed, trimmable);
+  const beats = applyImportanceCap(priorityBeats, trimmable);
   if (beats.length === 0) {
     return null;
   }
@@ -862,8 +1012,10 @@ export function buildAgentMatchRecap(
       finalBeat !== null,
       leadChanges.length,
       reversals.length,
+      dealEventCoverage,
     ),
     beats,
+    dealEventCoverage: dealEventCoverage ?? null,
     curatedDramaScore: computeCuratedDramaScore(
       curated,
       finalBeat !== null,

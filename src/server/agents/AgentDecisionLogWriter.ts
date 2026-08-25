@@ -576,6 +576,7 @@ export async function writeAgentLeagueRunArtifacts(
     records: input.records,
     roster: input.roster,
     finalState: input.finalState,
+    dealLedger: input.dealLedger,
   });
   const spectatorTelemetryPath = path.join(
     directory,

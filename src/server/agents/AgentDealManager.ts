@@ -309,7 +309,14 @@ export class AgentDealManager {
         step: this.currentStep,
       }),
     );
-    this.queueEvents(events, recordsByPlayerID);
+    this.queueEvents(
+      events.map((event) =>
+        event.sourceTurnNumber === undefined
+          ? { ...event, sourceTurnNumber: input.turnNumber }
+          : event,
+      ),
+      recordsByPlayerID,
+    );
   }
 
   /**
@@ -530,14 +537,19 @@ export class AgentDealManager {
     events.push(
       ...forceResolveDeals({ deals: this.deals, step: this.currentStep }),
     );
-    this.events.push(...events);
+    const terminalEvents = events.map((event) =>
+      event.sourceTurnNumber === undefined && this.finalizedAtTurn !== null
+        ? { ...event, sourceTurnNumber: this.finalizedAtTurn }
+        : event,
+    );
+    this.events.push(...terminalEvents);
     // No future decision exists after finalize, so persist both newly-created
     // final events and any still-queued earlier events onto the latest retained
     // carrier records. This keeps decisions.jsonl sufficient for replay/mirror
     // reconstruction while each verdict retains its own origin provenance.
     const unstamped = [
       ...[...this.pendingStampsByAgentID.values()].flat(),
-      ...events,
+      ...terminalEvents,
     ];
     this.pendingStampsByAgentID.clear();
     this.persistFinalEventStamps(unstamped, input.records);
