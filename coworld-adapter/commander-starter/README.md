@@ -65,6 +65,11 @@ also uses structured deals and bounded free-form message replies in their
 separate social slots. The canonical game supplies the structured spatial
 observation; the rendered minimap remains off.
 
+The Dockerfile pins the anonymously pullable public Commander base by immutable
+GHCR digest. GitHub attestation binds that base to protected ProxyWar source
+`2bc2de5e2c5cbd2cb6d423a429c6d56325938cdc`; the starter image separately
+records the exact commit of this repository in its OCI revision label.
+
 For a fully editable JavaScript policy with strategy text, deal selection, and
 messages, use the original
 [ProxyWar Coworld starter](https://github.com/0xNad/proxywar-coworld-starter).
