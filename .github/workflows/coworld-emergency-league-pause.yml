@@ -1,0 +1,135 @@
+name: Coworld emergency league pause
+run-name: Pause Proxy War league at ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact protected-main SHA with successful push CI
+        required: true
+        type: string
+
+concurrency:
+  group: proxywar-coworld-production
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
+
+jobs:
+  pause:
+    name: Pause exact Proxy War league
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: coworld-production
+    steps:
+      - name: Require operator, exact protected main, and successful push CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          test "$(jq --arg sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha==$sha and .event=="push" and .status=="completed" and .conclusion=="success")] | length' "$RUNNER_TEMP/ci-runs.json")" -ge 1
+
+      - name: Pause scheduling and verify readback
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RECEIPT_PATH: ${{ runner.temp }}/proxywar-league-pause.json
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const apiRoot = "https://softmax.com/api/observatory/v2";
+          const leagueID = process.env.EXPECTED_LEAGUE_ID;
+          const sourceSHA = process.env.SOURCE_SHA;
+          const token = process.env.COWORLD_API_TOKEN;
+          const receiptPath = process.env.RECEIPT_PATH;
+          const idPattern = /^league_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+          const shaPattern = /^[0-9a-f]{40}$/u;
+
+          if (!idPattern.test(leagueID ?? "")) throw new Error("invalid fixed league id");
+          if (!shaPattern.test(sourceSHA ?? "")) throw new Error("invalid source sha");
+          if (typeof token !== "string" || token.length === 0) throw new Error("missing Coworld credential");
+          if (typeof receiptPath !== "string" || receiptPath.length === 0) throw new Error("missing receipt path");
+
+          const requestJSON = async (method, path, body) => {
+            const response = await fetch(`${apiRoot}${path}`, {
+              method,
+              headers: {
+                Authorization: `Bearer ${token}`,
+                ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+              },
+              body: body === undefined ? undefined : JSON.stringify(body),
+              redirect: "error",
+              signal: AbortSignal.timeout(30_000),
+            });
+            const text = await response.text();
+            if (Buffer.byteLength(text, "utf8") > 32 * 1024) {
+              throw new Error(`Coworld ${method} response exceeded 32 KiB`);
+            }
+            if (!response.ok) throw new Error(`Coworld ${method} failed with HTTP ${response.status}`);
+            const payload = text.length === 0 ? {} : JSON.parse(text);
+            if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+              throw new Error(`Coworld ${method} returned a non-object`);
+            }
+            return payload;
+          };
+
+          const readLeague = async () => {
+            const league = await requestJSON("GET", `/leagues/${leagueID}`);
+            if (league.id !== leagueID) throw new Error("Coworld league identity mismatch");
+            if (!(league.rounds_paused_at === null || typeof league.rounds_paused_at === "string")) {
+              throw new Error("Coworld league pause state is malformed");
+            }
+            return league;
+          };
+
+          const before = await readLeague();
+          if (before.rounds_paused_at === null) {
+            await requestJSON("POST", `/leagues/${leagueID}/rounds-paused`, { paused: true });
+          }
+          const after = await readLeague();
+          if (typeof after.rounds_paused_at !== "string" || after.rounds_paused_at.length === 0) {
+            throw new Error("Coworld league did not enter the paused state");
+          }
+
+          const receipt = {
+            schemaVersion: 1,
+            action: "pause_scheduling",
+            sourceSHA,
+            leagueID,
+            previousRoundsPausedAt: before.rounds_paused_at,
+            roundsPausedAt: after.rounds_paused_at,
+            workflowRunID: process.env.GITHUB_RUN_ID,
+            workflowRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            verifiedAt: new Date().toISOString(),
+          };
+          fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          });
+          console.log(JSON.stringify(receipt));
+          NODE
+
+      - name: Retain sanitized pause receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: proxywar-league-pause-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proxywar-league-pause.json
+          if-no-files-found: error
+          retention-days: 7

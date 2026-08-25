@@ -10,6 +10,10 @@ const production = readFileSync(
   ".github/workflows/coworld-production.yml",
   "utf8",
 );
+const emergencyLeaguePause = readFileSync(
+  ".github/workflows/coworld-emergency-league-pause.yml",
+  "utf8",
+);
 const commissionerProduction = readFileSync(
   ".github/workflows/coworld-commissioner-production.yml",
   "utf8",
@@ -90,6 +94,52 @@ test("production secrets are isolated to a protected main environment job", () =
   assert.match(
     production,
     /test "\$SOURCE_SHA" = "\$\(gh api repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/,
+  );
+});
+
+test("emergency league pause is operator-only, exact-source, and fail-closed", () => {
+  assert.match(emergencyLeaguePause, /workflow_dispatch:/);
+  assert.match(emergencyLeaguePause, /source_sha:\n\s+description:/);
+  assert.doesNotMatch(
+    emergencyLeaguePause,
+    /pull_request:|pull_request_target:|schedule:/,
+  );
+  assert.match(emergencyLeaguePause, /test "\$GITHUB_ACTOR" = "0xNad"/);
+  assert.match(
+    emergencyLeaguePause,
+    /test "\$GITHUB_REF" = "refs\/heads\/main"/,
+  );
+  assert.match(emergencyLeaguePause, /test "\$GITHUB_SHA" = "\$SOURCE_SHA"/);
+  assert.match(
+    emergencyLeaguePause,
+    /git\/ref\/heads\/main --jq \.object\.sha/,
+  );
+  assert.match(emergencyLeaguePause, /head_sha==\$sha/);
+  assert.match(
+    emergencyLeaguePause,
+    /environment:\n\s+name: coworld-production/,
+  );
+  assert.match(emergencyLeaguePause, /group: proxywar-coworld-production/);
+  assert.match(
+    emergencyLeaguePause,
+    /EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42/,
+  );
+  assert.match(
+    emergencyLeaguePause,
+    /\/leagues\/\$\{leagueID\}\/rounds-paused`, \{ paused: true \}/,
+  );
+  assert.match(emergencyLeaguePause, /league\.id !== leagueID/);
+  assert.match(emergencyLeaguePause, /after\.rounds_paused_at/);
+  assert.match(emergencyLeaguePause, /flag: "wx"/);
+  assert.match(emergencyLeaguePause, /retention-days: 7/);
+  assert.doesNotMatch(emergencyLeaguePause, /X-Use-Elevated-Privileges/);
+  assert.doesNotMatch(emergencyLeaguePause, /set -x/);
+  assert.doesNotMatch(emergencyLeaguePause, /console\.log\(token/);
+  assert.deepEqual(
+    [...emergencyLeaguePause.matchAll(/secrets\.([A-Z0-9_]+)/g)].map(
+      (match) => match[1],
+    ),
+    ["COWORLD_API_TOKEN"],
   );
 });
 
