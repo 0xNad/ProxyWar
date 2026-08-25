@@ -617,16 +617,17 @@ def materialize(args: argparse.Namespace) -> None:
         public_image, policy = validate_recovered_policy(policy_receipt, args)
         shutil.copyfile(recovered_policy_path, policy_path)
     else:
-        with CoworldUploadClient.from_login(server_url=SERVER) as client:
-            public_image = refreshed_public_image(client, args, image["id"])
-        policy = discover_policy(args, public_image["id"])
+        # Coworld 0.1.42 completes a policy from the ready private image ID;
+        # the public URI is a terminal readback requirement after that step.
+        policy = discover_policy(args, image["id"])
         if policy is not None and not args.allow_remote_adoption:
             raise RuntimeError(
                 "Commander public base policy exists without recovery authority"
             )
         with CoworldUploadClient.from_login(server_url=SERVER) as client:
             if policy is None:
-                policy = create_policy(client, args, public_image["id"])
+                policy = create_policy(client, args, image["id"])
+            public_image = refreshed_public_image(client, args, image["id"])
         write_receipt(
             policy_path,
             {
