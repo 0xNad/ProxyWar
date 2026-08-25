@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+  OWNER_EVIDENCE_MAX_EVENTS_BY_KIND,
+  OWNER_EVIDENCE_SATURATION_KIND,
+} from "./owner-capabilities.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHECKER = path.join(HERE, "owner-evidence-check.mjs");
@@ -58,11 +62,6 @@ function validEvents() {
       messageBodyUTF8Bytes: Buffer.byteLength(body, "utf8"),
       messageBodyUTF16CodeUnits: body.length,
     },
-    {
-      kind: "spatial_observation",
-      ...common("P_B", "req_recipient"),
-      present: false,
-    },
   ];
 }
 
@@ -104,6 +103,32 @@ function runCheckerFiles(
 
 function runChecker(events, spatial = "absent") {
   return runCheckerFiles([events], spatial);
+}
+
+function messageEventID(index) {
+  return `msg_00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
+}
+
+function repeatedJoinedMessageEvents(count) {
+  const sender = [structuredClone(validEvents()[0]), validEvents()[2]];
+  const recipient = [
+    {
+      ...structuredClone(validEvents()[2]),
+      ...common("P_B", "req_recipient_spatial"),
+    },
+  ];
+  for (let index = 0; index < count; index += 1) {
+    sender.push({
+      ...structuredClone(validEvents()[1]),
+      requestID: `req_sender_${index}`,
+    });
+    recipient.push({
+      ...structuredClone(validEvents()[3]),
+      requestID: `req_recipient_${index}`,
+      messageEventID: messageEventID(index + 1),
+    });
+  }
+  return [sender, recipient];
 }
 
 test("owner evidence checker accepts bounded rich spatial provenance", () => {
@@ -171,7 +196,7 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
     assert.equal(result.status, 1);
     assert.match(
       result.stderr,
-      /malformed spatial|absent policy|bounded minimap|non-v3|provenance/u,
+      /malformed spatial|valid spatial|absent policy|bounded minimap|non-v3|provenance/u,
     );
   }
 });
@@ -382,7 +407,7 @@ test("owner evidence checker accepts joined evidence with an exact current messa
   assert.deepEqual(JSON.parse(result.stdout), {
     verdict: "PASS",
     files: 1,
-    events: 5,
+    events: 4,
     deals: 1,
     messageSelections: 1,
     messageObservations: 1,
@@ -464,4 +489,95 @@ test("owner evidence checker rejects extra fields and private material", () => {
       /unknown owner evidence field|forbidden raw\/private/u,
     );
   }
+});
+
+test("owner evidence checker accepts a v9-shaped join beyond the old sample cap", () => {
+  const joinedCount = 80;
+  const result = runCheckerFiles(repeatedJoinedMessageEvents(joinedCount));
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    verdict: "PASS",
+    files: 2,
+    events: joinedCount * 2 + 3,
+    deals: 1,
+    messageSelections: joinedCount,
+    messageObservations: joinedCount,
+    dealsMode: "required",
+    messagesMode: "required",
+    spatial: "absent",
+  });
+
+  const missing = repeatedJoinedMessageEvents(joinedCount);
+  missing[1].pop();
+  const missingResult = runCheckerFiles(missing);
+  assert.equal(missingResult.status, 1);
+  assert.match(missingResult.stderr, /no recipient observation joined/u);
+
+  const duplicate = repeatedJoinedMessageEvents(joinedCount);
+  duplicate[1].at(-1).messageEventID = duplicate[1][1].messageEventID;
+  const duplicateResult = runCheckerFiles(duplicate);
+  assert.equal(duplicateResult.status, 1);
+  assert.match(duplicateResult.stderr, /duplicate.*messageEventID/u);
+
+  const tampered = repeatedJoinedMessageEvents(joinedCount);
+  tampered[1].at(-1).messageBodySHA256 = "f".repeat(64);
+  const tamperedResult = runCheckerFiles(tampered);
+  assert.equal(tamperedResult.status, 1);
+  assert.match(tamperedResult.stderr, /no recipient observation joined/u);
+});
+
+test("owner evidence checker rejects explicit saturation evidence", () => {
+  const events = validEvents();
+  events.push({
+    kind: OWNER_EVIDENCE_SATURATION_KIND,
+    saturatedKind: "message_observation",
+    maximum: OWNER_EVIDENCE_MAX_EVENTS_BY_KIND.message_observation,
+  });
+  const result = runChecker(events);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /owner evidence saturated message_observation.*complete supported-horizon/u,
+  );
+});
+
+test("owner evidence checker enforces each complete-horizon event ceiling", () => {
+  const tooManyDeals = Array.from(
+    { length: OWNER_EVIDENCE_MAX_EVENTS_BY_KIND.deal_selection + 1 },
+    (_, index) => ({
+      ...structuredClone(validEvents()[0]),
+      requestID: `req_deal_${index}`,
+    }),
+  );
+  tooManyDeals.push(validEvents()[2]);
+  const dealResult = runChecker(tooManyDeals);
+  assert.equal(dealResult.status, 1);
+  assert.match(dealResult.stderr, /too many deal_selection events/u);
+
+  const tooManyObservations = Array.from(
+    { length: OWNER_EVIDENCE_MAX_EVENTS_BY_KIND.message_observation + 1 },
+    (_, index) => ({
+      ...structuredClone(validEvents()[3]),
+      requestID: `req_observation_${index}`,
+      messageEventID: messageEventID(index + 1),
+    }),
+  );
+  tooManyObservations.push({
+    ...structuredClone(validEvents()[2]),
+    ...common("P_B", "req_recipient_spatial"),
+  });
+  const observationResult = runChecker(tooManyObservations);
+  assert.equal(observationResult.status, 1);
+  assert.match(observationResult.stderr, /too many message_observation events/u);
+
+  const tooManySpatial = [
+    ...validEvents(),
+    {
+      ...structuredClone(validEvents()[2]),
+      requestID: "req_extra_spatial",
+    },
+  ];
+  const spatialResult = runChecker(tooManySpatial);
+  assert.equal(spatialResult.status, 1);
+  assert.match(spatialResult.stderr, /too many spatial_observation events/u);
 });

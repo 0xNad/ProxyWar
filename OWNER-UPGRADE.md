@@ -564,14 +564,25 @@ Download the upgraded policy logs and run the exact bounded verifier:
 ```bash
 mkdir -p owner-evidence
 uvx --from coworld coworld episode-logs YOUR_DEAL_EREQ_ID --list --mine
-uvx --from coworld coworld episode-logs YOUR_DEAL_EREQ_ID --agent 0 --mine --output owner-evidence/deal-owner.log
-uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 0 --mine --output owner-evidence/message-slot-0.log
-uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 1 --mine --output owner-evidence/message-slot-1.log
-node owner-evidence-check.mjs --deals=required --messages=optional --spatial=absent owner-evidence/deal-owner.log
-node owner-evidence-check.mjs --deals=optional --messages=required --spatial=absent owner-evidence/message-slot-0.log owner-evidence/message-slot-1.log
+uvx --from coworld coworld episode-logs YOUR_DEAL_EREQ_ID --agent 0 --mine --download-dir owner-evidence
+uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 0 --mine --download-dir owner-evidence
+uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 1 --mine --download-dir owner-evidence
+node owner-evidence-normalize.mjs owner-evidence/YOUR_DEAL_EREQ_ID-policy_agent_0.log owner-evidence/deal-owner.normalized.log
+node owner-evidence-normalize.mjs owner-evidence/YOUR_MESSAGE_EREQ_ID-policy_agent_0.log owner-evidence/message-slot-0.normalized.log
+node owner-evidence-normalize.mjs owner-evidence/YOUR_MESSAGE_EREQ_ID-policy_agent_1.log owner-evidence/message-slot-1.normalized.log
+node owner-evidence-check.mjs --deals=required --messages=optional --spatial=absent owner-evidence/deal-owner.normalized.log
+node owner-evidence-check.mjs --deals=optional --messages=required --spatial=absent owner-evidence/message-slot-0.normalized.log owner-evidence/message-slot-1.normalized.log
 # After an authorized rich-spatial candidate XP:
 node owner-evidence-check.mjs --deals=optional --messages=optional --spatial=rich-v5-minimap owner-evidence/spatial-owner.log
 ```
+
+Coworld `0.1.42` ignores `--output` for policy logs and some hosted downloads
+arrive as one Python bytes-literal line. `--download-dir` preserves the raw
+artifact. The normalizer accepts either strict plain UTF-8 or that exact
+whole-file wrapper, supports only bounded byte escapes, never evaluates input,
+refuses to overwrite either source or an existing output, and prints input and
+output SHA-256 receipts. Retain both files and use only the normalized copy as
+verifier input.
 
 Each verifier invocation must print one JSON object with `"verdict":"PASS"`.
 The rich-spatial mode requires each supplied policy log to contain a spatial
@@ -591,8 +602,13 @@ message event alongside it. The checker validates only the prefixed
 arbitrary non-evidence policy-log lines. Extract and share only its allowlisted
 evidence records—never raw logs. Within those records it rejects raw
 body/prompt/provider fields, unknown fields, lines over 8 KiB, logs over 16 MiB,
-and more than 64 events of one kind. The body itself is never written by the
-reference evidence logger.
+and more than the complete supported-horizon per-policy ceilings: 600 deal
+selections, 600 message selections, 4,800 distinct message observations (600
+decision steps times the eight-message inbox), and one spatial observation.
+If any ceiling is reached and another event is offered, the logger emits one
+explicit saturation marker and the verifier fails rather than certifying a
+sampled corpus. The body itself is never written by the reference evidence
+logger.
 
 The canonical `proxywar:0.1.54` target proves the full deals ledger and
 free-text transport plus semantic replies; its retained public artifacts do
@@ -635,9 +651,9 @@ locally and must retain absent-field fallback.
   proof. All emitted primary choices still go through exact offered-ID
   validation.
 
-The reference logger writes at most 64 records per kind per policy process. Its
-allowlisted records contain offered/chosen IDs and bounded body hashes/counts,
-never raw message bodies, prompts, provider output, authorization, or secrets.
+The reference logger's allowlisted records contain offered/chosen IDs and
+bounded body hashes/counts, never raw message bodies, prompts, provider output,
+authorization, or secrets.
 
 Sanitized evidence root:
 `artifacts/release-train-20260822/`. It must contain no credentials, requester

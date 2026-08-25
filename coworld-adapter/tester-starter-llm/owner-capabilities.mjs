@@ -11,8 +11,18 @@ import { createHash } from "node:crypto";
 export const OWNER_MESSAGE_MAX_CHARS = 280;
 export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES = 16 * 1024;
 export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES = 4 * 1024;
+export const OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS = 600;
+export const OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP = 8;
+export const OWNER_EVIDENCE_MAX_EVENTS_BY_KIND = Object.freeze({
+  deal_selection: OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS,
+  message_selection: OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS,
+  message_observation:
+    OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS *
+    OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP,
+  spatial_observation: 1,
+});
+export const OWNER_EVIDENCE_SATURATION_KIND = "evidence_saturation";
 const OWNER_MINIMAP_LARGE_TILE_THRESHOLD = 256 * 1024;
-export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND = 64;
 export const SPATIAL_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 
 const DEAL_KINDS = new Set([
@@ -684,24 +694,51 @@ function boundedEvidenceID(value) {
  */
 export function createOwnerCapabilityEvidenceLogger({
   emit = (line) => console.log(line),
-  maxEventsPerKind = OWNER_EVIDENCE_MAX_EVENTS_PER_KIND,
+  maxEventsByKind = OWNER_EVIDENCE_MAX_EVENTS_BY_KIND,
 } = {}) {
+  const evidenceLimits = {};
+  for (const kind of Object.keys(OWNER_EVIDENCE_MAX_EVENTS_BY_KIND)) {
+    const maximum = maxEventsByKind?.[kind];
+    if (!Number.isSafeInteger(maximum) || maximum < 0) {
+      throw new TypeError(`invalid owner evidence maximum for ${kind}`);
+    }
+    evidenceLimits[kind] = maximum;
+  }
   const counts = new Map();
   const seenInbound = new Set();
+  const saturatedKinds = new Set();
   let spatialRecorded = false;
 
   const record = (kind, value) => {
     const count = counts.get(kind) ?? 0;
-    if (count >= maxEventsPerKind) return false;
-    counts.set(kind, count + 1);
+    const maximum = evidenceLimits[kind];
+    if (count >= maximum) {
+      if (!saturatedKinds.has(kind)) {
+        try {
+          emit(
+            `PROXYWAR_OWNER_CAPABILITY_EVIDENCE ${JSON.stringify({
+              kind: OWNER_EVIDENCE_SATURATION_KIND,
+              saturatedKind: kind,
+              maximum,
+            })}`,
+          );
+          saturatedKinds.add(kind);
+        } catch {
+          // Evidence must never become action-path authority or availability risk.
+        }
+      }
+      return false;
+    }
     try {
       emit(
         `PROXYWAR_OWNER_CAPABILITY_EVIDENCE ${JSON.stringify({ kind, ...value })}`,
       );
+      counts.set(kind, count + 1);
+      return true;
     } catch {
       // Evidence must never become action-path authority or availability risk.
+      return false;
     }
-    return true;
   };
 
   return ({
@@ -806,7 +843,7 @@ export function createOwnerCapabilityEvidenceLogger({
               rivals: spatial.rivals,
             }
         : null;
-      record("spatial_observation", {
+      spatialRecorded = record("spatial_observation", {
         ...base,
         present: spatial !== null,
         ...(spatial
@@ -830,7 +867,6 @@ export function createOwnerCapabilityEvidenceLogger({
             }
           : {}),
       });
-      spatialRecorded = true;
     }
   };
 }

@@ -1,7 +1,17 @@
 export const OWNER_MESSAGE_MAX_CHARS: 280;
 export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES: number;
 export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES: number;
-export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND: number;
+export const OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS: 600;
+export const OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP: 8;
+export type OwnerEvidenceKind =
+  | "deal_selection"
+  | "message_selection"
+  | "message_observation"
+  | "spatial_observation";
+export const OWNER_EVIDENCE_MAX_EVENTS_BY_KIND: Readonly<
+  Record<OwnerEvidenceKind, number>
+>;
+export const OWNER_EVIDENCE_SATURATION_KIND: "evidence_saturation";
 export const SPATIAL_VISIBILITY_MODEL: "global-lockstep-public-map-v1";
 
 export interface OwnerLegalAction {
@@ -37,7 +47,7 @@ export function ownerCapabilityObservation(
 ): Record<string, unknown>;
 export function createOwnerCapabilityEvidenceLogger(options?: {
   emit?: (line: string) => void;
-  maxEventsPerKind?: number;
+  maxEventsByKind?: Readonly<Record<OwnerEvidenceKind, number>>;
 }): (input: OwnerCapabilityEvidenceInput) => void;
 export function exactOfferedAction(
   actions: unknown,
