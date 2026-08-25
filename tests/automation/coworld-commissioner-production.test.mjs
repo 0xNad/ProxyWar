@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildMutationIntent,
   buildMutationReceipt,
   buildReconciliationState,
   certificationState,
+  discoverAllocatedCommissionerMutation,
   extractSourceSha,
   parsePatchCommissionerOutput,
   selectImmutableReleaseArtifact,
@@ -17,9 +19,8 @@ import {
   validateCommissionerOnlyManifestPatch,
   validateFinalMigration,
   validateReleaseArtifact,
-  validateResumeReceipt,
+  validateResumeIntent,
   validateResumeReference,
-  validateResumeSourceStatus,
 } from "../../.github/scripts/coworld-commissioner-production.mjs";
 
 const sha = "a".repeat(40);
@@ -460,7 +461,7 @@ test("patch output and certification states fail closed", () => {
   );
 });
 
-test("mutation receipt binds recovery to the exact failed run, artifact, source, and patch", () => {
+test("pre-mutation authority recovers an exact successful mutation after output and receipt loss", () => {
   const controlSha = "b".repeat(40);
   const dispatchSha = "c".repeat(40);
   const source = {
@@ -471,30 +472,25 @@ test("mutation receipt binds recovery to the exact failed run, artifact, source,
     commissionerRunnableId: "proxywar-ladder-commissioner",
     previousCommissionerMigrationVersion: `sha256:${"5".repeat(64)}`,
   };
-  const patch = {
-    patchedCoworldVersion: "0.1.63",
-    patchedCoworldId: patchedId,
-    patchedCommissionerImageId: patchedImage,
-    canonical: true,
-  };
   const image = {
     localCommissionerImage: "proxywar-commissioner-local:coworld-0123456789ab",
     localCommissionerImageId: `sha256:${"6".repeat(64)}`,
     platform: "linux/amd64",
   };
-  const receipt = buildMutationReceipt({
+  const context = {
+    controlSha,
+    workflowRunId: 101,
+    mainCiRunId: 102,
+    releaseRunId: 103,
+    releaseArtifactId: 104,
+    releaseArtifactName: `coworld-release-${sha}`,
+    releaseArtifactBytes: 2048,
+  };
+  const intent = buildMutationIntent({
     expectedSourceSha: sha,
-    context: {
-      controlSha,
-      workflowRunId: 101,
-      mainCiRunId: 102,
-      releaseRunId: 103,
-      releaseArtifactId: 104,
-      releaseArtifactName: `coworld-release-${sha}`,
-      releaseArtifactBytes: 2048,
-    },
+    context,
     source,
-    patch,
+    targetVersion: "0.1.63",
     image,
   });
   const workflowRun = {
@@ -513,28 +509,48 @@ test("mutation receipt binds recovery to the exact failed run, artifact, source,
     size_in_bytes: 4096,
     workflow_run: { id: 101, head_sha: dispatchSha },
   };
-  const resumed = validateResumeReceipt({
+  const resumed = validateResumeIntent({
     expectedSourceSha: sha,
     expectedWorkflowRunId: 101,
     expectedArtifactId: 105,
     workflowRun,
     artifact,
-    receipt,
+    intent,
   });
-  assert.equal(resumed.patch.patchedCoworldId, patchedId);
+  assert.equal(resumed.target.patchedCoworldVersion, "0.1.63");
   assert.equal(resumed.source.sourceCoworldId, sourceId);
-  assert.doesNotThrow(() =>
-    validateResumeSourceStatus({
-      expectedSourceSha: sha,
-      source: resumed.source,
-      status: status(sourceId, "0.1.62", sourceImage, {
-        coworld: {
-          ...status(sourceId, "0.1.62", sourceImage).coworld,
-          canonical: false,
-        },
-      }),
-    }),
-  );
+  const historicalSource = status(sourceId, "0.1.62", sourceImage);
+  historicalSource.coworld.canonical = false;
+  const discovered = discoverAllocatedCommissionerMutation({
+    expectedSourceSha: sha,
+    intent,
+    coworlds: [
+      {
+        id: patchedId,
+        name: "proxywar",
+        version: "0.1.63",
+        canonical: true,
+        manifest: manifest("0.1.63", patchedImage),
+      },
+    ],
+    sourceStatus: historicalSource,
+  });
+  assert.deepEqual(discovered, {
+    patchedCoworldVersion: "0.1.63",
+    patchedCoworldId: patchedId,
+    patchedCommissionerImageId: patchedImage,
+    canonical: true,
+  });
+
+  const diagnosticReceipt = buildMutationReceipt({
+    expectedSourceSha: sha,
+    context,
+    source,
+    patch: discovered,
+    image,
+  });
+  assert.equal(diagnosticReceipt.stage, "mutation-returned");
+  assert.match(diagnosticReceipt.recoveryProcedure, /diagnostic only/);
 
   assert.throws(
     () =>
@@ -571,18 +587,39 @@ test("mutation receipt binds recovery to the exact failed run, artifact, source,
   );
   assert.throws(
     () =>
-      validateResumeReceipt({
+      validateResumeIntent({
         expectedSourceSha: sha,
         expectedWorkflowRunId: 101,
         expectedArtifactId: 105,
         workflowRun,
         artifact,
-        receipt: {
-          ...receipt,
-          patch: { ...receipt.patch, untrustedPatchField: sourceId },
+        intent: {
+          ...intent,
+          target: { ...intent.target, untrustedTargetField: sourceId },
         },
       }),
     /unexpected fields/,
+  );
+  assert.throws(
+    () =>
+      discoverAllocatedCommissionerMutation({
+        expectedSourceSha: sha,
+        intent,
+        coworlds: [
+          {
+            id: patchedId,
+            name: "proxywar",
+            version: "0.1.63",
+            canonical: true,
+            manifest: {
+              ...manifest("0.1.63", patchedImage),
+              untrustedMutation: true,
+            },
+          },
+        ],
+        sourceStatus: historicalSource,
+      }),
+    /changed outside package version and commissioner image/,
   );
 });
 
@@ -646,8 +683,40 @@ test("reconciliation evidence exposes only strict status and league projections"
     "platformLadderEnabled",
   ]);
   assert.equal(projected.automaticRollback, false);
+  assert.deepEqual(projected.resumeReference, {
+    previousWorkflowRunId: 100,
+    mutationAuthorityArtifactId: 105,
+  });
   assert.doesNotMatch(JSON.stringify(projected), /AUTHENTICATED_.*_SECRET/);
   assert.doesNotMatch(JSON.stringify(projected), /privatePayload/);
+});
+
+test("reconciliation retains resume authority when patch output and receipt are absent", () => {
+  const projected = buildReconciliationState({
+    expectedSourceSha: sha,
+    controlSha: "b".repeat(40),
+    workflowRunId: 101,
+    source: {
+      sourceSha: sha,
+      sourceCoworldId: sourceId,
+      sourceCoworldVersion: "0.1.62",
+      sourceCommissionerImageId: sourceImage,
+      commissionerRunnableId: "proxywar-ladder-commissioner",
+      previousCommissionerMigrationVersion: `sha256:${"5".repeat(64)}`,
+    },
+    patch: {},
+    observedStatus: {},
+    observedLeague: {},
+    statusExit: "not-attempted",
+    leagueExit: "not-attempted",
+    resumeWorkflowRunId: 101,
+    resumeArtifactId: 105,
+  });
+  assert.equal(projected.patch, null);
+  assert.deepEqual(projected.resumeReference, {
+    previousWorkflowRunId: 101,
+    mutationAuthorityArtifactId: 105,
+  });
 });
 
 test("final migration requires changed migration identity and exact patched binding", () => {

@@ -638,6 +638,135 @@ function validateMutationContext(value, expectedSourceSha) {
   };
 }
 
+function validateMutationTarget(value, sourceVersion) {
+  exactObjectKeys(
+    value,
+    ["coworldName", "patchedCoworldVersion", "commissionerRunnableId"],
+    "mutation target",
+  );
+  invariant(
+    value.coworldName === COWORLD_NAME,
+    "mutation Coworld name mismatch",
+  );
+  semanticVersion(value.patchedCoworldVersion, "allocated patched version");
+  invariant(
+    value.patchedCoworldVersion !== sourceVersion,
+    "mutation target did not allocate a new version",
+  );
+  invariant(
+    value.commissionerRunnableId === COMMISSIONER_RUNNABLE_ID,
+    "mutation target commissioner runnable mismatch",
+  );
+  return {
+    coworldName: COWORLD_NAME,
+    patchedCoworldVersion: value.patchedCoworldVersion,
+    commissionerRunnableId: COMMISSIONER_RUNNABLE_ID,
+  };
+}
+
+function validateMutationIntentDocument(intent, expectedSourceSha) {
+  const sha = sourceSha(expectedSourceSha);
+  exactObjectKeys(
+    intent,
+    [
+      "schemaVersion",
+      "stage",
+      "sourceSha",
+      "controlSha",
+      "workflowRunId",
+      "mainCiRunId",
+      "release",
+      "source",
+      "target",
+      "image",
+      "automaticRollback",
+      "recoveryProcedure",
+    ],
+    "mutation intent",
+  );
+  invariant(intent.schemaVersion === 1, "mutation intent schema mismatch");
+  invariant(
+    intent.stage === "mutation-authorized",
+    "mutation intent stage mismatch",
+  );
+  invariant(intent.sourceSha === sha, "mutation intent source SHA mismatch");
+  invariant(
+    intent.automaticRollback === false,
+    "mutation intent made an automatic rollback claim",
+  );
+  invariant(
+    typeof intent.recoveryProcedure === "string" &&
+      intent.recoveryProcedure.length > 0 &&
+      intent.recoveryProcedure.length <= 400,
+    "mutation intent recovery procedure is malformed",
+  );
+  const source = validateSourceProjection(intent.source, sha);
+  const target = validateMutationTarget(
+    intent.target,
+    source.sourceCoworldVersion,
+  );
+  const image = validateImageProjection(intent.image);
+  exactObjectKeys(
+    intent.release,
+    ["runId", "artifactId", "artifactName", "artifactBytes"],
+    "mutation intent release",
+  );
+  const releaseContext = validateMutationContext(
+    {
+      controlSha: intent.controlSha,
+      workflowRunId: intent.workflowRunId,
+      mainCiRunId: intent.mainCiRunId,
+      releaseRunId: intent.release.runId,
+      releaseArtifactId: intent.release.artifactId,
+      releaseArtifactName: intent.release.artifactName,
+      releaseArtifactBytes: intent.release.artifactBytes,
+    },
+    sha,
+  );
+  return { source, target, image, releaseContext };
+}
+
+export function buildMutationIntent({
+  expectedSourceSha,
+  context,
+  source,
+  targetVersion,
+  image,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const boundedContext = validateMutationContext(context, sha);
+  const boundedSource = validateSourceProjection(source, sha);
+  const target = validateMutationTarget(
+    {
+      coworldName: COWORLD_NAME,
+      patchedCoworldVersion: targetVersion,
+      commissionerRunnableId: COMMISSIONER_RUNNABLE_ID,
+    },
+    boundedSource.sourceCoworldVersion,
+  );
+  const boundedImage = validateImageProjection(image);
+  return {
+    schemaVersion: 1,
+    stage: "mutation-authorized",
+    sourceSha: sha,
+    controlSha: boundedContext.controlSha,
+    workflowRunId: boundedContext.workflowRunId,
+    mainCiRunId: boundedContext.mainCiRunId,
+    release: {
+      runId: boundedContext.releaseRunId,
+      artifactId: boundedContext.releaseArtifactId,
+      artifactName: boundedContext.releaseArtifactName,
+      artifactBytes: boundedContext.releaseArtifactBytes,
+    },
+    source: boundedSource,
+    target,
+    image: boundedImage,
+    automaticRollback: false,
+    recoveryProcedure:
+      "Resume with this exact failed workflow run and its unexpired pre-mutation authority artifact. Recovery discovers and validates only the allocated version; it never patches again or claims automatic rollback.",
+  };
+}
+
 export function buildMutationReceipt({
   expectedSourceSha,
   context,
@@ -671,7 +800,7 @@ export function buildMutationReceipt({
     image: boundedImage,
     automaticRollback: false,
     recoveryProcedure:
-      "Dispatch this workflow with the same source_sha plus the exact previous workflow run and unexpired mutation-receipt artifact IDs. Recovery re-polls and validates the existing patched Coworld; it does not patch again or claim automatic rollback.",
+      "Use the pre-mutation authority artifact from this workflow to recover the exact allocated version. This post-mutation receipt is diagnostic only and does not authorize re-patching or automatic rollback.",
   };
 }
 
@@ -732,18 +861,18 @@ export function validateResumeReference({
   return {
     sourceSha: sha,
     previousWorkflowRunId: runId,
-    mutationReceiptArtifactId: artifactId,
+    mutationAuthorityArtifactId: artifactId,
     previousDispatchSha: workflowRun.head_sha,
   };
 }
 
-export function validateResumeReceipt({
+export function validateResumeIntent({
   expectedSourceSha,
   expectedWorkflowRunId,
   expectedArtifactId,
   workflowRun,
   artifact,
-  receipt,
+  intent,
 }) {
   const reference = validateResumeReference({
     expectedSourceSha,
@@ -752,78 +881,12 @@ export function validateResumeReceipt({
     workflowRun,
     artifact,
   });
-  exactObjectKeys(
-    receipt,
-    [
-      "schemaVersion",
-      "stage",
-      "sourceSha",
-      "controlSha",
-      "workflowRunId",
-      "mainCiRunId",
-      "release",
-      "source",
-      "patch",
-      "image",
-      "automaticRollback",
-      "recoveryProcedure",
-    ],
-    "mutation receipt",
-  );
-  invariant(receipt.schemaVersion === 1, "mutation receipt schema mismatch");
+  const validated = validateMutationIntentDocument(intent, reference.sourceSha);
   invariant(
-    receipt.stage === "mutation-returned",
-    "mutation receipt stage mismatch",
+    validated.releaseContext.workflowRunId === reference.previousWorkflowRunId,
+    "mutation intent workflow run mismatch",
   );
-  invariant(
-    receipt.sourceSha === reference.sourceSha,
-    "mutation receipt source SHA mismatch",
-  );
-  sourceSha(receipt.controlSha);
-  invariant(
-    receipt.workflowRunId === reference.previousWorkflowRunId,
-    "mutation receipt workflow run mismatch",
-  );
-  invariant(
-    receipt.automaticRollback === false,
-    "mutation receipt made an automatic rollback claim",
-  );
-  invariant(
-    typeof receipt.recoveryProcedure === "string" &&
-      receipt.recoveryProcedure.length > 0 &&
-      receipt.recoveryProcedure.length <= 400,
-    "mutation receipt recovery procedure is malformed",
-  );
-  const source = validateSourceProjection(receipt.source, reference.sourceSha);
-  const patch = validatePatchProjection(
-    receipt.patch,
-    source.sourceCoworldVersion,
-  );
-  const image = validateImageProjection(receipt.image);
-  exactObjectKeys(
-    receipt.release,
-    ["runId", "artifactId", "artifactName", "artifactBytes"],
-    "mutation receipt release",
-  );
-  const releaseContext = validateMutationContext(
-    {
-      controlSha: receipt.controlSha,
-      workflowRunId: receipt.workflowRunId,
-      mainCiRunId: receipt.mainCiRunId,
-      releaseRunId: receipt.release.runId,
-      releaseArtifactId: receipt.release.artifactId,
-      releaseArtifactName: receipt.release.artifactName,
-      releaseArtifactBytes: receipt.release.artifactBytes,
-    },
-    reference.sourceSha,
-  );
-  return {
-    reference,
-    source,
-    patch,
-    image,
-    releaseContext,
-  };
+  return { reference, ...validated };
 }
 
 export function validateResumeSourceStatus({
@@ -855,6 +918,63 @@ export function validateResumeSourceStatus({
     "resume source commissioner image mismatch",
   );
   return boundedSource;
+}
+
+export function discoverAllocatedCommissionerMutation({
+  expectedSourceSha,
+  intent,
+  coworlds,
+  sourceStatus,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const validated = validateMutationIntentDocument(intent, sha);
+  const source = validateResumeSourceStatus({
+    expectedSourceSha: sha,
+    source: validated.source,
+    status: sourceStatus,
+  });
+  const candidate = exactSingle(
+    jsonArray(coworlds, "Coworld inventory").filter(
+      (entry) =>
+        entry?.name === COWORLD_NAME &&
+        entry?.version === validated.target.patchedCoworldVersion,
+    ),
+    "allocated commissioner mutation",
+  );
+  invariant(
+    COWORLD_ID.test(candidate?.id ?? ""),
+    "allocated mutation Coworld id is malformed",
+  );
+  invariant(
+    candidate?.canonical === true,
+    "allocated mutation Coworld is not canonical",
+  );
+  invariant(
+    candidate?.manifest?.game?.version ===
+      validated.target.patchedCoworldVersion,
+    "allocated mutation manifest version mismatch",
+  );
+  invariant(
+    extractSourceSha(candidate?.manifest) === sha,
+    "allocated mutation provenance mismatch",
+  );
+  const hostedCommissioner = commissioner(candidate.manifest, IMAGE_ID);
+  invariant(
+    hostedCommissioner.image !== source.sourceCommissionerImageId,
+    "allocated mutation did not change the commissioner image",
+  );
+  validateCommissionerOnlyManifestPatch({
+    sourceManifest: sourceStatus?.coworld?.manifest,
+    patchedManifest: candidate.manifest,
+    sourceCommissionerImage: source.sourceCommissionerImageId,
+    patchedCommissionerImage: hostedCommissioner.image,
+  });
+  return {
+    patchedCoworldVersion: validated.target.patchedCoworldVersion,
+    patchedCoworldId: candidate.id,
+    patchedCommissionerImageId: hostedCommissioner.image,
+    canonical: true,
+  };
 }
 
 function exactOutputValue(text, prefix, pattern) {
@@ -1170,12 +1290,12 @@ export function buildReconciliationState({
     resumeReference: hasResumeReference
       ? {
           previousWorkflowRunId: resumeWorkflowRunId,
-          mutationReceiptArtifactId: resumeArtifactId,
+          mutationAuthorityArtifactId: resumeArtifactId,
         }
       : null,
     automaticRollback: false,
     recoveryProcedure:
-      "Resume only with the exact previous workflow run and its unexpired immediate mutation-receipt artifact. Recovery re-polls the existing patch and never patches or rolls back automatically.",
+      "Resume only with the exact previous workflow run and its unexpired pre-mutation authority artifact. Recovery discovers only the allocated version and never patches or rolls back automatically.",
   };
 }
 
@@ -1263,6 +1383,18 @@ function main(argv) {
     );
     return;
   }
+  if (command === "create-mutation-intent" && args.length === 5) {
+    print(
+      buildMutationIntent({
+        expectedSourceSha: args[0],
+        context: readJson(args[1]),
+        source: readJson(args[2]),
+        targetVersion: args[3],
+        image: readJson(args[4]),
+      }),
+    );
+    return;
+  }
   if (command === "validate-resume-reference" && args.length === 5) {
     print(
       validateResumeReference({
@@ -1275,15 +1407,15 @@ function main(argv) {
     );
     return;
   }
-  if (command === "validate-resume-receipt" && args.length === 6) {
+  if (command === "validate-resume-intent" && args.length === 6) {
     print(
-      validateResumeReceipt({
+      validateResumeIntent({
         expectedSourceSha: args[0],
         expectedWorkflowRunId: Number(args[1]),
         expectedArtifactId: Number(args[2]),
         workflowRun: readJson(args[3]),
         artifact: readJson(args[4]),
-        receipt: readJson(args[5]),
+        intent: readJson(args[5]),
       }),
     );
     return;
@@ -1294,6 +1426,17 @@ function main(argv) {
         expectedSourceSha: args[0],
         source: readJson(args[1]),
         status: readJson(args[2]),
+      }),
+    );
+    return;
+  }
+  if (command === "discover-resume-patch" && args.length === 4) {
+    print(
+      discoverAllocatedCommissionerMutation({
+        expectedSourceSha: args[0],
+        intent: readJson(args[1]),
+        coworlds: readJson(args[2]),
+        sourceStatus: readJson(args[3]),
       }),
     );
     return;

@@ -183,17 +183,23 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
   );
   assert.match(
     commissionerProduction,
+    /coworld-commissioner-mutation-intent\.json/,
+  );
+  assert.match(
+    commissionerProduction,
     /coworld-commissioner-reconciliation-state\.json/,
   );
   assert.match(commissionerProductionScript, /recoveryProcedure/);
   assert.match(commissionerProductionScript, /automaticRollback: false/);
   assert.match(commissionerProduction, /if: \$\{\{ always\(\) \}\}/);
   assert.match(commissionerProduction, /validate-resume-reference/);
-  assert.match(commissionerProduction, /validate-resume-receipt/);
+  assert.match(commissionerProduction, /validate-resume-intent/);
+  assert.match(commissionerProduction, /discover-resume-patch/);
+  assert.doesNotMatch(commissionerProduction, /validate-resume-receipt/);
   assert.match(commissionerProduction, /validate-resume-source/);
   assert.match(
     commissionerProduction,
-    /compare\/\$RECEIPT_CONTROL_SHA\.\.\.\$CONTROL_SHA/,
+    /compare\/\$INTENT_CONTROL_SHA\.\.\.\$CONTROL_SHA/,
   );
   assert.match(commissionerProduction, /build-reconciliation/);
   assert.doesNotMatch(commissionerProduction, /--slurpfile observedStatus/);
@@ -218,6 +224,7 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
       ),
     ].map((match) => match[1]),
     [
+      "coworld-commissioner-mutation-intent.json",
       "coworld-commissioner-mutation-receipt.json",
       "coworld-commissioner-reconciliation-state.json",
       "coworld-commissioner-migration-evidence.json",
@@ -228,7 +235,7 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
 test("commissioner recovery resumes only an exact retained mutation and never re-patches it", () => {
   assert.match(
     commissionerProduction,
-    /Recover the exact existing mutation from its immutable receipt\n\s+if: \$\{\{ needs\.admission\.outputs\.migration_mode == 'resume' \}\}/,
+    /Recover the exact allocated mutation from its immutable authority\n\s+if: \$\{\{ needs\.admission\.outputs\.migration_mode == 'resume' \}\}/,
   );
   assert.match(
     commissionerProduction,
@@ -240,9 +247,10 @@ test("commissioner recovery resumes only an exact retained mutation and never re
   );
   assert.match(
     commissionerProduction,
-    /resume artifact must contain only the mutation receipt/,
+    /resume artifact must contain only the mutation intent/,
   );
-  assert.match(commissionerProduction, /validate-resume-receipt/);
+  assert.match(commissionerProduction, /validate-resume-intent/);
+  assert.match(commissionerProduction, /discover-resume-patch/);
   assert.match(commissionerProduction, /validate-resume-source/);
   assert.match(commissionerProduction, /status "\$SOURCE_COWORLD_ID" --json/);
   assert.match(
@@ -256,6 +264,45 @@ test("commissioner recovery resumes only an exact retained mutation and never re
   assert.doesNotMatch(
     commissionerProduction,
     /migration_mode == 'resume'[\s\S]{0,3000}next-version/,
+  );
+});
+
+test("commissioner mutation is authorized durably before patch output or receipt can be lost", () => {
+  const authorityUpload = commissionerProduction.indexOf(
+    "name: Upload immutable pre-mutation resume authority",
+  );
+  const authorityBind = commissionerProduction.indexOf(
+    "name: Bind durable pre-mutation authority before mutation",
+  );
+  const patch = commissionerProduction.indexOf(
+    "name: Patch only the exact commissioner runnable",
+  );
+  const receiptUpload = commissionerProduction.indexOf(
+    "name: Upload post-mutation diagnostic receipt",
+  );
+  const reconciliation = commissionerProduction.indexOf(
+    "name: Capture resumable reconciliation state",
+  );
+  assert.ok(authorityUpload > 0);
+  assert.ok(authorityUpload < authorityBind);
+  assert.ok(authorityBind < patch);
+  assert.ok(patch < receiptUpload);
+  assert.ok(receiptUpload < reconciliation);
+  assert.match(
+    commissionerProduction.slice(reconciliation, reconciliation + 160),
+    /if: \$\{\{ always\(\) \}\}/,
+  );
+  assert.match(
+    commissionerProduction.slice(authorityBind, patch),
+    /MUTATION_WORKFLOW_RUN_ID=\$GITHUB_RUN_ID[\s\S]*MUTATION_AUTHORITY_ARTIFACT_ID=\$MUTATION_ARTIFACT_ID/,
+  );
+  assert.match(
+    commissionerProduction,
+    /AUTHORITY_ARTIFACT_ID="\$\{MUTATION_AUTHORITY_ARTIFACT_ID:-\}"/,
+  );
+  assert.match(
+    commissionerProductionScript,
+    /mutationAuthorityArtifactId: resumeArtifactId/,
   );
 });
 
