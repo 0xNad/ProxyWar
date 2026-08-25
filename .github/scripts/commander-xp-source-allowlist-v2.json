@@ -239,6 +239,7 @@
   "tests/e2e/support/CdpBrowser.ts",
   "tests/perf/agent-prompt-size-matrix.ts",
   "tests/server/AgentDealCompliance.test.ts",
+  "tests/server/AgentDealLedgerArtifact.test.ts",
   "tests/server/AgentDealManager.test.ts",
   "tests/server/AgentDecisionLogWriter.test.ts",
   "tests/server/AgentDecisionValidator.test.ts",
