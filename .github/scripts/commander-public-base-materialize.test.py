@@ -153,6 +153,36 @@ def fixture_image(args: SimpleNamespace) -> dict[str, object]:
     }
 
 
+def fixture_policy(
+    args: SimpleNamespace,
+    image_id: str,
+    *,
+    mode: str = "immediate-response",
+) -> dict[str, object]:
+    current = SimpleNamespace(
+        id="pvid_public_base_fixture",
+        name=args.policy_name,
+        version=1,
+    )
+    return MODULE.policy_projection(args, image_id, current, mode, b"{}")
+
+
+def write_image_recovery(
+    recovery: Path,
+    args: SimpleNamespace,
+    image: dict[str, object],
+) -> None:
+    recovery.mkdir()
+    MODULE.write_receipt(
+        recovery / "image.json",
+        {
+            **MODULE.common_receipt(args, "2026-08-25T00:00:00Z"),
+            "containerImage": image,
+            "imageUpload": MODULE.adopted_image(args, image),
+        },
+    )
+
+
 class PublicBaseMaterializeTest(unittest.TestCase):
     def test_runtime_is_exact_public_commander_without_eval_or_starter(self) -> None:
         self.assertEqual(
@@ -383,7 +413,55 @@ class PublicBaseMaterializeTest(unittest.TestCase):
         )
         response.json.assert_not_called()
 
-    def test_policy_creation_waits_for_exact_public_image(self) -> None:
+    def test_policy_creation_may_precede_public_image_uri(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            args = fixture_args(output, allow_remote_adoption=True)
+            private_image = fixture_image(args)
+            private_image["public_image_uri"] = None
+            public_image = fixture_image(args)
+            client = FakeUploadClient(
+                [ModelValue(private_image)], public_image=ModelValue(public_image)
+            )
+            create_policy = Mock(
+                return_value=fixture_policy(args, private_image["id"])
+            )
+
+            def refresh_after_policy(*_args: object) -> dict[str, object]:
+                create_policy.assert_called_once()
+                return public_image
+
+            with (
+                patch.object(
+                    MODULE.CoworldUploadClient,
+                    "from_login",
+                    return_value=client,
+                ),
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=FakeReadClient(None),
+                ),
+                patch.object(MODULE, "create_policy", create_policy),
+                patch.object(
+                    MODULE,
+                    "refreshed_public_image",
+                    side_effect=refresh_after_policy,
+                ),
+                redirect_stdout(StringIO()),
+            ):
+                MODULE.materialize(args)
+
+            create_policy.assert_called_once_with(
+                client, args, private_image["id"]
+            )
+            summary = MODULE.read_receipt(output / "summary.json")
+            self.assertEqual(
+                summary["containerImage"]["public_image_uri"],
+                public_image["public_image_uri"],
+            )
+
+    def test_terminal_summary_still_requires_public_image_uri(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "output"
             args = fixture_args(output, allow_remote_adoption=True)
@@ -392,16 +470,17 @@ class PublicBaseMaterializeTest(unittest.TestCase):
             client = FakeUploadClient(
                 [ModelValue(image)], public_image=ModelValue(image)
             )
-            create_policy = Mock(
-                side_effect=AssertionError(
-                    "policy creation must wait for a public image URI"
-                )
-            )
+            create_policy = Mock(return_value=fixture_policy(args, image["id"]))
             with (
                 patch.object(
                     MODULE.CoworldUploadClient,
                     "from_login",
                     return_value=client,
+                ),
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=FakeReadClient(None),
                 ),
                 patch.object(MODULE, "PUBLIC_IMAGE_ATTEMPTS", 1),
                 patch.object(MODULE, "create_policy", create_policy),
@@ -409,9 +488,117 @@ class PublicBaseMaterializeTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "image identity mismatch"):
                     MODULE.materialize(args)
 
-            create_policy.assert_not_called()
+            create_policy.assert_called_once_with(client, args, image["id"])
             self.assertTrue((output / "image.json").is_file())
             self.assertFalse((output / "policy.json").exists())
+            self.assertFalse((output / "summary.json").exists())
+
+    def test_coworld_image_recovery_resumes_without_reupload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery = root / "recovery"
+            output = root / "output"
+            args = fixture_args(
+                output,
+                recovery=recovery,
+                allow_remote_adoption=True,
+            )
+            private_image = fixture_image(args)
+            private_image["public_image_uri"] = None
+            public_image = fixture_image(args)
+            write_image_recovery(recovery, args, private_image)
+            client = FakeUploadClient([], public_image=ModelValue(public_image))
+            create_policy = Mock(
+                return_value=fixture_policy(args, private_image["id"])
+            )
+            with (
+                patch.object(
+                    MODULE.CoworldUploadClient,
+                    "from_login",
+                    return_value=client,
+                ),
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=FakeReadClient(None),
+                ),
+                patch.object(MODULE, "create_policy", create_policy),
+                redirect_stdout(StringIO()),
+            ):
+                MODULE.materialize(args)
+
+            create_policy.assert_called_once_with(
+                client, args, private_image["id"]
+            )
+            self.assertEqual(
+                (output / "image.json").read_bytes(),
+                (recovery / "image.json").read_bytes(),
+            )
+            summary = MODULE.read_receipt(output / "summary.json")
+            self.assertEqual(summary["policyCount"], 1)
+            self.assertEqual(
+                summary["containerImage"]["public_image_uri"],
+                public_image["public_image_uri"],
+            )
+
+    def test_policy_422_retains_exact_coworld_image_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery = root / "recovery"
+            output = root / "output"
+            args = fixture_args(
+                output,
+                recovery=recovery,
+                allow_remote_adoption=True,
+            )
+            image = fixture_image(args)
+            image["public_image_uri"] = None
+            write_image_recovery(recovery, args, image)
+            response_body = {
+                "detail": [
+                    {
+                        "loc": ["body", "name"],
+                        "type": "string_too_long",
+                        "msg": "String should have at most 64 characters",
+                        "input": "not-emitted",
+                    }
+                ]
+            }
+            response = SimpleNamespace(
+                status_code=422,
+                content=json.dumps(response_body).encode(),
+                json=lambda: response_body,
+            )
+            client = FakeUploadClient([])
+            client._headers = lambda: {"Authorization": "Bearer not-emitted"}
+            client._http_client = SimpleNamespace(
+                post=lambda *_args, **_kwargs: response
+            )
+            with (
+                patch.object(
+                    MODULE.CoworldUploadClient,
+                    "from_login",
+                    return_value=client,
+                ),
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=FakeReadClient(None),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "policy validation failed"
+                ) as caught:
+                    MODULE.materialize(args)
+
+            self.assertIn('"loc":["body","name"]', str(caught.exception))
+            self.assertNotIn("not-emitted", str(caught.exception))
+            self.assertEqual(
+                (output / "image.json").read_bytes(),
+                (recovery / "image.json").read_bytes(),
+            )
+            self.assertFalse((output / "policy.json").exists())
+            self.assertFalse((output / "summary.json").exists())
 
 
 if __name__ == "__main__":
