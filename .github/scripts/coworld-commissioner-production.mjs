@@ -10,6 +10,10 @@ const COWORLD_ID =
   /^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const IMAGE_ID =
   /^img_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PUBLIC_COMMISSIONER_IMAGE =
+  /^public\.ecr\.aws\/q5f4m8t9\/cogames@sha256:[0-9a-f]{64}$/;
+const HOSTED_COMMISSIONER_IMAGE =
+  /^(?:img_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|public\.ecr\.aws\/q5f4m8t9\/cogames@sha256:[0-9a-f]{64})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SAFE_LABEL = /^[A-Za-z0-9._:/-]{1,200}$/;
@@ -291,6 +295,15 @@ function commissioner(manifest, expectedImagePattern) {
   return runnable;
 }
 
+function compatibleCommissionerImageProjection(left, right) {
+  if (left === right) return true;
+  return (
+    (IMAGE_ID.test(left ?? "") &&
+      PUBLIC_COMMISSIONER_IMAGE.test(right ?? "")) ||
+    (PUBLIC_COMMISSIONER_IMAGE.test(left ?? "") && IMAGE_ID.test(right ?? ""))
+  );
+}
+
 export function validateCanonicalSourceRelease({
   coworlds,
   status,
@@ -326,6 +339,11 @@ export function validateCanonicalSourceRelease({
     "status Coworld id does not match canonical inventory",
   );
   invariant(
+    DIGEST.test(canonical?.manifest_hash ?? "") &&
+      status?.coworld?.manifest_hash === canonical.manifest_hash,
+    "status manifest hash does not match canonical inventory",
+  );
+  invariant(
     status?.coworld?.manifest?.game?.version === canonical.version,
     "status manifest version does not match canonical inventory",
   );
@@ -334,7 +352,21 @@ export function validateCanonicalSourceRelease({
     "status provenance does not match source SHA",
   );
   invariant(certifiedTenOfTen(status), "source Coworld is not certified 10/10");
-  const hostedCommissioner = commissioner(status.coworld.manifest, IMAGE_ID);
+  const inventoryCommissioner = commissioner(
+    canonical.manifest,
+    HOSTED_COMMISSIONER_IMAGE,
+  );
+  const hostedCommissioner = commissioner(
+    status.coworld.manifest,
+    HOSTED_COMMISSIONER_IMAGE,
+  );
+  invariant(
+    compatibleCommissionerImageProjection(
+      inventoryCommissioner.image,
+      hostedCommissioner.image,
+    ),
+    "status commissioner image does not match canonical inventory",
+  );
   invariant(league?.id === LEAGUE_ID, "unexpected league id");
   invariant(
     league?.commissioner_key === "platform",
@@ -375,7 +407,7 @@ function commissionerPatchComparableManifest(
   const comparable = structuredClone(manifest);
   semanticVersion(comparable?.game?.version, "manifest game version");
   comparable.game.version = "__PACKAGE_VERSION__";
-  const runnable = commissioner(comparable, IMAGE_ID);
+  const runnable = commissioner(comparable, HOSTED_COMMISSIONER_IMAGE);
   invariant(
     runnable.image === expectedCommissionerImage,
     "manifest commissioner image does not match the expected identity",
@@ -507,7 +539,7 @@ function validateSourceProjection(value, expectedSourceSha) {
   );
   semanticVersion(value.sourceCoworldVersion, "mutation source version");
   invariant(
-    IMAGE_ID.test(value.sourceCommissionerImageId ?? ""),
+    HOSTED_COMMISSIONER_IMAGE.test(value.sourceCommissionerImageId ?? ""),
     "mutation source commissioner image is malformed",
   );
   invariant(
@@ -912,7 +944,10 @@ export function validateResumeSourceStatus({
     extractSourceSha(status?.coworld?.manifest) === boundedSource.sourceSha,
     "resume source manifest provenance mismatch",
   );
-  const sourceCommissioner = commissioner(status.coworld.manifest, IMAGE_ID);
+  const sourceCommissioner = commissioner(
+    status.coworld.manifest,
+    HOSTED_COMMISSIONER_IMAGE,
+  );
   invariant(
     sourceCommissioner.image === boundedSource.sourceCommissionerImageId,
     "resume source commissioner image mismatch",
@@ -1021,14 +1056,22 @@ export function validateAuthorizedHostedCommissionerImage({
     "hosted commissioner image status is malformed",
   );
   invariant(
-    hostedImage.image_digest === null ||
-      DIGEST.test(hostedImage.image_digest ?? ""),
+    DIGEST.test(hostedImage.image_digest ?? ""),
     "hosted commissioner registry digest is malformed",
+  );
+  invariant(
+    PUBLIC_COMMISSIONER_IMAGE.test(hostedImage.public_image_uri ?? ""),
+    "hosted commissioner public image URI is malformed",
+  );
+  invariant(
+    hostedImage.public_image_uri.endsWith(`@${hostedImage.image_digest}`),
+    "hosted commissioner public image URI digest mismatch",
   );
   return {
     hostedCommissionerImageId: boundedPatch.patchedCommissionerImageId,
     authorizedLocalConfigDigest: validated.image.localCommissionerImageId,
     hostedImageDigest: hostedImage.image_digest,
+    hostedCommissionerManifestImage: hostedImage.public_image_uri,
   };
 }
 
@@ -1098,6 +1141,7 @@ export function validateFinalMigration({
   expectedVersion,
   preflight,
   patch,
+  hostedImageBinding,
   sourceStatus,
   status,
   league,
@@ -1141,9 +1185,49 @@ export function validateFinalMigration({
     certifiedTenOfTen(status),
     "patched Coworld is not certified 10/10",
   );
-  const hostedCommissioner = commissioner(status.coworld.manifest, IMAGE_ID);
+  exactObjectKeys(
+    hostedImageBinding,
+    [
+      "hostedCommissionerImageId",
+      "authorizedLocalConfigDigest",
+      "hostedImageDigest",
+      "hostedCommissionerManifestImage",
+    ],
+    "hosted commissioner image binding",
+  );
   invariant(
-    hostedCommissioner.image === patch.patchedCommissionerImageId,
+    hostedImageBinding.hostedCommissionerImageId ===
+      patch.patchedCommissionerImageId,
+    "hosted commissioner image binding id mismatch",
+  );
+  invariant(
+    DIGEST.test(hostedImageBinding.authorizedLocalConfigDigest ?? ""),
+    "authorized local commissioner digest is malformed",
+  );
+  invariant(
+    DIGEST.test(hostedImageBinding.hostedImageDigest ?? ""),
+    "hosted commissioner image digest is malformed",
+  );
+  invariant(
+    PUBLIC_COMMISSIONER_IMAGE.test(
+      hostedImageBinding.hostedCommissionerManifestImage ?? "",
+    ) &&
+      hostedImageBinding.hostedCommissionerManifestImage.endsWith(
+        `@${hostedImageBinding.hostedImageDigest}`,
+      ),
+    "hosted commissioner manifest image binding is malformed",
+  );
+  const hostedCommissioner = commissioner(
+    status.coworld.manifest,
+    HOSTED_COMMISSIONER_IMAGE,
+  );
+  const expectedStatusCommissionerImage = IMAGE_ID.test(
+    hostedCommissioner.image,
+  )
+    ? patch.patchedCommissionerImageId
+    : hostedImageBinding.hostedCommissionerManifestImage;
+  invariant(
+    hostedCommissioner.image === expectedStatusCommissionerImage,
     "patched status commissioner image mismatch",
   );
   invariant(
@@ -1154,11 +1238,19 @@ export function validateFinalMigration({
     sourceStatus?.coworld?.version === preflight?.sourceCoworldVersion,
     "source status Coworld version mismatch",
   );
+  const sourceCommissioner = commissioner(
+    sourceStatus?.coworld?.manifest,
+    HOSTED_COMMISSIONER_IMAGE,
+  );
+  invariant(
+    sourceCommissioner.image === preflight?.sourceCommissionerImageId,
+    "source status commissioner image mismatch",
+  );
   validateCommissionerOnlyManifestPatch({
     sourceManifest: sourceStatus?.coworld?.manifest,
     patchedManifest: status?.coworld?.manifest,
     sourceCommissionerImage: preflight?.sourceCommissionerImageId,
-    patchedCommissionerImage: patch.patchedCommissionerImageId,
+    patchedCommissionerImage: hostedCommissioner.image,
   });
   invariant(league?.id === LEAGUE_ID, "unexpected final league id");
   invariant(
@@ -1250,7 +1342,10 @@ function reconciliationStatusProjection(status) {
   let commissionerRunnableId = null;
   let commissionerImageId = null;
   try {
-    const hosted = commissioner(status?.coworld?.manifest, IMAGE_ID);
+    const hosted = commissioner(
+      status?.coworld?.manifest,
+      HOSTED_COMMISSIONER_IMAGE,
+    );
     commissionerRunnableId = hosted.id;
     commissionerImageId = hosted.image;
   } catch {
@@ -1545,16 +1640,17 @@ function main(argv) {
     process.stdout.write(`${certificationState(readJson(args[0]))}\n`);
     return;
   }
-  if (command === "validate-final" && args.length === 7) {
+  if (command === "validate-final" && args.length === 8) {
     print(
       validateFinalMigration({
         expectedSourceSha: args[0],
         expectedVersion: args[1],
         preflight: readJson(args[2]),
         patch: readJson(args[3]),
-        sourceStatus: readJson(args[4]),
-        status: readJson(args[5]),
-        league: readJson(args[6]),
+        hostedImageBinding: readJson(args[4]),
+        sourceStatus: readJson(args[5]),
+        status: readJson(args[6]),
+        league: readJson(args[7]),
       }),
     );
     return;

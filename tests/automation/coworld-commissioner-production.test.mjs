@@ -30,6 +30,10 @@ const sourceImage = "img_11111111-1111-1111-1111-111111111111";
 const patchedImage = "img_22222222-2222-2222-2222-222222222222";
 const leagueId = "league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42";
 
+function publicCommissionerImage(hex = "8") {
+  return `public.ecr.aws/q5f4m8t9/cogames@sha256:${hex.repeat(64)}`;
+}
+
 function manifest(version, commissionerImage) {
   return {
     game: {
@@ -83,6 +87,7 @@ function status(id, version, image, overrides = {}) {
 }
 
 function hostedImage(id, clientHash) {
+  const imageDigest = `sha256:${"8".repeat(64)}`;
   return {
     id,
     name: "proxywar-commissioner-local",
@@ -90,8 +95,17 @@ function hostedImage(id, clientHash) {
     client_hash: clientHash,
     status: "ready",
     image_uri: null,
-    image_digest: `sha256:${"8".repeat(64)}`,
-    public_image_uri: null,
+    image_digest: imageDigest,
+    public_image_uri: publicCommissionerImage(),
+  };
+}
+
+function hostedImageBinding(id = patchedImage) {
+  return {
+    hostedCommissionerImageId: id,
+    authorizedLocalConfigDigest: `sha256:${"6".repeat(64)}`,
+    hostedImageDigest: `sha256:${"8".repeat(64)}`,
+    hostedCommissionerManifestImage: publicCommissionerImage(),
   };
 }
 
@@ -301,7 +315,7 @@ test("resolves one unexpired, nonempty exact-source artifact", () => {
 });
 
 test("validates certified canonical exact-source package and league binding", () => {
-  const sourceStatus = status(sourceId, "0.1.62", sourceImage);
+  const sourceStatus = status(sourceId, "0.1.62", publicCommissionerImage("9"));
   const result = validateCanonicalSourceRelease({
     expectedSourceSha: sha,
     coworlds: [
@@ -310,7 +324,8 @@ test("validates certified canonical exact-source package and league binding", ()
         name: "proxywar",
         version: "0.1.62",
         canonical: true,
-        manifest: sourceStatus.coworld.manifest,
+        manifest_hash: sourceStatus.coworld.manifest_hash,
+        manifest: manifest("0.1.62", sourceImage),
       },
     ],
     status: sourceStatus,
@@ -323,7 +338,33 @@ test("validates certified canonical exact-source package and league binding", ()
     },
   });
   assert.equal(result.sourceCoworldId, sourceId);
+  assert.equal(result.sourceCommissionerImageId, publicCommissionerImage("9"));
   assert.equal(extractSourceSha(sourceStatus.coworld.manifest), sha);
+  const legacyStatus = status(sourceId, "0.1.62", sourceImage);
+  assert.equal(
+    validateCanonicalSourceRelease({
+      expectedSourceSha: sha,
+      coworlds: [
+        {
+          id: sourceId,
+          name: "proxywar",
+          version: "0.1.62",
+          canonical: true,
+          manifest_hash: legacyStatus.coworld.manifest_hash,
+          manifest: legacyStatus.coworld.manifest,
+        },
+      ],
+      status: legacyStatus,
+      league: {
+        id: leagueId,
+        game: { coworld_id: sourceId },
+        commissioner_key: "platform",
+        rounds_paused_at: null,
+        commissioner_migration_version: `sha256:${"5".repeat(64)}`,
+      },
+    }).sourceCommissionerImageId,
+    sourceImage,
+  );
   assert.throws(
     () =>
       validateCanonicalSourceRelease({
@@ -333,6 +374,34 @@ test("validates certified canonical exact-source package and league binding", ()
         league: {},
       }),
     /canonical ProxyWar Coworld/,
+  );
+  const malformedStatus = structuredClone(sourceStatus);
+  malformedStatus.coworld.manifest.commissioner[0].image =
+    "public.ecr.aws/q5f4m8t9/cogames:mutable";
+  assert.throws(
+    () =>
+      validateCanonicalSourceRelease({
+        expectedSourceSha: sha,
+        coworlds: [
+          {
+            id: sourceId,
+            name: "proxywar",
+            version: "0.1.62",
+            canonical: true,
+            manifest_hash: malformedStatus.coworld.manifest_hash,
+            manifest: manifest("0.1.62", sourceImage),
+          },
+        ],
+        status: malformedStatus,
+        league: {
+          id: leagueId,
+          game: { coworld_id: sourceId },
+          commissioner_key: "platform",
+          rounds_paused_at: null,
+          commissioner_migration_version: `sha256:${"5".repeat(64)}`,
+        },
+      }),
+    /commissioner image identity is malformed/,
   );
 });
 
@@ -759,7 +828,7 @@ test("final migration requires changed migration identity and exact patched bind
   const preflight = {
     sourceCoworldId: sourceId,
     sourceCoworldVersion: "0.1.62",
-    sourceCommissionerImageId: sourceImage,
+    sourceCommissionerImageId: publicCommissionerImage("9"),
     previousCommissionerMigrationVersion: previous,
   };
   const patch = {
@@ -768,14 +837,19 @@ test("final migration requires changed migration identity and exact patched bind
     patchedCommissionerImageId: patchedImage,
     canonical: true,
   };
-  const patchedStatus = status(patchedId, "0.1.63", patchedImage);
-  const historicalSourceStatus = status(sourceId, "0.1.62", sourceImage);
+  const patchedStatus = status(patchedId, "0.1.63", publicCommissionerImage());
+  const historicalSourceStatus = status(
+    sourceId,
+    "0.1.62",
+    publicCommissionerImage("9"),
+  );
   historicalSourceStatus.coworld.canonical = false;
   const evidence = validateFinalMigration({
     expectedSourceSha: sha,
     expectedVersion: "0.1.63",
     preflight,
     patch,
+    hostedImageBinding: hostedImageBinding(),
     sourceStatus: historicalSourceStatus,
     status: patchedStatus,
     league: {
@@ -787,7 +861,10 @@ test("final migration requires changed migration identity and exact patched bind
     },
   });
   assert.equal(evidence.commissionerMigrationVersionAfter, next);
-  assert.equal(evidence.sourceCommissionerImageId, sourceImage);
+  assert.equal(
+    evidence.sourceCommissionerImageId,
+    publicCommissionerImage("9"),
+  );
   assert.throws(
     () =>
       validateFinalMigration({
@@ -795,7 +872,8 @@ test("final migration requires changed migration identity and exact patched bind
         expectedVersion: "0.1.63",
         preflight,
         patch,
-        sourceStatus: status(sourceId, "0.1.62", sourceImage),
+        hostedImageBinding: hostedImageBinding(),
+        sourceStatus: historicalSourceStatus,
         status: patchedStatus,
         league: {
           id: leagueId,
@@ -806,5 +884,28 @@ test("final migration requires changed migration identity and exact patched bind
         },
       }),
     /did not change/,
+  );
+  assert.throws(
+    () =>
+      validateFinalMigration({
+        expectedSourceSha: sha,
+        expectedVersion: "0.1.63",
+        preflight,
+        patch,
+        hostedImageBinding: {
+          ...hostedImageBinding(),
+          hostedCommissionerManifestImage: publicCommissionerImage("7"),
+        },
+        sourceStatus: historicalSourceStatus,
+        status: patchedStatus,
+        league: {
+          id: leagueId,
+          game: { coworld_id: patchedId },
+          commissioner_key: "platform",
+          rounds_paused_at: null,
+          commissioner_migration_version: next,
+        },
+      }),
+    /manifest image binding is malformed|patched status commissioner image mismatch/,
   );
 });
