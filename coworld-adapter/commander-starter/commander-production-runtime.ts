@@ -33,6 +33,7 @@ interface BedrockResponse {
 
 export interface CommanderProviderEvidence {
   provider: "bedrock-sidecar";
+  callKind: "planner";
   requestedModel: typeof PRODUCTION_COMMANDER_MODEL;
   responseModel?: string;
   requestID?: string;
@@ -115,8 +116,8 @@ export class CommanderBedrockProvider implements LlmProvider {
   readonly cancellationBehavior = "settles-after-abort" as const;
   readonly model = PRODUCTION_COMMANDER_MODEL;
   private client: BedrockClient | null = null;
-  private successfulResponseSequence = 0;
-  private lastSuccessfulEvidence:
+  private providerCallSequence = 0;
+  private lastProviderEvidence:
     | { sequence: number; evidence: CommanderProviderEvidence }
     | undefined;
 
@@ -130,6 +131,12 @@ export class CommanderBedrockProvider implements LlmProvider {
     options: LlmCompletionOptions = {},
   ): Promise<string> {
     const client = await this.bedrockClient();
+    this.providerCallSequence += 1;
+    const sequence = this.providerCallSequence;
+    this.lastProviderEvidence = {
+      sequence,
+      evidence: commanderProviderEvidenceFromResponse({}),
+    };
     const response = await client.messages.create(
       commanderBedrockRequest(prompt),
       {
@@ -137,6 +144,10 @@ export class CommanderBedrockProvider implements LlmProvider {
         signal: options.signal,
       },
     );
+    this.lastProviderEvidence = {
+      sequence,
+      evidence: commanderProviderEvidenceFromResponse(response),
+    };
     const output = (response.content ?? [])
       .map((block) => (typeof block.text === "string" ? block.text : ""))
       .join("")
@@ -144,20 +155,15 @@ export class CommanderBedrockProvider implements LlmProvider {
     if (output.length === 0) {
       throw new Error("Commander Bedrock response was empty");
     }
-    this.successfulResponseSequence += 1;
-    this.lastSuccessfulEvidence = {
-      sequence: this.successfulResponseSequence,
-      evidence: commanderProviderEvidenceFromResponse(response),
-    };
     return output;
   }
 
   evidenceCursor(): number {
-    return this.successfulResponseSequence;
+    return this.providerCallSequence;
   }
 
   providerEvidenceAfter(cursor: number): CommanderProviderEvidence | undefined {
-    const latest = this.lastSuccessfulEvidence;
+    const latest = this.lastProviderEvidence;
     return latest !== undefined && latest.sequence > cursor
       ? { ...latest.evidence }
       : undefined;
@@ -193,6 +199,7 @@ export function commanderProviderEvidenceFromResponse(
   const outputTokens = boundedTokenCount(response.usage?.output_tokens);
   return {
     provider: "bedrock-sidecar",
+    callKind: "planner",
     requestedModel: PRODUCTION_COMMANDER_MODEL,
     ...(responseModel === undefined ? {} : { responseModel }),
     ...(requestID === undefined ? {} : { requestID }),
@@ -221,11 +228,10 @@ function boundedTokenCount(value: unknown): number | undefined {
 
 export function withCommanderProviderEvidence(
   response: Record<string, unknown>,
-  decision: AgentDecision,
+  _decision: AgentDecision,
   evidence: CommanderProviderEvidence | undefined,
 ): Record<string, unknown> {
-  return decision.metadata?.llmPlannerDegraded !== true &&
-    evidence !== undefined
+  return evidence !== undefined
     ? { providerEvidence: evidence, ...response }
     : response;
 }
