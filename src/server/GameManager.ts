@@ -60,6 +60,11 @@ export class GameManager {
     startsAt?: number,
     publicGameType?: PublicGameType,
   ): GameServer | null {
+    if (gameConfig?.donateToNonFriendly === true) {
+      throw new Error(
+        "non-friendly donations are reserved for internal Coworld games",
+      );
+    }
     if (this.games.has(id)) {
       this.log.warn("cannot create game, id already exists", { gameID: id });
       return null;

@@ -74,6 +74,17 @@ describe("non-friendly donation configuration", () => {
         players: [],
       }).success,
     ).toBe(true);
+    expect(
+      GameStartInfoSchema.safeParse({
+        gameID: "NEWRPLY1",
+        lobbyCreatedAt: 1,
+        config: {
+          ...game.config().gameConfig(),
+          donateToNonFriendly: true,
+        },
+        players: [],
+      }).success,
+    ).toBe(true);
   });
 
   it("enables exact enemy gold and troop transfers with deterministic relation and receipts", async () => {

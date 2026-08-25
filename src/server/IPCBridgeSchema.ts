@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  GameConfigSchema,
+  ExternalGameConfigSchema,
   PublicGameInfoSchema,
   PublicGamesSchema,
   PublicGameTypeSchema,
@@ -55,7 +55,7 @@ const MasterLobbiesBroadcastSchema = z.object({
 const MasterCreateGameSchema = z.object({
   type: z.literal("createGame"),
   gameID: z.string(),
-  gameConfig: GameConfigSchema,
+  gameConfig: ExternalGameConfigSchema,
   publicGameType: PublicGameTypeSchema,
 });
 

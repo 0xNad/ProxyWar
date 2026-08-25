@@ -289,6 +289,32 @@ export const GameConfigSchema = z.object({
     .optional(),
 });
 
+const rejectExternalNonFriendlyDonations = (config: {
+  donateToNonFriendly?: boolean;
+}): boolean => config.donateToNonFriendly !== true;
+
+/**
+ * Public/private-game clients may configure ordinary donation resources, but
+ * the broadened audience is an internal Coworld episode capability. Keep the
+ * replay/config schema additive above while every external create/update wire
+ * boundary rejects attempts to enable it.
+ */
+export const ExternalGameConfigSchema = GameConfigSchema.refine(
+  rejectExternalNonFriendlyDonations,
+  {
+    path: ["donateToNonFriendly"],
+    message: "non-friendly donations are reserved for internal Coworld games",
+  },
+);
+
+export const ExternalGameConfigUpdateSchema = GameConfigSchema.partial().refine(
+  rejectExternalNonFriendlyDonations,
+  {
+    path: ["donateToNonFriendly"],
+    message: "non-friendly donations are reserved for internal Coworld games",
+  },
+);
+
 export const TeamSchema = z.string();
 
 export const SafeString = z
@@ -493,7 +519,7 @@ export const TogglePauseIntentSchema = z.object({
 
 export const UpdateGameConfigIntentSchema = z.object({
   type: z.literal("update_game_config"),
-  config: GameConfigSchema.partial(),
+  config: ExternalGameConfigUpdateSchema,
 });
 
 export const StartGameIntentSchema = z.object({

@@ -67,6 +67,23 @@ describe("GameManager: a game that cannot start", () => {
     return { manager, game: game! };
   }
 
+  it("rejects reserved donation enablement before an external game is stored", () => {
+    const manager = new GameManager(config as never, logger as never);
+    expect(() =>
+      manager.createGame("DONATE01", {
+        donateToNonFriendly: true,
+      } as never),
+    ).toThrow("non-friendly donations are reserved for internal Coworld games");
+    expect(manager.game("DONATE01")).toBeNull();
+
+    const ordinaryFalse = manager.createGame("DONATE02", {
+      donateToNonFriendly: false,
+    } as never);
+    const ordinaryAbsent = manager.createGame("DONATE03", undefined);
+    expect(ordinaryFalse?.gameConfig.donateToNonFriendly).toBe(false);
+    expect(ordinaryAbsent?.gameConfig.donateToNonFriendly).toBeUndefined();
+  });
+
   it("ends the game and drops it, instead of leaving clients waiting forever", () => {
     // 20 characters: fails GAME_ID_REGEX, so GameStartInfoSchema rejects the start
     // info and start() throws.
