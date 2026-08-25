@@ -220,6 +220,21 @@ test("LLM overlay keeps safe choices and filters hostility toward responders", (
   assert.equal(result.allowedLegalActionIds.includes(attack.id), false);
   assert.equal(result.allowedLegalActionIds.includes(expand.id), true);
   assert.equal(result.allowedLegalActionIds.includes(hold.id), true);
+  assert.deepEqual(
+    {
+      ...result.messageIntent,
+      commit: typeof result.messageIntent?.commit,
+    },
+    {
+    actionID: message.id,
+    recipientID: "A",
+    purpose: "reply",
+    maxChars: 280,
+    inboundMessageEventID: "msg_llm",
+      commit: "function",
+    },
+  );
+  assert.equal("messageText" in result, false);
 });
 
 test("LLM overlay returns an exact alliance override for an incoming request", () => {

@@ -17,6 +17,7 @@ WORKDIR /app/proxywar/coworld-adapter
 COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY coworld-adapter/src ./src
+COPY coworld-adapter/commander-starter/open-ended-message.ts ./commander-starter/open-ended-message.ts
 WORKDIR /app/proxywar
 # The eval image intentionally excludes private product assets. Vite expects
 # the directory to exist, so provide an empty directory instead.
@@ -59,6 +60,7 @@ WORKDIR /app/integration
 COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
 RUN npm ci --ignore-scripts && npm cache clean --force
 COPY coworld-adapter/src ./src
+COPY coworld-adapter/commander-starter/open-ended-message.ts ./commander-starter/open-ended-message.ts
 
 WORKDIR /app/proxywar
 CMD ["node", "--max-old-space-size=640", "--import", "tsx/esm", "/app/integration/src/no-docker-coworld-episode.ts"]

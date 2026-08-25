@@ -129,7 +129,12 @@ describe("keystone structured deals", () => {
     const composed = withKeystoneDeal(
       withKeystoneMessage(
         commanderDecision,
-        chooseKeystoneMessageMove(offered, obs, new Set()),
+        (() => {
+          const intent = chooseKeystoneMessageMove(offered, obs, new Set());
+          return intent === null
+            ? null
+            : { actionID: intent.actionID, text: "I cannot fund that request." };
+        })(),
       ),
       chooseKeystoneDealMove({
         observation: obs,
@@ -608,11 +613,15 @@ describe("keystone message identity", () => {
     } as AgentObservation["nonCombat"];
     const answered = new Set<string>();
 
-    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    const newest = chooseKeystoneMessageMove(offered, obs, answered);
+    expect(newest).not.toBeNull();
+    newest?.commit?.();
     expect(answered).toContain(newerID);
     expect(answered).not.toContain(olderID);
 
-    expect(chooseKeystoneMessageMove(offered, obs, answered)).not.toBeNull();
+    const older = chooseKeystoneMessageMove(offered, obs, answered);
+    expect(older).not.toBeNull();
+    older?.commit?.();
     expect(answered).toContain(olderID);
   });
 });

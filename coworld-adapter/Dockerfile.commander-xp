@@ -46,6 +46,7 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY tsconfig.json ./
 COPY src ./src
 COPY coworld-adapter/src/keystone-player.ts ./coworld-adapter/src/keystone-player.ts
+COPY coworld-adapter/commander-starter/open-ended-message.ts ./coworld-adapter/commander-starter/open-ended-message.ts
 
 WORKDIR /app/proxywar/coworld-adapter
 COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./

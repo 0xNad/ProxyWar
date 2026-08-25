@@ -4,8 +4,9 @@
  * Production primary gameplay is selected by the LLM Strategic Commander.
  * This module owns the persistent relationship state, exact alliance/support
  * overrides, hostile-action filtering, and the independent message/deal slots.
- * Rival-authored text is treated only as evidence that the sender engaged; its
- * contents never become an instruction or get copied.
+ * The deterministic baseline below retains bounded canned prose. The hosted
+ * LLM overlay emits only a message intent; friendly-player-llm.ts gives that
+ * intent and the untrusted conversation to the model for open-ended wording.
  */
 
 const DEAL_KINDS = new Set([
@@ -232,6 +233,7 @@ export function createMitochondriaFriendLlmPolicy() {
       decisionNumber,
       deal,
       maxChars: advertisedMessageLimit(input.protocol),
+      openEnded: true,
     });
     const override = relationshipOverride ?? supportOverride ?? null;
     return {
@@ -241,8 +243,7 @@ export function createMitochondriaFriendLlmPolicy() {
       ...(deal ? { selectedDealActionId: deal.id } : {}),
       ...(message
         ? {
-            selectedMessageActionId: message.id,
-            messageText: message.text,
+            messageIntent: message,
           }
         : {}),
       reason: override
@@ -605,13 +606,16 @@ function chooseMessage({
   decisionNumber,
   deal,
   maxChars,
+  openEnded = false,
 }) {
   if (maxChars === null) return null;
   const offers = actions.filter((action) => action.kind === "message");
   if (offers.length === 0) return null;
 
-  // Reply to the newest unanswered message. Contents are never interpreted or
-  // copied; replying itself is the social signal that promotes this sender.
+  // Reply to the newest unanswered message. In the LLM lane the text remains
+  // untrusted data, but it is deliberately supplied to the social generator
+  // so the response can negotiate its meaning instead of merely acknowledging
+  // that a message arrived.
   for (let index = inbound.length - 1; index >= 0; index -= 1) {
     const entry = inbound[index];
     const key = inboundMessageKey(entry);
@@ -623,20 +627,34 @@ function chooseMessage({
     const rival = visiblePlayers(observation).find(
       (player) => player.playerID === entry.senderID,
     );
+    const purpose = "reply";
     const text = rival?.isAllied
       ? MITOCHONDRIA_FRIEND_MESSAGES.allied
       : rival?.hasIncomingAllianceRequest
         ? MITOCHONDRIA_FRIEND_MESSAGES.reciprocal
         : MITOCHONDRIA_FRIEND_MESSAGES.reply;
-    if (!safeOutboundText(text, maxChars)) return null;
-    answeredMessages.add(key);
-    openedConversation.add(entry.senderID);
-    recordOutbound(
-      entry.senderID,
-      outboundCounts,
-      lastOutboundDecision,
-      decisionNumber,
-    );
+    if (!openEnded && !safeOutboundText(text, maxChars)) return null;
+    const commit = () => {
+      answeredMessages.add(key);
+      openedConversation.add(entry.senderID);
+      recordOutbound(
+        entry.senderID,
+        outboundCounts,
+        lastOutboundDecision,
+        decisionNumber,
+      );
+    };
+    if (openEnded) {
+      return messageIntent(
+        offer,
+        entry.senderID,
+        purpose,
+        maxChars,
+        entry,
+        commit,
+      );
+    }
+    commit();
     return { id: offer.id, text };
   }
 
@@ -647,15 +665,29 @@ function chooseMessage({
     );
     if (
       offer &&
-      safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.pact, maxChars)
+      (openEnded ||
+        safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.pact, maxChars))
     ) {
-      openedConversation.add(dealTarget);
-      recordOutbound(
-        dealTarget,
-        outboundCounts,
-        lastOutboundDecision,
-        decisionNumber,
-      );
+      const commit = () => {
+        openedConversation.add(dealTarget);
+        recordOutbound(
+          dealTarget,
+          outboundCounts,
+          lastOutboundDecision,
+          decisionNumber,
+        );
+      };
+      if (openEnded) {
+        return messageIntent(
+          offer,
+          dealTarget,
+          "deal_proposal",
+          maxChars,
+          undefined,
+          commit,
+        );
+      }
+      commit();
       return { id: offer.id, text: MITOCHONDRIA_FRIEND_MESSAGES.pact };
     }
   }
@@ -671,16 +703,32 @@ function chooseMessage({
       continue;
     }
     if (!canSendTo(targetID, outboundCounts)) continue;
-    if (!safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.opener, maxChars)) {
+    if (
+      !openEnded &&
+      !safeOutboundText(MITOCHONDRIA_FRIEND_MESSAGES.opener, maxChars)
+    ) {
       return null;
     }
-    openedConversation.add(targetID);
-    recordOutbound(
-      targetID,
-      outboundCounts,
-      lastOutboundDecision,
-      decisionNumber,
-    );
+    const commit = () => {
+      openedConversation.add(targetID);
+      recordOutbound(
+        targetID,
+        outboundCounts,
+        lastOutboundDecision,
+        decisionNumber,
+      );
+    };
+    if (openEnded) {
+      return messageIntent(
+        offer,
+        targetID,
+        "diplomatic_opener",
+        maxChars,
+        undefined,
+        commit,
+      );
+    }
+    commit();
     return { id: offer.id, text: MITOCHONDRIA_FRIEND_MESSAGES.opener };
   }
 
@@ -697,17 +745,49 @@ function chooseMessage({
     const text = rival?.isAllied
       ? MITOCHONDRIA_FRIEND_MESSAGES.allied
       : MITOCHONDRIA_FRIEND_MESSAGES.followUp;
-    if (!safeOutboundText(text, maxChars)) return null;
-    recordOutbound(
-      targetID,
-      outboundCounts,
-      lastOutboundDecision,
-      decisionNumber,
-    );
+    if (!openEnded && !safeOutboundText(text, maxChars)) return null;
+    const commit = () =>
+      recordOutbound(
+        targetID,
+        outboundCounts,
+        lastOutboundDecision,
+        decisionNumber,
+      );
+    if (openEnded) {
+      return messageIntent(
+        offer,
+        targetID,
+        "relationship_follow_up",
+        maxChars,
+        undefined,
+        commit,
+      );
+    }
+    commit();
     return { id: offer.id, text };
   }
 
   return null;
+}
+
+function messageIntent(
+  offer,
+  recipientID,
+  purpose,
+  maxChars,
+  inbound,
+  commit,
+) {
+  return {
+    actionID: offer.id,
+    recipientID,
+    purpose,
+    maxChars,
+    ...(typeof inbound?.messageEventID === "string"
+      ? { inboundMessageEventID: inbound.messageEventID }
+      : {}),
+    ...(typeof commit === "function" ? { commit } : {}),
+  };
 }
 
 function inboundMessageKey(entry) {

@@ -7,6 +7,7 @@ LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
       org.opencontainers.image.description="ProxyWar LLM-powered MitochondriaFriend"
 
 COPY coworld-adapter/commander-starter/commander-production-runtime.ts /app/proxywar/coworld-adapter/commander-starter/commander-production-runtime.ts
+COPY coworld-adapter/commander-starter/open-ended-message.ts /app/proxywar/coworld-adapter/commander-starter/open-ended-message.ts
 COPY coworld-adapter/mitochondria-friend/friendly-policy.mjs /app/proxywar/coworld-adapter/mitochondria-friend/friendly-policy.mjs
 COPY coworld-adapter/mitochondria-friend/friendly-policy.d.mts /app/proxywar/coworld-adapter/mitochondria-friend/friendly-policy.d.mts
 COPY coworld-adapter/mitochondria-friend/friendly-player-llm.ts /app/proxywar/coworld-adapter/mitochondria-friend/friendly-player-llm.ts

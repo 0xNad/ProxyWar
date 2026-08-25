@@ -74,6 +74,11 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
+import {
+  generateOpenEndedMessage,
+  OPEN_ENDED_MESSAGE_MAX_CHARS,
+  type OpenEndedMessageIntent,
+} from "../commander-starter/open-ended-message";
 
 type PlannerExecutorModule =
   typeof import("../../src/server/agents/AgentPlannerExecutor");
@@ -96,6 +101,8 @@ export interface KeystoneBrainOptions {
   provider?: LlmProvider;
   /** Inject the hosted Bedrock handle without bypassing its evidence recorder. */
   bedrockProviderHandle?: KeystoneBedrockProviderHandle;
+  /** Main owns the evidence window when social generation shares the provider. */
+  deferProviderEvidence?: boolean;
   /**
    * Force a local Claude-CLI Commander onto the synchronous refresh path.
    * Hosted Bedrock is always synchronous on refresh decisions so provider
@@ -257,19 +264,7 @@ export async function loadKeystoneModules(
  * that version is the one proven in hosted play — including the 3-reply
  * lifetime budget that ended the 861-reply echo storm of `ereq_3fc90743`.
  */
-const KEYSTONE_MESSAGE_MAX_CHARS = 280;
 const KEYSTONE_MAX_REPLIES_PER_RIVAL = 3;
-
-const KEYSTONE_REPLIES = {
-  ally: "We hold. I keep my side of the line while the pact stands.",
-  dealOpen: "My offer stands as written. Answer it and we both save troops.",
-  neutral: "Noted. Keep off my border and I have no reason to come for you.",
-} as const;
-
-const KEYSTONE_OPENER_BORDER =
-  "We share a border. I would rather spend my troops elsewhere - keep it quiet?";
-
-type KeystoneMessageMove = { id: string; text: string };
 
 /**
  * At most one rival per decision, and only when there is something to answer
@@ -286,7 +281,9 @@ export function chooseKeystoneMessageMove(
   legalActions: LegalAction[],
   observation: AgentObservation,
   answered: Set<string>,
-): KeystoneMessageMove | null {
+  maxChars = OPEN_ENDED_MESSAGE_MAX_CHARS,
+): OpenEndedMessageIntent | null {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1) return null;
   const offers = legalActions.filter((action) => action.kind === "message");
   if (offers.length === 0) return null;
   const recipientOf = (action: LegalAction): string | undefined => {
@@ -330,28 +327,18 @@ export function chooseKeystoneMessageMove(
       }
       const offer = offers.find((action) => recipientOf(action) === senderID);
       if (repliesSpent < KEYSTONE_MAX_REPLIES_PER_RIVAL && offer) {
-        const rival = (observation.visiblePlayers ?? []).find(
-          (player) => player.playerID === senderID,
-        );
-        const hasOpenDeal = [
-          ...(observation.deals?.incomingProposals ?? []),
-          ...(observation.deals?.outgoingProposals ?? []),
-          ...(observation.deals?.activeDeals ?? []),
-        ].some(
-          (view) =>
-            view.proposerPlayerID === senderID ||
-            view.recipientPlayerID === senderID,
-        );
-        const text = rival?.isAllied
-          ? KEYSTONE_REPLIES.ally
-          : hasOpenDeal
-            ? KEYSTONE_REPLIES.dealOpen
-            : KEYSTONE_REPLIES.neutral;
-        answered.add(turnKey);
-        answered.add(`reply:${senderID}:${repliesSpent}`);
         return {
-          id: offer.id,
-          text: text.slice(0, KEYSTONE_MESSAGE_MAX_CHARS),
+          actionID: offer.id,
+          recipientID: senderID,
+          purpose: "reply",
+          maxChars: Math.min(maxChars, OPEN_ENDED_MESSAGE_MAX_CHARS),
+          ...(typeof newest.messageEventID === "string"
+            ? { inboundMessageEventID: newest.messageEventID }
+            : {}),
+          commit: () => {
+            answered.add(turnKey);
+            answered.add(`reply:${senderID}:${repliesSpent}`);
+          },
         };
       }
       // An unanswerable newest message (budget spent, or no offer for that
@@ -373,10 +360,12 @@ export function chooseKeystoneMessageMove(
       (player) => player.playerID === recipientID,
     );
     if (!rival?.sharesBorder || rival.isAllied) continue;
-    answered.add(key);
     return {
-      id: offer.id,
-      text: KEYSTONE_OPENER_BORDER.slice(0, KEYSTONE_MESSAGE_MAX_CHARS),
+      actionID: offer.id,
+      recipientID,
+      purpose: "border_opener",
+      maxChars: Math.min(maxChars, OPEN_ENDED_MESSAGE_MAX_CHARS),
+      commit: () => answered.add(key),
     };
   }
   return null;
@@ -390,11 +379,15 @@ export function chooseKeystoneMessageMove(
  */
 export function withKeystoneMessage(
   decision: AgentDecision,
-  move: KeystoneMessageMove | null,
+  move: { actionID: string; text: string } | null,
 ): AgentDecision {
   if (move === null) return decision;
   if (typeof decision.messageActionID === "string") return decision;
-  return { ...decision, messageActionID: move.id, messageText: move.text };
+  return {
+    ...decision,
+    messageActionID: move.actionID,
+    messageText: move.text,
+  };
 }
 
 /**
@@ -1835,7 +1828,7 @@ export function createKeystoneBrain(
     executor,
     planEveryDecisionSteps,
   });
-  return providerEvidence === null
+  return providerEvidence === null || options.deferProviderEvidence === true
     ? brain
     : new KeystoneProviderEvidenceAgentBrain(brain, providerEvidence);
 }
@@ -1878,11 +1871,23 @@ async function main(): Promise<void> {
       : 3;
 
   const modules = await loadKeystoneModules(repoRoot);
+  const bedrockProviderHandle =
+    mode === "bedrock" ? createKeystoneBedrockProvider() : undefined;
+  const sharedProvider =
+    bedrockProviderHandle?.provider ??
+    (mode === "claude-cli"
+      ? modules.claudeCli.createClaudeCliLlmProviderFromEnv()
+      : undefined);
   const brain = createKeystoneBrain(modules, {
     mode,
     profile,
     planEveryDecisionSteps,
     blocking,
+    ...(bedrockProviderHandle === undefined
+      ? sharedProvider === undefined
+        ? {}
+        : { provider: sharedProvider }
+      : { bedrockProviderHandle, deferProviderEvidence: true }),
   });
 
   // Optional configuration diagnostic (gated; OFF in production). It no longer
@@ -1924,7 +1929,7 @@ async function main(): Promise<void> {
       type?: unknown;
       requestID?: unknown;
       request?: unknown;
-      protocol?: unknown;
+      protocol?: { maxMessageChars?: unknown };
     };
     try {
       message = JSON.parse(String(data));
@@ -1992,7 +1997,68 @@ async function main(): Promise<void> {
             ...input,
             legalActions: primaryActions,
           };
-          const decided = await brain.decide(compliantInput);
+          const maxMessageChars =
+            typeof message.protocol?.maxMessageChars === "number" &&
+            Number.isSafeInteger(message.protocol.maxMessageChars) &&
+            message.protocol.maxMessageChars > 0
+              ? Math.min(
+                  message.protocol.maxMessageChars,
+                  OPEN_ENDED_MESSAGE_MAX_CHARS,
+                )
+              : 0;
+          const messageIntent = chooseKeystoneMessageMove(
+            input.legalActions,
+            input.observation,
+            answeredMessages,
+            maxMessageChars,
+          );
+          bedrockProviderHandle?.evidence.beginDecision();
+          const primaryPromise = Promise.resolve(brain.decide(compliantInput));
+          const socialPromise =
+            messageIntent !== null && sharedProvider !== undefined
+              ? generateOpenEndedMessage({
+                  provider: sharedProvider,
+                  agentName: "Auri",
+                  personality:
+                    "Concise, hard-nosed, strategically credible, and willing to cooperate when interests align. Negotiate concrete borders, timing, threats, and reciprocal commitments; do not flatter or make promises you cannot keep.",
+                  intent: messageIntent,
+                  observation: input.observation,
+                  decision: {
+                    actionID: compliantActions[0].id,
+                    reason: "Primary Commander decision is being selected concurrently.",
+                  },
+                }).catch((error) => {
+                  console.error(
+                    `keystone social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  return null;
+                })
+              : Promise.resolve(null);
+          const [primaryResult, generatedMessage] = await Promise.all([
+            primaryPromise.then(
+              (value) => ({ ok: true as const, value }),
+              (error) => ({ ok: false as const, error }),
+            ),
+            socialPromise,
+          ]);
+          if (generatedMessage !== null) messageIntent?.commit?.();
+          const providerEvidence =
+            bedrockProviderHandle?.evidence.takeEvidence();
+          if (!primaryResult.ok) {
+            throw new KeystoneProviderDecisionError(
+              primaryResult.error instanceof Error
+                ? primaryResult.error.message
+                : String(primaryResult.error),
+              providerEvidence,
+            );
+          }
+          const decided =
+            providerEvidence === undefined
+              ? primaryResult.value
+              : withKeystoneProviderEvidence(
+                  primaryResult.value,
+                  providerEvidence,
+                );
           // The social slots are cosmetic relative to the game action: a bug
           // in either chooser must never discard an already-valid decision and
           // stamp it degraded, which would pollute the very degradation
@@ -2002,11 +2068,7 @@ async function main(): Promise<void> {
             socialDecision = withKeystoneDeal(
               withKeystoneMessage(
                 decided,
-                chooseKeystoneMessageMove(
-                  input.legalActions,
-                  input.observation,
-                  answeredMessages,
-                ),
+                generatedMessage,
               ),
               chooseKeystoneDealMove({
                 observation: input.observation,

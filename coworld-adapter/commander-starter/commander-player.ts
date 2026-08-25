@@ -28,6 +28,10 @@ import {
   withoutKeystoneTreatyBreaches,
 } from "../src/keystone-player";
 import {
+  generateOpenEndedMessage,
+  OPEN_ENDED_MESSAGE_MAX_CHARS,
+} from "./open-ended-message";
+import {
   CommanderBedrockProvider,
   commanderBedrockRequest,
   commanderBedrockSidecarEndpoint,
@@ -95,18 +99,11 @@ export function productionCommanderReciprocalAlliance(
 export function withProductionCommanderSocial(input: {
   decision: AgentDecision;
   brainInput: AgentBrainInput;
-  answeredMessages: Set<string>;
   proposedDeals: Set<string>;
+  generatedMessage: { actionID: string; text: string } | null;
 }): AgentDecision {
   return withKeystoneDeal(
-    withKeystoneMessage(
-      input.decision,
-      chooseKeystoneMessageMove(
-        input.brainInput.legalActions,
-        input.brainInput.observation,
-        input.answeredMessages,
-      ),
-    ),
+    withKeystoneMessage(input.decision, input.generatedMessage),
     chooseKeystoneDealMove({
       observation: input.brainInput.observation,
       legalActions: input.brainInput.legalActions,
@@ -179,7 +176,7 @@ async function main(): Promise<void> {
       type?: unknown;
       requestID?: unknown;
       request?: unknown;
-      protocol?: unknown;
+      protocol?: { maxMessageChars?: unknown };
     };
     try {
       message = JSON.parse(String(data));
@@ -228,13 +225,58 @@ async function main(): Promise<void> {
             legalActions: compliantActions,
           };
           const reciprocal = productionCommanderReciprocalAlliance(input);
-          const decided = reciprocal ?? (await brain.decide(compliantInput));
+          const messageLimit =
+            typeof message.protocol?.maxMessageChars === "number" &&
+            Number.isSafeInteger(message.protocol.maxMessageChars) &&
+            message.protocol.maxMessageChars > 0
+              ? Math.min(
+                  message.protocol.maxMessageChars,
+                  OPEN_ENDED_MESSAGE_MAX_CHARS,
+                )
+              : 0;
+          const messageIntent = chooseKeystoneMessageMove(
+            input.legalActions,
+            input.observation,
+            answeredMessages,
+            messageLimit,
+          );
+          const primaryPromise =
+            reciprocal === null
+              ? Promise.resolve(brain.decide(compliantInput))
+              : Promise.resolve(reciprocal);
+          const messagePromise =
+            messageIntent === null
+              ? Promise.resolve(null)
+              : generateOpenEndedMessage({
+                  provider,
+                  agentName: "Auri",
+                  personality:
+                    "Concise, hard-nosed, strategically credible, and willing to cooperate when interests align. Negotiate concrete borders, timing, threats, and reciprocal commitments; do not flatter or make promises you cannot keep.",
+                  intent: messageIntent,
+                  observation: input.observation,
+                  decision:
+                    reciprocal ?? {
+                      actionID: compliantActions[0].id,
+                      reason:
+                        "Primary Commander decision is being selected concurrently.",
+                    },
+                }).catch((error) => {
+                  console.error(
+                    `commander social generation skipped: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  return null;
+                });
+          const [decided, generatedMessage] = await Promise.all([
+            primaryPromise,
+            messagePromise,
+          ]);
+          if (generatedMessage !== null) messageIntent?.commit?.();
           try {
             decision = withProductionCommanderSocial({
               decision: decided,
               brainInput: input,
-              answeredMessages,
               proposedDeals,
+              generatedMessage,
             });
           } catch (socialError) {
             console.error(
