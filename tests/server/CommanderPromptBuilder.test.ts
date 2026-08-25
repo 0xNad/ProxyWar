@@ -110,9 +110,33 @@ describe("CommanderPromptBuilder Stage 2", () => {
     );
   });
 
+  it("supplies structured orientation as context-only without minimap or raw coordinates", () => {
+    const fixture = makeCommanderStage2Fixture({ validSpatial: true });
+    const prompt = buildCommanderPrompt(fixture.builtState.state);
+
+    expect(prompt).toContain(
+      "orientation, when present, is bounded global public-map context",
+    );
+    expect(prompt).toContain("comparing offered StrategicOptions only");
+    expect(prompt).toContain("cannot create or authorize an action");
+    expect(prompt).toContain(
+      '"visibilityModel":"global-lockstep-public-map-v1"',
+    );
+    expect(prompt).toContain('"quadrant":"northwest"');
+    expect(prompt).toContain('"bearing":"north"');
+    expect(prompt).toContain('"distanceClass":"adjacent"');
+    expect(prompt).not.toContain(MINIMAP_CANARY);
+    expect(prompt).not.toContain('"minimap"');
+    expect(prompt).not.toContain('"positionedAssets"');
+    expect(prompt).not.toContain('"tileRefEncoding"');
+  });
+
   it("is byte-deterministic across irrelevant source ordering", () => {
-    const forward = makeCommanderStage2Fixture();
-    const reversed = makeCommanderStage2Fixture({ reverseSources: true });
+    const forward = makeCommanderStage2Fixture({ validSpatial: true });
+    const reversed = makeCommanderStage2Fixture({
+      reverseSources: true,
+      validSpatial: true,
+    });
 
     expect(buildCommanderPrompt(reversed.builtState.state)).toBe(
       buildCommanderPrompt(forward.builtState.state),

@@ -19,7 +19,9 @@ import {
   type BuiltCommanderState,
   type CommanderPlanSnapshot,
   type CommanderRecentEvent,
+  type CommanderRivalSpatialOrientation,
   type CommanderRivalState,
+  type CommanderSpatialOrientation,
   type CommanderState,
   type DevelopEconomyStrategicOptionEvidence,
   type ExpandStrategicOptionEvidence,
@@ -53,6 +55,36 @@ const commanderGamePhases: readonly AgentGamePhase[] = [
   "finished",
   "unknown",
 ];
+const COMMANDER_SPATIAL_VISIBILITY_MODEL =
+  "global-lockstep-public-map-v1" as const;
+const commanderSpatialQuadrants = [
+  "northwest",
+  "north",
+  "northeast",
+  "west",
+  "center",
+  "east",
+  "southwest",
+  "south",
+  "southeast",
+] as const;
+const commanderSpatialBearings = [
+  "north",
+  "northeast",
+  "east",
+  "southeast",
+  "south",
+  "southwest",
+  "west",
+  "northwest",
+] as const;
+const commanderSpatialDistanceClasses = ["adjacent", "near", "far"] as const;
+const commanderSpatialCompactness = [
+  "compact",
+  "stretched",
+  "fragmented",
+] as const;
+const commanderSpatialTerrain = ["land", "coastal", "mixed"] as const;
 
 export interface BuildCommanderStateInput {
   observation: AgentObservation;
@@ -118,6 +150,7 @@ export function buildCommanderState(
     (own.isAlive ? 1 : 0) +
       input.observation.visiblePlayers.filter((player) => player.isAlive)
         .length;
+  const orientation = normalizeSpatialOrientation(input.observation, rivals);
   const state: CommanderState = {
     self: {
       name: sanitizeUntrustedDisplayString(input.observation.username),
@@ -155,6 +188,7 @@ export function buildCommanderState(
       ),
     },
     rivals,
+    ...(orientation === undefined ? {} : { orientation }),
     plan: normalizePlan(input.plan ?? null, visiblePlayerIDs),
     recentEvents: normalizeRecentEvents(
       input.recentEvents ?? [],
@@ -202,7 +236,7 @@ export function fingerprintCommanderMaterialState(
 ): string {
   const state = input.state;
   assertFingerprintStateBounds(state);
-  const projection: CommanderJsonValue = [
+  const projection: CommanderJsonValue[] = [
     boundedIdentifier(
       input.gameID,
       "fingerprint.gameID",
@@ -226,6 +260,9 @@ export function fingerprintCommanderMaterialState(
         rival.sharesBorder,
       ]),
   ];
+  if (state.orientation !== undefined) {
+    projection.push(state.orientation as unknown as CommanderJsonValue);
+  }
   return shortFingerprint(MATERIAL_STATE_FINGERPRINT_DOMAIN, projection);
 }
 
@@ -245,6 +282,24 @@ function assertFingerprintStateBounds(state: CommanderState): void {
       "fingerprint.rival.playerID",
       MAX_COMMANDER_PLAYER_ID_LENGTH,
     );
+  }
+  if (state.orientation !== undefined) {
+    if (
+      state.orientation.schemaVersion !== 5 ||
+      state.orientation.visibilityModel !==
+        COMMANDER_SPATIAL_VISIBILITY_MODEL ||
+      !Array.isArray(state.orientation.rivals) ||
+      state.orientation.rivals.length > MAX_COMMANDER_RIVALS
+    ) {
+      throw new Error("Commander orientation exceeds a fingerprint bound");
+    }
+    for (const rival of state.orientation.rivals) {
+      boundedIdentifier(
+        rival.playerID,
+        "fingerprint.orientation.rival.playerID",
+        MAX_COMMANDER_PLAYER_ID_LENGTH,
+      );
+    }
   }
   for (const option of state.options) {
     boundedIdentifier(
@@ -393,6 +448,321 @@ function selectRivals(input: {
   }
 
   return [...selected].map((id) => byID.get(id)!);
+}
+
+/**
+ * Projects only exact schema-5 global-public-map orientation. Any malformed
+ * consumed fact rejects the complete optional projection without affecting the
+ * non-spatial Commander path.
+ */
+function normalizeSpatialOrientation(
+  observation: AgentObservation,
+  selectedRivals: readonly CommanderRivalState[],
+): CommanderSpatialOrientation | undefined {
+  const spatial = observation.spatial;
+  if (
+    spatial?.schemaVersion !== 5 ||
+    spatial.visibilityModel !== COMMANDER_SPATIAL_VISIBILITY_MODEL
+  ) {
+    return undefined;
+  }
+
+  try {
+    const mapTiles = boundedSpatialMapTiles(observation.mapInfo);
+    const ownShape = spatial.ownShape;
+    const quadrant = enumValue(
+      ownShape.quadrant,
+      commanderSpatialQuadrants,
+      "orientation.own.quadrant",
+    );
+    const coastShare = boundedSpatialPercentage(
+      ownShape.coastShare,
+      "orientation.own.coastShare",
+    );
+    const largestNeighborBorderShare = boundedSpatialPercentage(
+      ownShape.largestNeighborBorderShare,
+      "orientation.own.largestNeighborBorderShare",
+    );
+    const centroid = {
+      xPct: boundedSpatialPercentage(
+        ownShape.centroid?.xPct,
+        "orientation.own.centroid.xPct",
+      ),
+      yPct: boundedSpatialPercentage(
+        ownShape.centroid?.yPct,
+        "orientation.own.centroid.yPct",
+      ),
+    };
+
+    let compactness: CommanderSpatialOrientation["own"]["compactness"];
+    let regionCount: number | null;
+    let largestRegionShare: number | null;
+    if (ownShape.regionAnalysis === "complete") {
+      if (ownShape.centroidBasis !== "largest_region_border") {
+        throw new Error("orientation.own has inconsistent complete analysis");
+      }
+      compactness = enumValue(
+        ownShape.compactness,
+        commanderSpatialCompactness,
+        "orientation.own.compactness",
+      );
+      regionCount = positiveSpatialInteger(
+        ownShape.regionCount,
+        mapTiles,
+        "orientation.own.regionCount",
+      );
+      largestRegionShare = boundedSpatialPercentage(
+        ownShape.largestRegionShare,
+        "orientation.own.largestRegionShare",
+      );
+      if (
+        regionCount > 1 !== (compactness === "fragmented") ||
+        (regionCount === 1 && largestRegionShare !== 100)
+      ) {
+        throw new Error("orientation.own has inconsistent region facts");
+      }
+    } else if (ownShape.regionAnalysis === "omitted_budget") {
+      if (
+        ownShape.centroidBasis !== "all_border_budget_fallback" ||
+        ownShape.compactness !== undefined ||
+        ownShape.regionCount !== undefined ||
+        ownShape.largestRegionShare !== undefined
+      ) {
+        throw new Error("orientation.own has inconsistent omitted analysis");
+      }
+      compactness = null;
+      regionCount = null;
+      largestRegionShare = null;
+    } else {
+      throw new Error("orientation.own has unsupported region analysis");
+    }
+
+    if (observation.visiblePlayers.length > 64) {
+      throw new Error("orientation has too many visible players");
+    }
+    const normalizedRivals = new Map<
+      string,
+      CommanderRivalSpatialOrientation
+    >();
+    let observedLargestBorderShare = 0;
+    for (const player of observation.visiblePlayers) {
+      const normalized = normalizeRivalSpatialOrientation(player, mapTiles);
+      if (normalizedRivals.has(normalized.playerID)) {
+        throw new Error("orientation has duplicate rival identity");
+      }
+      normalizedRivals.set(normalized.playerID, normalized);
+      observedLargestBorderShare = Math.max(
+        observedLargestBorderShare,
+        normalized.sharedFront?.shareOfYourBorder ?? 0,
+      );
+    }
+    if (largestNeighborBorderShare !== observedLargestBorderShare) {
+      throw new Error("orientation.own border concentration is inconsistent");
+    }
+
+    const rivals = selectedRivals
+      .map((rival) => {
+        const orientation = normalizedRivals.get(rival.playerID);
+        if (orientation === undefined) {
+          throw new Error("orientation is missing a selected rival");
+        }
+        return orientation;
+      })
+      .sort((a, b) => stableStringCompare(a.playerID, b.playerID));
+
+    return {
+      schemaVersion: 5,
+      visibilityModel: COMMANDER_SPATIAL_VISIBILITY_MODEL,
+      own: {
+        quadrant,
+        compactness,
+        regionCount,
+        largestRegionShare,
+        regionAnalysis: ownShape.regionAnalysis,
+        centroidBasis: ownShape.centroidBasis,
+        coastShare,
+        largestNeighborBorderShare,
+        centroid,
+      },
+      rivals,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeRivalSpatialOrientation(
+  player: AgentObservation["visiblePlayers"][number],
+  mapTiles: number,
+): CommanderRivalSpatialOrientation {
+  const playerID = boundedIdentifier(
+    player.playerID,
+    "orientation.rival.playerID",
+    MAX_COMMANDER_PLAYER_ID_LENGTH,
+  );
+  const bearing =
+    player.bearing === undefined
+      ? null
+      : enumValue(
+          player.bearing,
+          commanderSpatialBearings,
+          `orientation.rival ${playerID} bearing`,
+        );
+  const distanceClass = enumValue(
+    player.distanceClass,
+    commanderSpatialDistanceClasses,
+    `orientation.rival ${playerID} distanceClass`,
+  );
+  const sharesBorder = booleanValue(
+    player.sharesBorder,
+    `orientation.rival ${playerID} sharesBorder`,
+  );
+  if (
+    sharesBorder !== (player.borderWithYou !== undefined) ||
+    (distanceClass === "adjacent") !== sharesBorder
+  ) {
+    throw new Error(`orientation.rival ${playerID} has inconsistent border`);
+  }
+
+  const sharedFront =
+    player.borderWithYou === undefined
+      ? null
+      : (() => {
+          const border = player.borderWithYou;
+          const tiles = positiveSpatialInteger(
+            border.tiles,
+            mapTiles,
+            `orientation.rival ${playerID} sharedFront.tiles`,
+          );
+          const coveredTiles = boundedSpatialInteger(
+            border.defensePostFrontCoverage?.covered,
+            mapTiles,
+            `orientation.rival ${playerID} sharedFront.coveredTiles`,
+          );
+          const uncoveredTiles = boundedSpatialInteger(
+            border.defensePostFrontCoverage?.uncovered,
+            mapTiles,
+            `orientation.rival ${playerID} sharedFront.uncoveredTiles`,
+          );
+          const defensePostsCovering = boundedSpatialInteger(
+            border.defensePostsCovering,
+            mapTiles,
+            `orientation.rival ${playerID} sharedFront.defensePostsCovering`,
+          );
+          if (
+            coveredTiles + uncoveredTiles !== tiles ||
+            (defensePostsCovering === 0) !== (coveredTiles === 0)
+          ) {
+            throw new Error(
+              `orientation.rival ${playerID} has inconsistent defense coverage`,
+            );
+          }
+          return {
+            tiles,
+            shareOfYourBorder: boundedSpatialPercentage(
+              border.shareOfYourBorder,
+              `orientation.rival ${playerID} sharedFront.shareOfYourBorder`,
+            ),
+            terrain: enumValue(
+              border.terrain,
+              commanderSpatialTerrain,
+              `orientation.rival ${playerID} sharedFront.terrain`,
+            ),
+            defenseCoverage: { coveredTiles, uncoveredTiles },
+            underAttackHere: booleanValue(
+              border.underAttackHere,
+              `orientation.rival ${playerID} sharedFront.underAttackHere`,
+            ),
+          };
+        })();
+
+  const naval = player.navalExposure;
+  if (naval === undefined) {
+    throw new Error(`orientation.rival ${playerID} is missing naval context`);
+  }
+  const nearestEnemyPort =
+    naval.nearestEnemyPort === undefined
+      ? null
+      : {
+          bearing: enumValue(
+            naval.nearestEnemyPort.bearing,
+            commanderSpatialBearings,
+            `orientation.rival ${playerID} nearestEnemyPort.bearing`,
+          ),
+          distanceClass: enumValue(
+            naval.nearestEnemyPort.distanceClass,
+            ["near", "far"] as const,
+            `orientation.rival ${playerID} nearestEnemyPort.distanceClass`,
+          ),
+        };
+  return {
+    playerID,
+    bearing,
+    distanceClass,
+    sharedFront,
+    naval: {
+      transportReachableOwnShoreTiles: boundedSpatialInteger(
+        naval.transportReachableOwnShoreTiles,
+        mapTiles,
+        `orientation.rival ${playerID} transportReachableOwnShoreTiles`,
+      ),
+      nearestEnemyPort,
+    },
+  };
+}
+
+function boundedSpatialMapTiles(mapInfo: AgentObservation["mapInfo"]): number {
+  if (
+    typeof mapInfo?.name !== "string" ||
+    mapInfo.name.length === 0 ||
+    mapInfo.name.length > 120 ||
+    !Number.isSafeInteger(mapInfo.width) ||
+    mapInfo.width <= 0 ||
+    mapInfo.width > 100_000 ||
+    !Number.isSafeInteger(mapInfo.height) ||
+    mapInfo.height <= 0 ||
+    mapInfo.height > 100_000 ||
+    !Number.isSafeInteger(mapInfo.width * mapInfo.height) ||
+    mapInfo.tileRefEncoding !== "row-major-y-width-plus-x" ||
+    mapInfo.coordinateFrame?.origin !== "top_left" ||
+    mapInfo.coordinateFrame.xIncreases !== "east" ||
+    mapInfo.coordinateFrame.yIncreases !== "south"
+  ) {
+    throw new Error("orientation requires a bounded public map frame");
+  }
+  return mapInfo.width * mapInfo.height;
+}
+
+function boundedSpatialInteger(
+  value: unknown,
+  maximum: number,
+  field: string,
+): number {
+  const normalized = nonNegativeInteger(value, field);
+  if (normalized > maximum) {
+    throw new Error(`${field} exceeds the public map bound`);
+  }
+  return normalized;
+}
+
+function positiveSpatialInteger(
+  value: unknown,
+  maximum: number,
+  field: string,
+): number {
+  const normalized = boundedSpatialInteger(value, maximum, field);
+  if (normalized === 0) {
+    throw new Error(`${field} must be positive`);
+  }
+  return normalized;
+}
+
+function boundedSpatialPercentage(value: unknown, field: string): number {
+  const normalized = nonNegativeInteger(value, field);
+  if (normalized > 100) {
+    throw new Error(`${field} must be a percentage`);
+  }
+  return normalized;
 }
 
 function normalizeExposedOptions(
