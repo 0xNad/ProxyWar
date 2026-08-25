@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const expectedBase =
-  "public.ecr.aws/q5f4m8t9/cogames@sha256:6cb946c338fa3d58685f280a4e6853e2194b2a6a0cbb60001a99342094d9a244";
+  "ghcr.io/0xnad/proxywar-commander-public-base@sha256:75d5738231a79d10d224e7468b02f4531028b28486c39c13148e310be38fd360";
 const expectedPlayer = "/app/proxywar/coworld-adapter/src/commander-player.ts";
 const expectedModel = "us.anthropic.claude-sonnet-4-6";
 
-test("pins the hosted-tested image and installs the production Commander entrypoint", async () => {
+test("pins the attested public base and installs the production Commander entrypoint", async () => {
   const dockerfile = await readFile(
     new URL("Dockerfile", import.meta.url),
     "utf8",
