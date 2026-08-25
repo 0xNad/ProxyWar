@@ -1,4 +1,3 @@
-import { validateAgentMessageText } from "../../src/server/agents/AgentDecisionValidator";
 import type {
   AgentDecision,
   AgentObservation,
@@ -8,6 +7,42 @@ import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 
 export const OPEN_ENDED_MESSAGE_TIMEOUT_MS = 12_000;
 export const OPEN_ENDED_MESSAGE_MAX_CHARS = 280;
+
+type OpenEndedMessageTextValidation =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/**
+ * Player-side fail-closed mirror of the shipped raw message-body contract.
+ * The server validator remains final authority; this check prevents the
+ * policy from emitting text it already knows the server must reject without
+ * depending on the hosted base image exporting an internal validator helper.
+ */
+function validateOpenEndedMessageText(
+  text: string,
+): OpenEndedMessageTextValidation {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
+    return { ok: false, reason: "messageText contained control characters" };
+  }
+  if (/(?:\p{Cf}|[\u2028\u2029\u2060-\u206F])/u.test(text)) {
+    return {
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    };
+  }
+  if (text.trim().length === 0) {
+    return { ok: false, reason: "agent message text was blank" };
+  }
+  if (text.length > OPEN_ENDED_MESSAGE_MAX_CHARS) {
+    return {
+      ok: false,
+      reason: `messageText is ${text.length} chars, over the ${OPEN_ENDED_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
+    };
+  }
+  return { ok: true };
+}
 
 export type OpenEndedMessagePurpose =
   | "reply"
@@ -311,7 +346,7 @@ export function parseOpenEndedMessageResponse(
   if (message === null) {
     throw new Error("social model response omitted message");
   }
-  const validation = validateAgentMessageText(message);
+  const validation = validateOpenEndedMessageText(message);
   if (!validation.ok) {
     throw new Error(`social model message rejected: ${validation.reason}`);
   }
