@@ -13,7 +13,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class FakeModel:
@@ -258,6 +258,130 @@ class PublicBaseMaterializeTest(unittest.TestCase):
                 args.oci_digest = "sha256:" + "9" * 64
                 with self.assertRaisesRegex(RuntimeError, "crossed"):
                     MODULE.validate_args(args)
+
+    def test_policy_422_emits_only_bounded_fastapi_validation_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = fixture_args(Path(temporary) / "output")
+            details = [
+                {
+                    "loc": [
+                        "body",
+                        "name" * 40,
+                        0,
+                        "one",
+                        "two",
+                        "three",
+                        "four",
+                        "five",
+                        "not-emitted",
+                    ],
+                    "type": "string_too_long" * 20,
+                    "msg": "String should have at most 64 characters. " * 20,
+                    "input": "request-body-secret",
+                    "ctx": {"authorization": "Bearer header-secret"},
+                    "url": "https://secret.invalid/request-body",
+                },
+                *[
+                    {
+                        "loc": ["body", f"field-{index}"],
+                        "type": "value_error",
+                        "msg": f"invalid field {index}",
+                        "input": f"ignored-secret-{index}",
+                    }
+                    for index in range(11)
+                ],
+            ]
+            response_body = {"detail": details, "body": "whole-body-secret"}
+            response = SimpleNamespace(
+                status_code=422,
+                content=json.dumps(response_body).encode(),
+                json=lambda: response_body,
+            )
+            client = SimpleNamespace(
+                _headers=lambda: {"Authorization": "Bearer header-secret"},
+                _http_client=SimpleNamespace(post=lambda *_args, **_kwargs: response),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "policy validation failed"
+            ) as caught:
+                MODULE.create_policy(client, args, "img_public_base_fixture")
+
+            prefix = "Commander public base policy validation failed: "
+            projection = json.loads(str(caught.exception).removeprefix(prefix))
+            self.assertEqual(set(projection), {"status", "detail"})
+            self.assertEqual(projection["status"], 422)
+            self.assertEqual(len(projection["detail"]), 8)
+            for detail in projection["detail"]:
+                self.assertEqual(set(detail), {"loc", "type", "msg"})
+                self.assertLessEqual(
+                    len(detail["loc"]), MODULE.VALIDATION_LOCATION_COUNT_MAX
+                )
+                self.assertLessEqual(
+                    len(detail["type"]), MODULE.VALIDATION_TYPE_TEXT_MAX
+                )
+                self.assertLessEqual(
+                    len(detail["msg"]), MODULE.VALIDATION_MESSAGE_TEXT_MAX
+                )
+                for segment in detail["loc"]:
+                    if isinstance(segment, str):
+                        self.assertLessEqual(
+                            len(segment), MODULE.VALIDATION_LOCATION_TEXT_MAX
+                        )
+            emitted = json.dumps(projection)
+            for forbidden in (
+                "request-body-secret",
+                "whole-body-secret",
+                "header-secret",
+                "ignored-secret",
+                "authorization",
+                "url",
+                "input",
+                "ctx",
+            ):
+                self.assertNotIn(forbidden, emitted)
+
+    def test_oversized_422_body_is_not_parsed_or_emitted(self) -> None:
+        response = SimpleNamespace(
+            status_code=422,
+            content=b"s" * (MODULE.VALIDATION_BODY_BYTES_MAX + 1),
+            json=Mock(side_effect=AssertionError("oversized body must not be parsed")),
+        )
+        self.assertEqual(
+            MODULE.fastapi_validation_projection(response),
+            {"status": 422, "detail": []},
+        )
+        response.json.assert_not_called()
+
+    def test_policy_creation_waits_for_exact_public_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            args = fixture_args(output, allow_remote_adoption=True)
+            image = fixture_image(args)
+            image["public_image_uri"] = None
+            client = FakeUploadClient(
+                [ModelValue(image)], public_image=ModelValue(image)
+            )
+            create_policy = Mock(
+                side_effect=AssertionError(
+                    "policy creation must wait for a public image URI"
+                )
+            )
+            with (
+                patch.object(
+                    MODULE.CoworldUploadClient,
+                    "from_login",
+                    return_value=client,
+                ),
+                patch.object(MODULE, "PUBLIC_IMAGE_ATTEMPTS", 1),
+                patch.object(MODULE, "create_policy", create_policy),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "image identity mismatch"):
+                    MODULE.materialize(args)
+
+            create_policy.assert_not_called()
+            self.assertTrue((output / "image.json").is_file())
+            self.assertFalse((output / "policy.json").exists())
 
 
 if __name__ == "__main__":
