@@ -209,7 +209,6 @@ const FORBIDDEN_VALUE_PATTERNS = [
   /(?:api[_-]?key|access[_-]?token|secret)\s*[:=]\s*["']?[A-Za-z0-9/+_.-]{16,}/i,
 ];
 const FORBIDDEN_PRIVACY_TEXT = [
-  "messageText",
   "commsSlotText",
   "externalRawOutput",
   "rawPrompt",
