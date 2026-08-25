@@ -1,13 +1,28 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
+import { WebSocketServer } from "ws";
 
 const POLICY_FILE = path.join(
   process.cwd(),
   "coworld-adapter",
   "testing",
   "hosted-social-counterparty-policy.mjs",
+);
+const PLAYER_FILE = path.join(
+  process.cwd(),
+  "coworld-adapter",
+  "testing",
+  "hosted-social-counterparty-player.mjs",
+);
+const DOCKERFILE = path.join(
+  process.cwd(),
+  "coworld-adapter",
+  "testing",
+  "Dockerfile.hosted-social-counterparty",
 );
 
 type Decision = {
@@ -29,7 +44,84 @@ async function policy(profile: string) {
   };
 }
 
+async function driveDonationProbe(requests: unknown[]): Promise<Decision[]> {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  const port =
+    typeof address === "object" && address !== null ? address.port : 0;
+  const frames: Decision[] = [];
+  const finished = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("non-friendly donation probe did not answer")),
+      10_000,
+    );
+    server.on("connection", (socket) => {
+      let index = 0;
+      socket.send(JSON.stringify(requests[index]));
+      socket.on("message", (data) => {
+        frames.push(JSON.parse(String(data)) as Decision);
+        index += 1;
+        if (index === requests.length) {
+          clearTimeout(timer);
+          resolve();
+          return;
+        }
+        socket.send(JSON.stringify(requests[index]));
+      });
+    });
+  });
+  const child = spawn(process.execPath, [PLAYER_FILE], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      COWORLD_PLAYER_WS_URL: `ws://127.0.0.1:${port}`,
+      PROXYWAR_HOSTED_SOCIAL_COUNTERPARTY: "nonfriendly-donation-probe",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  try {
+    await finished;
+  } catch (error) {
+    throw new Error(`${String(error)}\nstderr: ${stderr.join("")}`, {
+      cause: error,
+    });
+  } finally {
+    child.kill("SIGKILL");
+    for (const client of server.clients) client.terminate();
+    server.close();
+  }
+  return frames;
+}
+
 const HOLD = { id: "hold", kind: "hold", risk: { level: "none" } };
+const SPAWN = { id: "spawn:1234", kind: "spawn", risk: { level: "low" } };
+const GOLD = {
+  id: "donate_gold:P_STARTER",
+  kind: "donate_gold",
+  risk: { level: "low" },
+  metadata: { recipientID: "P_STARTER", gold: 50_000 },
+};
+const TROOPS = {
+  id: "donate_troops:P_STARTER",
+  kind: "donate_troops",
+  risk: { level: "low" },
+  metadata: { recipientID: "P_STARTER", troops: 5_000 },
+};
+const MESSAGE = {
+  id: "message:P_STARTER:hello",
+  kind: "message",
+  risk: { level: "none" },
+  metadata: { recipientID: "P_STARTER" },
+};
+const ALLIANCE = {
+  id: "alliance_request:P_STARTER",
+  kind: "alliance_request",
+  risk: { level: "low" },
+  metadata: { recipientID: "P_STARTER" },
+};
 const EXPAND = {
   id: "attack:neutral:10",
   kind: "attack",
@@ -135,6 +227,149 @@ describe("hosted social counterparty policy", () => {
     });
     expect(decision.selectedLegalActionId).toBe(EXPAND.id);
     expect(decision.selectedDealActionId).toBeUndefined();
+  });
+
+  it("selects exact offered non-friendly gold then troops from slot zero only", async () => {
+    const { choose } = await policy("nonfriendly-donation-probe");
+    expect(
+      choose({
+        slot: 0,
+        legalActions: [SPAWN],
+        observation: baseObservation(),
+      }).selectedLegalActionId,
+    ).toBe(SPAWN.id);
+    const first = choose({
+      slot: 0,
+      legalActions: [TROOPS, NAP, MESSAGE, ALLIANCE, GOLD, HOLD],
+      observation: baseObservation(),
+    });
+    expect(first.selectedLegalActionId).toBe(GOLD.id);
+    expect(first.selectedDealActionId).toBeUndefined();
+    expect(first.reason).toContain("never allies, messages, or deals");
+
+    const second = choose({
+      slot: 0,
+      legalActions: [GOLD, TROOPS, NAP, MESSAGE, ALLIANCE, HOLD],
+      observation: baseObservation(11),
+    });
+    expect(second.selectedLegalActionId).toBe(TROOPS.id);
+    expect(second.selectedDealActionId).toBeUndefined();
+
+    expect(
+      choose({
+        slot: 0,
+        legalActions: [GOLD, TROOPS, NAP, MESSAGE, ALLIANCE, HOLD],
+        observation: baseObservation(12),
+      }).selectedLegalActionId,
+    ).toBe(HOLD.id);
+  });
+
+  it("holds rather than switching recipients, allying, messaging, or dealing", async () => {
+    const donor = (await policy("nonfriendly-donation-probe")).choose;
+    const recipient = (await policy("nonfriendly-donation-probe")).choose;
+    const otherTroops = {
+      id: "donate_troops:P_OTHER",
+      kind: "donate_troops",
+      risk: { level: "low" },
+      metadata: { recipientID: "P_OTHER", troops: 5_000 },
+    };
+    expect(
+      recipient({
+        slot: 1,
+        legalActions: [SPAWN],
+        observation: baseObservation(),
+      }).selectedLegalActionId,
+    ).toBe(SPAWN.id);
+    expect(
+      donor({
+        slot: 0,
+        legalActions: [GOLD, HOLD],
+        observation: baseObservation(),
+      }).selectedLegalActionId,
+    ).toBe(GOLD.id);
+    expect(
+      donor({
+        slot: 0,
+        legalActions: [otherTroops, NAP, MESSAGE, ALLIANCE, HOLD],
+        observation: {
+          ...baseObservation(),
+          visiblePlayers: [
+            ...baseObservation().visiblePlayers,
+            {
+              playerID: "P_OTHER",
+              isAlive: true,
+              isFriendly: false,
+            },
+          ],
+        },
+      }).selectedLegalActionId,
+    ).toBe(HOLD.id);
+
+    const passive = recipient({
+      slot: 1,
+      legalActions: [GOLD, NAP, MESSAGE, ALLIANCE, HOLD],
+      observation: baseObservation(),
+    });
+    expect(passive.selectedLegalActionId).toBe(HOLD.id);
+    expect(passive.selectedDealActionId).toBeUndefined();
+
+    expect(
+      recipient({
+        legalActions: [GOLD, NAP, MESSAGE, ALLIANCE, HOLD],
+        observation: baseObservation(),
+      }).selectedLegalActionId,
+    ).toBe(HOLD.id);
+  });
+
+  it("requires an observed non-friendly recipient and preserves the slot build contract", async () => {
+    const { choose, resolve } = await policy("nonfriendly-donation-probe");
+    const friendly = baseObservation();
+    friendly.visiblePlayers[0].isFriendly = true;
+    expect(
+      choose({
+        slot: 0,
+        legalActions: [GOLD, HOLD],
+        observation: friendly,
+      }).selectedLegalActionId,
+    ).toBe(HOLD.id);
+    expect(
+      resolve({ builtConfig: { profile: "nonfriendly-donation-probe" } }),
+    ).toEqual({ profile: "nonfriendly-donation-probe", source: "build" });
+    const dockerfile = fs.readFileSync(DOCKERFILE, "utf8");
+    expect(dockerfile).toContain('"nonfriendly-donation-probe"');
+    expect(dockerfile).toContain(
+      "node:24-bookworm-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b",
+    );
+  });
+
+  it("executes the shipped player entrypoint with the Coworld slot carrier", async () => {
+    const request = (requestID: string, legalActions: unknown[]) => ({
+      type: "decision_request",
+      requestID,
+      slot: 0,
+      request: { legalActions, observation: baseObservation() },
+    });
+    const frames = await driveDonationProbe([
+      request("gold", [GOLD, TROOPS, NAP, HOLD]),
+      request("troops", [GOLD, TROOPS, NAP, HOLD]),
+    ]);
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({
+      selectedLegalActionId: GOLD.id,
+      requestID: "gold",
+    });
+    expect(frames[1]).toMatchObject({
+      selectedLegalActionId: TROOPS.id,
+      requestID: "troops",
+    });
+    expect(
+      frames.every((frame) => frame.selectedDealActionId === undefined),
+    ).toBe(true);
+    expect(
+      frames.every(
+        (frame) => !("selectedMessageActionId" in (frame as object)),
+      ),
+    ).toBe(true);
   });
 
   it("makes keeping and breaking the same accepted pact observably different", async () => {
