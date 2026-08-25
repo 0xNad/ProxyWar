@@ -92,6 +92,23 @@ test("runs the exact read-only Coworld status preflight", () => {
   });
 });
 
+test("runs the exact read-only hosted image identity lookup", () => {
+  withFakeRuntime(({ env, capture }) => {
+    const image = "img_22222222-2222-2222-2222-222222222222";
+    const result = spawnSync(
+      process.execPath,
+      [wrapper, "images", image, "--json"],
+      { encoding: "utf8", env },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      new RegExp(`^coworld\\|images ${image} --json\\|.+\\|$`),
+    );
+  });
+});
+
 test("runs the exact hosted episode and replay lookup used by production", () => {
   withFakeRuntime(({ env, capture }) => {
     const episode = "ereq_eb5481f2-9b39-40e8-9365-06d8ab620a10";
@@ -157,6 +174,43 @@ test("keeps the fail-closed Docker guard connected during an exact upload", () =
     assert.equal(
       fs.readFileSync(dockerCapture, "utf8"),
       `docker|/usr/bin/docker|unix:///fixture/docker.sock|${certificationCache}\n`,
+    );
+  });
+});
+
+test("runs only the exact commissioner patch with the fail-closed Docker guard", () => {
+  withFakeRuntime(({ env, capture, dockerCapture }) => {
+    const image = "proxywar-commissioner-local:coworld-0123456789ab";
+    const result = spawnSync(
+      process.execPath,
+      [
+        wrapper,
+        "patch-commissioner",
+        "proxywar",
+        image,
+        "--runnable-id",
+        "proxywar-ladder-commissioner",
+        "--version",
+        "0.1.63",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...env,
+          COWORLD_REAL_DOCKER: "/usr/bin/docker",
+          DOCKER_HOST: "unix:///fixture/docker.sock",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      /^coworld\|patch-commissioner proxywar proxywar-commissioner-local:coworld-0123456789ab --runnable-id proxywar-ladder-commissioner --version 0\.1\.63\|.+\|$/,
+    );
+    assert.equal(
+      fs.readFileSync(dockerCapture, "utf8"),
+      "docker|/usr/bin/docker|unix:///fixture/docker.sock|\n",
     );
   });
 });
@@ -399,7 +453,36 @@ test("rejects unsupported and malformed command modes before authentication", ()
     ["replay-open", "bad", "--hosted", "--no-open-browser"],
     ["replay-open", "ereq_fixture", "--no-open-browser", "--hosted"],
     ["list", "--json", "extra"],
+    ["images", "img_22222222-2222-2222-2222-222222222222"],
+    ["images", "img_bad", "--json"],
     ["next-version", "bad name"],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "malicious.invalid/image:latest",
+      "--runnable-id",
+      "proxywar-ladder-commissioner",
+      "--version",
+      "0.1.63",
+    ],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "proxywar-commissioner-local:coworld-0123456789ab",
+      "--runnable-id",
+      "other-runnable",
+      "--version",
+      "0.1.63",
+    ],
+    [
+      "patch-commissioner",
+      "proxywar",
+      "proxywar-commissioner-local:coworld-0123456789ab",
+      "--runnable-id",
+      "proxywar-ladder-commissioner",
+      "--version",
+      "latest",
+    ],
     ["commander-xp-run-episode", "/etc/outside.json"],
     ["commander-xp-certify", "/etc/outside.json"],
     ["upload-coworld", "/etc/outside.json"],
