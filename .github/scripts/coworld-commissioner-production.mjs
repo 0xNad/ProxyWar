@@ -15,6 +15,27 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SAFE_LABEL = /^[A-Za-z0-9._:/-]{1,200}$/;
 const LOCAL_COMMISSIONER_IMAGE =
   /^proxywar-commissioner-local:coworld-[0-9a-f]{12}$/;
+const COMMISSIONER_WORKFLOW_PATH =
+  ".github/workflows/coworld-commissioner-production.yml";
+const MAX_MUTATION_RECEIPT_ARTIFACT_BYTES = 64 * 1024;
+const CERTIFICATION_STATES = new Set([
+  "pending",
+  "queued",
+  "running",
+  "certified",
+  "failed",
+  "rejected",
+  "error",
+  "cancelled",
+]);
+const RESUMABLE_RUN_CONCLUSIONS = new Set([
+  "failure",
+  "cancelled",
+  "timed_out",
+  "action_required",
+  "stale",
+  "startup_failure",
+]);
 
 export const COWORLD_NAME = "proxywar";
 export const LEAGUE_ID = "league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42";
@@ -49,6 +70,27 @@ function jsonArray(value, label) {
 function exactSingle(values, label) {
   invariant(values.length === 1, `${label} must resolve exactly once`);
   return values[0];
+}
+
+function positiveId(value, label) {
+  invariant(
+    Number.isSafeInteger(value) && value > 0,
+    `${label} must be a positive integer`,
+  );
+  return value;
+}
+
+function exactObjectKeys(value, expected, label) {
+  invariant(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+    `${label} must be an object`,
+  );
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  invariant(
+    JSON.stringify(actual) === JSON.stringify(wanted),
+    `${label} has unexpected fields`,
+  );
 }
 
 function latestByCreatedAt(values) {
@@ -88,7 +130,7 @@ export function selectSuccessfulMainCiRun(payload, expectedSourceSha) {
   return { mainCiRunId: selected.id, sourceSha: sha };
 }
 
-export function selectSuccessfulProductionRun(payload, expectedSourceSha) {
+function successfulProductionRunCandidates(payload, expectedSourceSha) {
   const sha = sourceSha(expectedSourceSha);
   const matches = jsonArray(
     payload?.workflow_runs,
@@ -107,8 +149,91 @@ export function selectSuccessfulProductionRun(payload, expectedSourceSha) {
     matches.length > 0,
     `no successful exact-source Coworld production run exists for ${sha}`,
   );
-  const selected = latestByCreatedAt(matches);
+  return [...matches].sort(
+    (left, right) =>
+      String(right.created_at ?? "").localeCompare(
+        String(left.created_at ?? ""),
+      ) || right.id - left.id,
+  );
+}
+
+export function selectSuccessfulProductionRun(payload, expectedSourceSha) {
+  const sha = sourceSha(expectedSourceSha);
+  const selected = successfulProductionRunCandidates(payload, sha)[0];
   return { releaseRunId: selected.id, sourceSha: sha };
+}
+
+export function selectSuccessfulProductionRunCandidates(
+  payload,
+  expectedSourceSha,
+) {
+  const sha = sourceSha(expectedSourceSha);
+  return {
+    releaseRunIds: successfulProductionRunCandidates(payload, sha).map(
+      (run) => run.id,
+    ),
+    sourceSha: sha,
+  };
+}
+
+export function selectSuccessfulProductionRelease(
+  runsPayload,
+  artifactsByRunPayload,
+  expectedSourceSha,
+) {
+  const sha = sourceSha(expectedSourceSha);
+  const candidates = successfulProductionRunCandidates(runsPayload, sha);
+  const artifactGroups = jsonArray(
+    artifactsByRunPayload?.runs,
+    "production artifact groups",
+  );
+  const artifactsByRun = new Map();
+  for (const group of artifactGroups) {
+    const runId = positiveId(group?.runId, "artifact group run id");
+    invariant(
+      !artifactsByRun.has(runId),
+      "production artifact groups contain duplicate run ids",
+    );
+    artifactsByRun.set(
+      runId,
+      jsonArray(group?.artifacts, `artifacts for production run ${runId}`),
+    );
+  }
+
+  const name = `coworld-release-${sha}`;
+  for (const run of candidates) {
+    invariant(
+      artifactsByRun.has(run.id),
+      `artifacts were not resolved for production run ${run.id}`,
+    );
+    const exactName = artifactsByRun
+      .get(run.id)
+      .filter((artifact) => artifact?.name === name);
+    invariant(
+      exactName.length <= 1,
+      `${name} is ambiguous for production run ${run.id}`,
+    );
+    const artifact = exactName[0];
+    if (
+      artifact?.expired !== false ||
+      !Number.isSafeInteger(artifact?.id) ||
+      artifact.id <= 0 ||
+      !Number.isSafeInteger(artifact?.size_in_bytes) ||
+      artifact.size_in_bytes <= 0
+    ) {
+      continue;
+    }
+    return {
+      releaseRunId: run.id,
+      releaseArtifactId: artifact.id,
+      releaseArtifactName: name,
+      releaseArtifactBytes: artifact.size_in_bytes,
+      sourceSha: sha,
+    };
+  }
+  throw new Error(
+    `no successful exact-source Coworld production run retains ${name}`,
+  );
 }
 
 export function selectImmutableReleaseArtifact(payload, expectedSourceSha) {
@@ -361,6 +486,377 @@ export function validateCommissionerImageInspection({ image, inspection }) {
   };
 }
 
+function validateSourceProjection(value, expectedSourceSha) {
+  const sha = sourceSha(expectedSourceSha);
+  exactObjectKeys(
+    value,
+    [
+      "sourceSha",
+      "sourceCoworldId",
+      "sourceCoworldVersion",
+      "sourceCommissionerImageId",
+      "commissionerRunnableId",
+      "previousCommissionerMigrationVersion",
+    ],
+    "mutation source projection",
+  );
+  invariant(value.sourceSha === sha, "mutation source SHA mismatch");
+  invariant(
+    COWORLD_ID.test(value.sourceCoworldId ?? ""),
+    "mutation source Coworld id is malformed",
+  );
+  semanticVersion(value.sourceCoworldVersion, "mutation source version");
+  invariant(
+    IMAGE_ID.test(value.sourceCommissionerImageId ?? ""),
+    "mutation source commissioner image is malformed",
+  );
+  invariant(
+    value.commissionerRunnableId === COMMISSIONER_RUNNABLE_ID,
+    "mutation source commissioner runnable mismatch",
+  );
+  invariant(
+    SAFE_LABEL.test(value.previousCommissionerMigrationVersion ?? ""),
+    "mutation source migration identity is malformed",
+  );
+  return {
+    sourceSha: sha,
+    sourceCoworldId: value.sourceCoworldId,
+    sourceCoworldVersion: value.sourceCoworldVersion,
+    sourceCommissionerImageId: value.sourceCommissionerImageId,
+    commissionerRunnableId: COMMISSIONER_RUNNABLE_ID,
+    previousCommissionerMigrationVersion:
+      value.previousCommissionerMigrationVersion,
+  };
+}
+
+function validatePatchProjection(value, sourceVersion) {
+  exactObjectKeys(
+    value,
+    [
+      "patchedCoworldVersion",
+      "patchedCoworldId",
+      "patchedCommissionerImageId",
+      "canonical",
+    ],
+    "mutation patch projection",
+  );
+  semanticVersion(value.patchedCoworldVersion, "mutation patched version");
+  invariant(
+    value.patchedCoworldVersion !== sourceVersion,
+    "mutation patch did not allocate a new version",
+  );
+  invariant(
+    COWORLD_ID.test(value.patchedCoworldId ?? ""),
+    "mutation patched Coworld id is malformed",
+  );
+  invariant(
+    IMAGE_ID.test(value.patchedCommissionerImageId ?? ""),
+    "mutation patched commissioner image is malformed",
+  );
+  invariant(
+    value.canonical === true,
+    "mutation patch response was not canonical",
+  );
+  return {
+    patchedCoworldVersion: value.patchedCoworldVersion,
+    patchedCoworldId: value.patchedCoworldId,
+    patchedCommissionerImageId: value.patchedCommissionerImageId,
+    canonical: true,
+  };
+}
+
+function validateImageProjection(value) {
+  exactObjectKeys(
+    value,
+    ["localCommissionerImage", "localCommissionerImageId", "platform"],
+    "mutation image projection",
+  );
+  invariant(
+    LOCAL_COMMISSIONER_IMAGE.test(value.localCommissionerImage ?? ""),
+    "mutation local commissioner image is malformed",
+  );
+  invariant(
+    DIGEST.test(value.localCommissionerImageId ?? ""),
+    "mutation local commissioner image id is malformed",
+  );
+  invariant(
+    value.platform === "linux/amd64",
+    "mutation commissioner image platform mismatch",
+  );
+  return {
+    localCommissionerImage: value.localCommissionerImage,
+    localCommissionerImageId: value.localCommissionerImageId,
+    platform: "linux/amd64",
+  };
+}
+
+function validateMutationContext(value, expectedSourceSha) {
+  const sha = sourceSha(expectedSourceSha);
+  exactObjectKeys(
+    value,
+    [
+      "controlSha",
+      "workflowRunId",
+      "mainCiRunId",
+      "releaseRunId",
+      "releaseArtifactId",
+      "releaseArtifactName",
+      "releaseArtifactBytes",
+    ],
+    "mutation workflow context",
+  );
+  const controlSha = sourceSha(value.controlSha);
+  const workflowRunId = positiveId(
+    value.workflowRunId,
+    "mutation workflow run id",
+  );
+  const mainCiRunId = positiveId(value.mainCiRunId, "mutation main CI run id");
+  const releaseRunId = positiveId(
+    value.releaseRunId,
+    "mutation release run id",
+  );
+  const releaseArtifactId = positiveId(
+    value.releaseArtifactId,
+    "mutation release artifact id",
+  );
+  invariant(
+    value.releaseArtifactName === `coworld-release-${sha}`,
+    "mutation release artifact name mismatch",
+  );
+  const releaseArtifactBytes = positiveId(
+    value.releaseArtifactBytes,
+    "mutation release artifact bytes",
+  );
+  return {
+    controlSha,
+    workflowRunId,
+    mainCiRunId,
+    releaseRunId,
+    releaseArtifactId,
+    releaseArtifactName: value.releaseArtifactName,
+    releaseArtifactBytes,
+  };
+}
+
+export function buildMutationReceipt({
+  expectedSourceSha,
+  context,
+  source,
+  patch,
+  image,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const boundedContext = validateMutationContext(context, sha);
+  const boundedSource = validateSourceProjection(source, sha);
+  const boundedPatch = validatePatchProjection(
+    patch,
+    boundedSource.sourceCoworldVersion,
+  );
+  const boundedImage = validateImageProjection(image);
+  return {
+    schemaVersion: 1,
+    stage: "mutation-returned",
+    sourceSha: sha,
+    controlSha: boundedContext.controlSha,
+    workflowRunId: boundedContext.workflowRunId,
+    mainCiRunId: boundedContext.mainCiRunId,
+    release: {
+      runId: boundedContext.releaseRunId,
+      artifactId: boundedContext.releaseArtifactId,
+      artifactName: boundedContext.releaseArtifactName,
+      artifactBytes: boundedContext.releaseArtifactBytes,
+    },
+    source: boundedSource,
+    patch: boundedPatch,
+    image: boundedImage,
+    automaticRollback: false,
+    recoveryProcedure:
+      "Dispatch this workflow with the same source_sha plus the exact previous workflow run and unexpired mutation-receipt artifact IDs. Recovery re-polls and validates the existing patched Coworld; it does not patch again or claim automatic rollback.",
+  };
+}
+
+export function validateResumeReference({
+  expectedSourceSha,
+  expectedWorkflowRunId,
+  expectedArtifactId,
+  workflowRun,
+  artifact,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const runId = positiveId(expectedWorkflowRunId, "resume workflow run id");
+  const artifactId = positiveId(
+    expectedArtifactId,
+    "resume mutation artifact id",
+  );
+  invariant(workflowRun?.id === runId, "resume workflow run identity mismatch");
+  invariant(
+    workflowRun?.path === COMMISSIONER_WORKFLOW_PATH,
+    "resume workflow path mismatch",
+  );
+  invariant(
+    workflowRun?.event === "workflow_dispatch" &&
+      workflowRun?.head_branch === "main",
+    "resume workflow was not an operator production dispatch",
+  );
+  sourceSha(workflowRun?.head_sha);
+  invariant(
+    workflowRun?.status === "completed" &&
+      typeof workflowRun?.conclusion === "string" &&
+      RESUMABLE_RUN_CONCLUSIONS.has(workflowRun.conclusion),
+    "resume workflow must be a completed unsuccessful migration",
+  );
+  invariant(artifact?.id === artifactId, "resume artifact identity mismatch");
+  invariant(
+    artifact?.name === `coworld-commissioner-mutation-${sha}-${runId}`,
+    "resume mutation artifact name mismatch",
+  );
+  invariant(artifact?.expired === false, "resume mutation artifact is expired");
+  const artifactBytes = positiveId(
+    artifact?.size_in_bytes,
+    "resume mutation artifact bytes",
+  );
+  invariant(
+    artifactBytes <= MAX_MUTATION_RECEIPT_ARTIFACT_BYTES,
+    "resume mutation artifact exceeds its byte bound",
+  );
+  invariant(
+    artifact?.workflow_run?.id === runId,
+    "resume artifact is not bound to the previous workflow run",
+  );
+  if (artifact.workflow_run.head_sha !== undefined) {
+    invariant(
+      artifact.workflow_run.head_sha === workflowRun.head_sha,
+      "resume artifact control SHA mismatch",
+    );
+  }
+  return {
+    sourceSha: sha,
+    previousWorkflowRunId: runId,
+    mutationReceiptArtifactId: artifactId,
+    previousDispatchSha: workflowRun.head_sha,
+  };
+}
+
+export function validateResumeReceipt({
+  expectedSourceSha,
+  expectedWorkflowRunId,
+  expectedArtifactId,
+  workflowRun,
+  artifact,
+  receipt,
+}) {
+  const reference = validateResumeReference({
+    expectedSourceSha,
+    expectedWorkflowRunId,
+    expectedArtifactId,
+    workflowRun,
+    artifact,
+  });
+  exactObjectKeys(
+    receipt,
+    [
+      "schemaVersion",
+      "stage",
+      "sourceSha",
+      "controlSha",
+      "workflowRunId",
+      "mainCiRunId",
+      "release",
+      "source",
+      "patch",
+      "image",
+      "automaticRollback",
+      "recoveryProcedure",
+    ],
+    "mutation receipt",
+  );
+  invariant(receipt.schemaVersion === 1, "mutation receipt schema mismatch");
+  invariant(
+    receipt.stage === "mutation-returned",
+    "mutation receipt stage mismatch",
+  );
+  invariant(
+    receipt.sourceSha === reference.sourceSha,
+    "mutation receipt source SHA mismatch",
+  );
+  sourceSha(receipt.controlSha);
+  invariant(
+    receipt.workflowRunId === reference.previousWorkflowRunId,
+    "mutation receipt workflow run mismatch",
+  );
+  invariant(
+    receipt.automaticRollback === false,
+    "mutation receipt made an automatic rollback claim",
+  );
+  invariant(
+    typeof receipt.recoveryProcedure === "string" &&
+      receipt.recoveryProcedure.length > 0 &&
+      receipt.recoveryProcedure.length <= 400,
+    "mutation receipt recovery procedure is malformed",
+  );
+  const source = validateSourceProjection(receipt.source, reference.sourceSha);
+  const patch = validatePatchProjection(
+    receipt.patch,
+    source.sourceCoworldVersion,
+  );
+  const image = validateImageProjection(receipt.image);
+  exactObjectKeys(
+    receipt.release,
+    ["runId", "artifactId", "artifactName", "artifactBytes"],
+    "mutation receipt release",
+  );
+  const releaseContext = validateMutationContext(
+    {
+      controlSha: receipt.controlSha,
+      workflowRunId: receipt.workflowRunId,
+      mainCiRunId: receipt.mainCiRunId,
+      releaseRunId: receipt.release.runId,
+      releaseArtifactId: receipt.release.artifactId,
+      releaseArtifactName: receipt.release.artifactName,
+      releaseArtifactBytes: receipt.release.artifactBytes,
+    },
+    reference.sourceSha,
+  );
+  return {
+    reference,
+    source,
+    patch,
+    image,
+    releaseContext,
+  };
+}
+
+export function validateResumeSourceStatus({
+  expectedSourceSha,
+  source,
+  status,
+}) {
+  const boundedSource = validateSourceProjection(source, expectedSourceSha);
+  invariant(
+    status?.coworld?.id === boundedSource.sourceCoworldId,
+    "resume source status Coworld id mismatch",
+  );
+  invariant(
+    status?.coworld?.version === boundedSource.sourceCoworldVersion,
+    "resume source status version mismatch",
+  );
+  invariant(
+    status?.coworld?.manifest?.game?.version ===
+      boundedSource.sourceCoworldVersion,
+    "resume source manifest version mismatch",
+  );
+  invariant(
+    extractSourceSha(status?.coworld?.manifest) === boundedSource.sourceSha,
+    "resume source manifest provenance mismatch",
+  );
+  const sourceCommissioner = commissioner(status.coworld.manifest, IMAGE_ID);
+  invariant(
+    sourceCommissioner.image === boundedSource.sourceCommissionerImageId,
+    "resume source commissioner image mismatch",
+  );
+  return boundedSource;
+}
+
 function exactOutputValue(text, prefix, pattern) {
   const matches = String(text)
     .split(/\r?\n/)
@@ -524,6 +1020,165 @@ export function validateFinalMigration({
   };
 }
 
+function safePattern(value, pattern) {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+function safeVersion(value) {
+  return safePattern(value, SEMVER);
+}
+
+function safePositiveId(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function safeSourceProjection(value, expectedSourceSha) {
+  try {
+    return validateSourceProjection(value, expectedSourceSha);
+  } catch {
+    return null;
+  }
+}
+
+function safePatchProjection(value, sourceVersion) {
+  if (sourceVersion === null) return null;
+  try {
+    return validatePatchProjection(value, sourceVersion);
+  } catch {
+    return null;
+  }
+}
+
+function reconciliationStatusProjection(status) {
+  let commissionerRunnableId = null;
+  let commissionerImageId = null;
+  try {
+    const hosted = commissioner(status?.coworld?.manifest, IMAGE_ID);
+    commissionerRunnableId = hosted.id;
+    commissionerImageId = hosted.image;
+  } catch {
+    // Reconciliation must retain a bounded diagnostic even for partial state.
+  }
+  const summary = status?.certification?.transcript_summary;
+  const certificationPassed =
+    Array.isArray(summary) && summary.length <= 100
+      ? summary.filter((entry) => entry?.status === "pass").length
+      : null;
+  const state = status?.certification?.state;
+  let observedSourceSha = null;
+  try {
+    observedSourceSha = extractSourceSha(status?.coworld?.manifest);
+  } catch {
+    // Malformed authenticated payloads are represented only as null fields.
+  }
+  return {
+    coworldId: safePattern(status?.coworld?.id, COWORLD_ID),
+    coworldVersion: safeVersion(status?.coworld?.version),
+    canonical:
+      typeof status?.coworld?.canonical === "boolean"
+        ? status.coworld.canonical
+        : null,
+    sourceSha: observedSourceSha,
+    manifestHash: safePattern(status?.coworld?.manifest_hash, DIGEST),
+    replayBundle: safePattern(
+      status?.coworld?.manifest?.game?.replay_viewer?.bundle,
+      DIGEST,
+    ),
+    commissionerRunnableId,
+    commissionerImageId,
+    certificationState:
+      typeof state === "string" && CERTIFICATION_STATES.has(state)
+        ? state
+        : null,
+    certificationJobId: safePattern(
+      status?.certification?.certification_job_id,
+      UUID,
+    ),
+    certificationPassed,
+  };
+}
+
+function reconciliationLeagueProjection(league) {
+  return {
+    leagueId: league?.id === LEAGUE_ID ? LEAGUE_ID : null,
+    commissionerKey:
+      league?.commissioner_key === "platform" ? "platform" : null,
+    platformLadderEnabled: Object.hasOwn(league ?? {}, "rounds_paused_at")
+      ? league.rounds_paused_at === null
+      : null,
+    boundCoworldId: safePattern(league?.game?.coworld_id, COWORLD_ID),
+    commissionerMigrationVersion: safePattern(
+      league?.commissioner_migration_version,
+      SAFE_LABEL,
+    ),
+  };
+}
+
+function reconciliationExit(value, label) {
+  invariant(
+    value === "not-attempted" || /^(?:0|[1-9][0-9]{0,2})$/.test(value ?? ""),
+    `${label} reconciliation exit is malformed`,
+  );
+  return value;
+}
+
+export function buildReconciliationState({
+  expectedSourceSha,
+  controlSha,
+  workflowRunId,
+  source,
+  patch,
+  observedStatus,
+  observedLeague,
+  statusExit,
+  leagueExit,
+  resumeWorkflowRunId = null,
+  resumeArtifactId = null,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const boundedControlSha = sourceSha(controlSha);
+  const boundedWorkflowRunId = positiveId(
+    workflowRunId,
+    "reconciliation workflow run id",
+  );
+  const sourceProjection = safeSourceProjection(source, sha);
+  const patchProjection = safePatchProjection(
+    patch,
+    sourceProjection?.sourceCoworldVersion ?? null,
+  );
+  const hasResumeReference =
+    resumeWorkflowRunId !== null || resumeArtifactId !== null;
+  invariant(
+    !hasResumeReference ||
+      (safePositiveId(resumeWorkflowRunId) !== null &&
+        safePositiveId(resumeArtifactId) !== null),
+    "reconciliation resume reference is incomplete",
+  );
+  return {
+    schemaVersion: 1,
+    sourceSha: sha,
+    controlSha: boundedControlSha,
+    workflowRunId: boundedWorkflowRunId,
+    source: sourceProjection,
+    patch: patchProjection,
+    observedStatus: reconciliationStatusProjection(observedStatus),
+    observedLeague: reconciliationLeagueProjection(observedLeague),
+    observationExit: {
+      status: reconciliationExit(statusExit, "status"),
+      league: reconciliationExit(leagueExit, "league"),
+    },
+    resumeReference: hasResumeReference
+      ? {
+          previousWorkflowRunId: resumeWorkflowRunId,
+          mutationReceiptArtifactId: resumeArtifactId,
+        }
+      : null,
+    automaticRollback: false,
+    recoveryProcedure:
+      "Resume only with the exact previous workflow run and its unexpired immediate mutation-receipt artifact. Recovery re-polls the existing patch and never patches or rolls back automatically.",
+  };
+}
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -540,6 +1195,20 @@ function main(argv) {
   }
   if (command === "resolve-release-run" && args.length === 2) {
     print(selectSuccessfulProductionRun(readJson(args[1]), args[0]));
+    return;
+  }
+  if (command === "resolve-release-candidates" && args.length === 2) {
+    print(selectSuccessfulProductionRunCandidates(readJson(args[1]), args[0]));
+    return;
+  }
+  if (command === "resolve-release" && args.length === 3) {
+    print(
+      selectSuccessfulProductionRelease(
+        readJson(args[1]),
+        readJson(args[2]),
+        args[0],
+      ),
+    );
     return;
   }
   if (command === "resolve-release-artifact" && args.length === 2) {
@@ -582,6 +1251,53 @@ function main(argv) {
     print(parsePatchCommissionerOutput(readFileSync(args[0], "utf8")));
     return;
   }
+  if (command === "create-mutation-receipt" && args.length === 5) {
+    print(
+      buildMutationReceipt({
+        expectedSourceSha: args[0],
+        context: readJson(args[1]),
+        source: readJson(args[2]),
+        patch: readJson(args[3]),
+        image: readJson(args[4]),
+      }),
+    );
+    return;
+  }
+  if (command === "validate-resume-reference" && args.length === 5) {
+    print(
+      validateResumeReference({
+        expectedSourceSha: args[0],
+        expectedWorkflowRunId: Number(args[1]),
+        expectedArtifactId: Number(args[2]),
+        workflowRun: readJson(args[3]),
+        artifact: readJson(args[4]),
+      }),
+    );
+    return;
+  }
+  if (command === "validate-resume-receipt" && args.length === 6) {
+    print(
+      validateResumeReceipt({
+        expectedSourceSha: args[0],
+        expectedWorkflowRunId: Number(args[1]),
+        expectedArtifactId: Number(args[2]),
+        workflowRun: readJson(args[3]),
+        artifact: readJson(args[4]),
+        receipt: readJson(args[5]),
+      }),
+    );
+    return;
+  }
+  if (command === "validate-resume-source" && args.length === 3) {
+    print(
+      validateResumeSourceStatus({
+        expectedSourceSha: args[0],
+        source: readJson(args[1]),
+        status: readJson(args[2]),
+      }),
+    );
+    return;
+  }
   if (command === "certification-state" && args.length === 1) {
     process.stdout.write(`${certificationState(readJson(args[0]))}\n`);
     return;
@@ -596,6 +1312,24 @@ function main(argv) {
         sourceStatus: readJson(args[4]),
         status: readJson(args[5]),
         league: readJson(args[6]),
+      }),
+    );
+    return;
+  }
+  if (command === "build-reconciliation" && args.length === 11) {
+    print(
+      buildReconciliationState({
+        expectedSourceSha: args[0],
+        controlSha: args[1],
+        workflowRunId: Number(args[2]),
+        source: readJson(args[3]),
+        patch: readJson(args[4]),
+        observedStatus: readJson(args[5]),
+        observedLeague: readJson(args[6]),
+        statusExit: args[7],
+        leagueExit: args[8],
+        resumeWorkflowRunId: args[9] === "" ? null : Number(args[9]),
+        resumeArtifactId: args[10] === "" ? null : Number(args[10]),
       }),
     );
     return;

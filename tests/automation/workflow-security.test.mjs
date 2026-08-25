@@ -14,6 +14,10 @@ const commissionerProduction = readFileSync(
   ".github/workflows/coworld-commissioner-production.yml",
   "utf8",
 );
+const commissionerProductionScript = readFileSync(
+  ".github/scripts/coworld-commissioner-production.mjs",
+  "utf8",
+);
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
 const vite = readFileSync("vite.config.ts", "utf8");
@@ -92,6 +96,8 @@ test("production secrets are isolated to a protected main environment job", () =
 test("commissioner migration is an operator-only exact-source protected production dispatch", () => {
   assert.match(commissionerProduction, /workflow_dispatch:/);
   assert.match(commissionerProduction, /source_sha:\n\s+description:/);
+  assert.match(commissionerProduction, /resume_run_id:\n\s+description:/);
+  assert.match(commissionerProduction, /resume_artifact_id:\n\s+description:/);
   assert.match(commissionerProduction, /required: true/);
   assert.doesNotMatch(
     commissionerProduction,
@@ -117,27 +123,23 @@ test("commissioner migration is an operator-only exact-source protected producti
   );
   assert.match(commissionerProduction, /group: proxywar-coworld-production/);
   assert.match(commissionerProduction, /cancel-in-progress: false/);
-  assert.deepEqual(
-    [...commissionerProduction.matchAll(/secrets\.([A-Z0-9_]+)/g)].map(
-      (match) => match[1],
-    ),
-    [
-      "COWORLD_API_TOKEN",
-      "COWORLD_API_TOKEN",
-      "COWORLD_API_TOKEN",
-      "COWORLD_API_TOKEN",
-      "COWORLD_API_TOKEN",
-    ],
+  const commissionerSecrets = [
+    ...commissionerProduction.matchAll(/secrets\.([A-Z0-9_]+)/g),
+  ].map((match) => match[1]);
+  assert.equal(commissionerSecrets.length, 6);
+  assert.ok(
+    commissionerSecrets.every((secret) => secret === "COWORLD_API_TOKEN"),
   );
 });
 
 test("commissioner migration consumes an exact certified release and rechecks every mutation gate", () => {
   assert.match(commissionerProduction, /resolve-ci "\$SOURCE_SHA"/);
-  assert.match(commissionerProduction, /resolve-release-run "\$SOURCE_SHA"/);
   assert.match(
     commissionerProduction,
-    /resolve-release-artifact "\$SOURCE_SHA"/,
+    /resolve-release-candidates "\$SOURCE_SHA"/,
   );
+  assert.match(commissionerProduction, /releaseRunIds\[\]/);
+  assert.match(commissionerProduction, /resolve-release "\$SOURCE_SHA"/);
   assert.match(
     commissionerProduction,
     /actions\/artifacts\/\$RELEASE_ARTIFACT_ID\/zip/,
@@ -157,7 +159,7 @@ test("commissioner migration consumes an exact certified release and rechecks ev
   );
   assert.match(
     commissionerProduction,
-    /releaseArtifactId.*RELEASE_ARTIFACT_ID/,
+    /releaseArtifactId "\$RUNNER_TEMP\/release-recheck\.json"\)" = "\$RELEASE_ARTIFACT_ID"/,
   );
   assert.match(commissionerProduction, /validate-source "\$SOURCE_SHA"/);
   assert.match(commissionerProduction, /next-version "\$COWORLD_NAME"/);
@@ -183,9 +185,19 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
     commissionerProduction,
     /coworld-commissioner-reconciliation-state\.json/,
   );
-  assert.match(commissionerProduction, /recoveryProcedure/);
-  assert.match(commissionerProduction, /automaticRollback:false/);
+  assert.match(commissionerProductionScript, /recoveryProcedure/);
+  assert.match(commissionerProductionScript, /automaticRollback: false/);
   assert.match(commissionerProduction, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(commissionerProduction, /validate-resume-reference/);
+  assert.match(commissionerProduction, /validate-resume-receipt/);
+  assert.match(commissionerProduction, /validate-resume-source/);
+  assert.match(
+    commissionerProduction,
+    /compare\/\$RECEIPT_CONTROL_SHA\.\.\.\$CONTROL_SHA/,
+  );
+  assert.match(commissionerProduction, /build-reconciliation/);
+  assert.doesNotMatch(commissionerProduction, /--slurpfile observedStatus/);
+  assert.doesNotMatch(commissionerProduction, /--slurpfile observedLeague/);
   assert.match(
     commissionerProduction,
     /coworld-commissioner-migration-evidence\.json/,
@@ -210,6 +222,40 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
       "coworld-commissioner-reconciliation-state.json",
       "coworld-commissioner-migration-evidence.json",
     ],
+  );
+});
+
+test("commissioner recovery resumes only an exact retained mutation and never re-patches it", () => {
+  assert.match(
+    commissionerProduction,
+    /Recover the exact existing mutation from its immutable receipt\n\s+if: \$\{\{ needs\.admission\.outputs\.migration_mode == 'resume' \}\}/,
+  );
+  assert.match(
+    commissionerProduction,
+    /Patch only the exact commissioner runnable\n\s+id: patch\n\s+if: \$\{\{ needs\.admission\.outputs\.migration_mode == 'new' \}\}/,
+  );
+  assert.match(
+    commissionerProduction,
+    /actions\/artifacts\/\$RESUME_ARTIFACT_ID\/zip/,
+  );
+  assert.match(
+    commissionerProduction,
+    /resume artifact must contain only the mutation receipt/,
+  );
+  assert.match(commissionerProduction, /validate-resume-receipt/);
+  assert.match(commissionerProduction, /validate-resume-source/);
+  assert.match(commissionerProduction, /status "\$SOURCE_COWORLD_ID" --json/);
+  assert.match(
+    commissionerProductionScript,
+    /resume source status Coworld id mismatch/,
+  );
+  assert.match(
+    commissionerProductionScript,
+    /validateCommissionerOnlyManifestPatch/,
+  );
+  assert.doesNotMatch(
+    commissionerProduction,
+    /migration_mode == 'resume'[\s\S]{0,3000}next-version/,
   );
 });
 
