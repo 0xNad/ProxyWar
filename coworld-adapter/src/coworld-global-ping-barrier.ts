@@ -5,6 +5,7 @@
  * from winning the race immediately after the first global state frame.
  */
 export class CoworldGlobalPingBarrier {
+  private static readonly PONG_FLUSH_GRACE_MS = 100;
   private nextConnectionID = 1;
   private readonly connectedSockets = new Map<number, boolean>();
   private readonly waiters = new Set<() => void>();
@@ -18,9 +19,7 @@ export class CoworldGlobalPingBarrier {
 
   disconnected(connectionID: number): void {
     this.connectedSockets.delete(connectionID);
-    if (this.connectedSockets.size === 0) {
-      this.resolveWaiters();
-    }
+    this.resolveWaiters();
   }
 
   observedPing(connectionID: number): void {
@@ -31,29 +30,54 @@ export class CoworldGlobalPingBarrier {
   }
 
   async waitForPingOrGrace(timeoutMs = 2_000): Promise<void> {
-    if (this.probeSatisfied()) {
+    if (this.connectedSockets.size === 0) {
       return;
     }
     await new Promise<void>((resolve) => {
+      let pongFlushTimeout: ReturnType<typeof setTimeout> | null = null;
       const finish = (): void => {
-        clearTimeout(timeout);
-        this.waiters.delete(finish);
+        clearTimeout(graceTimeout);
+        clearTimeout(hardTimeout);
+        if (pongFlushTimeout !== null) {
+          clearTimeout(pongFlushTimeout);
+        }
+        this.waiters.delete(evaluate);
         resolve();
       };
-      const timeout = setTimeout(finish, timeoutMs);
+      const evaluate = (): void => {
+        if (this.connectedSockets.size === 0) {
+          finish();
+          return;
+        }
+        const pingObserved = [...this.connectedSockets.values()].some(Boolean);
+        if (!pingObserved && pongFlushTimeout !== null) {
+          clearTimeout(pongFlushTimeout);
+          pongFlushTimeout = null;
+        }
+        if (pongFlushTimeout === null && pingObserved) {
+          // `ws` queues the matching Pong before emitting `ping`, but the
+          // socket write is asynchronous. Keep the connection alive for one
+          // small bounded flush window so hosted certification can observe the
+          // Pong before teardown starts.
+          pongFlushTimeout = setTimeout(
+            finish,
+            CoworldGlobalPingBarrier.PONG_FLUSH_GRACE_MS,
+          );
+        }
+      };
+      const graceTimeout = setTimeout(() => {
+        if (pongFlushTimeout === null) {
+          finish();
+        }
+      }, timeoutMs);
+      const hardTimeout = setTimeout(
+        finish,
+        timeoutMs + CoworldGlobalPingBarrier.PONG_FLUSH_GRACE_MS,
+      );
 
-      this.waiters.add(finish);
-      if (this.probeSatisfied()) {
-        finish();
-      }
+      this.waiters.add(evaluate);
+      evaluate();
     });
-  }
-
-  private probeSatisfied(): boolean {
-    return (
-      this.connectedSockets.size === 0 ||
-      [...this.connectedSockets.values()].some((pingObserved) => pingObserved)
-    );
   }
 
   private resolveWaiters(): void {
