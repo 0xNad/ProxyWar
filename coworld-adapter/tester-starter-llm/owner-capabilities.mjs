@@ -26,6 +26,8 @@ const INVISIBLE_FORMAT_OR_SEPARATOR =
   /[\u2028\u2029\uFFF9-\uFFFB]|\p{Default_Ignorable_Code_Point}/u;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
+const MESSAGE_EVENT_ID =
+  /^msg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const MINIMAP_ROW = /^[A-Za-z0-9.@#~]{24}$/u;
 const MINIMAP_V2_OWNERSHIP_ROW = /^[A-Za-z0-9.@#~]+$/u;
 const MINIMAP_V2_TERRAIN_ROW = /^[.:^~]+$/u;
@@ -592,8 +594,11 @@ export function boundedInboundMessages(observation) {
   if (!Array.isArray(inbound) || inbound.length > 8) return null;
   const bounded = [];
   const messagesPerSender = new Map();
+  const seenMessageEventIDs = new Set();
   let previousTurn = -1;
   for (const entry of inbound) {
+    const hasMessageEventID =
+      isRecord(entry) && Object.hasOwn(entry, "messageEventID");
     if (
       !isRecord(entry) ||
       !isBoundedVisibleString(entry.senderID, 200) ||
@@ -601,15 +606,19 @@ export function boundedInboundMessages(observation) {
       !Number.isSafeInteger(entry.turnNumber) ||
       entry.turnNumber < 0 ||
       entry.turnNumber < previousTurn ||
-      !isSafeAgentMessageText(entry.text, OWNER_MESSAGE_MAX_CHARS)
+      !isSafeAgentMessageText(entry.text, OWNER_MESSAGE_MAX_CHARS) ||
+      (hasMessageEventID && !MESSAGE_EVENT_ID.test(entry.messageEventID)) ||
+      (hasMessageEventID && seenMessageEventIDs.has(entry.messageEventID))
     ) {
       return null;
     }
     const senderCount = (messagesPerSender.get(entry.senderID) ?? 0) + 1;
     if (senderCount > 3) return null;
     messagesPerSender.set(entry.senderID, senderCount);
+    if (hasMessageEventID) seenMessageEventIDs.add(entry.messageEventID);
     previousTurn = entry.turnNumber;
     bounded.push({
+      ...(hasMessageEventID ? { messageEventID: entry.messageEventID } : {}),
       senderID: entry.senderID,
       senderName: entry.senderName,
       text: entry.text,
@@ -758,10 +767,15 @@ export function createOwnerCapabilityEvidenceLogger({
 
     for (const entry of boundedInboundMessages(observation) ?? []) {
       const digest = sha256Utf8(entry.text);
-      const key = `${entry.senderID}\u0000${entry.turnNumber}\u0000${digest}`;
+      const key = entry.messageEventID
+        ? `event\u0000${entry.messageEventID}`
+        : `legacy\u0000${entry.senderID}\u0000${entry.turnNumber}\u0000${digest}`;
       if (seenInbound.has(key)) continue;
       const recorded = record("message_observation", {
         ...base,
+        ...(entry.messageEventID
+          ? { messageEventID: entry.messageEventID }
+          : {}),
         senderID: entry.senderID,
         senderTurn: entry.turnNumber,
         messageBodySHA256: digest,

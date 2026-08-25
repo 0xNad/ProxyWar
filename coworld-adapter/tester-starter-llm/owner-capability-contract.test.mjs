@@ -29,6 +29,8 @@ const message = {
   metadata: { recipientID: "P_B" },
 };
 const primary = { id: "hold", kind: "hold" };
+const firstMessageEventID = "msg_00000000-0000-4000-8000-000000000001";
+const secondMessageEventID = "msg_00000000-0000-4000-8000-000000000002";
 
 test("deal slot requires observation capability and an exact offered deal id", () => {
   const args = {
@@ -764,6 +766,7 @@ test("malformed optional containers disappear without crashing primary state", (
     nonCombat: {
       inboundMessages: [
         {
+          messageEventID: firstMessageEventID,
           senderID: "P_B",
           senderName: "Rival B",
           turnNumber: 7,
@@ -774,6 +777,10 @@ test("malformed optional containers disappear without crashing primary state", (
   });
   assert.ok(valid.deals);
   assert.equal(valid.nonCombat.inboundMessages.length, 1);
+  assert.equal(
+    valid.nonCombat.inboundMessages[0].messageEventID,
+    firstMessageEventID,
+  );
 
   const fourFromOneSender = ownerCapabilityObservation({
     ownState: { playerID: "P_A" },
@@ -821,6 +828,86 @@ test("malformed optional containers disappear without crashing primary state", (
     },
   });
   assert.equal("inboundMessages" in (outOfOrder.nonCombat ?? {}), false);
+});
+
+test("server message IDs preserve distinct same-turn messages and drive evidence dedupe", () => {
+  const body = "same sender, turn, and body";
+  const input = {
+    ownState: { playerID: "P_A" },
+    visiblePlayers: [],
+    nonCombat: {
+      inboundMessages: [firstMessageEventID, secondMessageEventID].map(
+        (messageEventID) => ({
+          messageEventID,
+          senderID: "P_B",
+          senderName: "Rival B",
+          turnNumber: 7,
+          text: body,
+        }),
+      ),
+    },
+  };
+  const sanitized = ownerCapabilityObservation(input);
+  assert.deepEqual(
+    sanitized.nonCombat.inboundMessages.map((entry) => entry.messageEventID),
+    [firstMessageEventID, secondMessageEventID],
+  );
+
+  const lines = [];
+  const logEvidence = createOwnerCapabilityEvidenceLogger({
+    emit: (line) => lines.push(line),
+  });
+  const args = {
+    requestID: "req_same_turn_ids",
+    slot: 0,
+    actions: [primary],
+    observation: input,
+    response: { selectedLegalActionId: primary.id },
+  };
+  logEvidence(args);
+  logEvidence(args);
+  const observations = lines
+    .map((line) =>
+      JSON.parse(line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", "")),
+    )
+    .filter((event) => event.kind === "message_observation");
+  assert.deepEqual(
+    observations.map((event) => event.messageEventID),
+    [firstMessageEventID, secondMessageEventID],
+  );
+});
+
+test("malformed or duplicate server message IDs fail the inbound container closed", () => {
+  const observationWithIDs = (messageEventIDs) => ({
+    ownState: { playerID: "P_A" },
+    visiblePlayers: [],
+    nonCombat: {
+      inboundMessages: messageEventIDs.map((messageEventID, index) => ({
+        messageEventID,
+        senderID: "P_B",
+        senderName: "Rival B",
+        turnNumber: 7 + index,
+        text: `message ${index}`,
+      })),
+    },
+  });
+  for (const malformedID of [
+    "msg_A",
+    "MSG_00000000-0000-4000-8000-000000000001",
+    "msg_00000000-0000-3000-8000-000000000001",
+    "msg_00000000-0000-4000-7000-000000000001",
+    ` ${firstMessageEventID}`,
+    7,
+  ]) {
+    const sanitized = ownerCapabilityObservation(
+      observationWithIDs([malformedID]),
+    );
+    assert.equal("inboundMessages" in (sanitized.nonCombat ?? {}), false);
+  }
+  const duplicate = ownerCapabilityObservation(
+    observationWithIDs([firstMessageEventID, firstMessageEventID]),
+  );
+  assert.equal("inboundMessages" in (duplicate.nonCombat ?? {}), false);
 });
 
 test("minimap is accepted whole or omitted whole without repair", () => {
@@ -1545,6 +1632,7 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
     nonCombat: {
       inboundMessages: [
         {
+          messageEventID: firstMessageEventID,
           senderID: "P_B",
           senderName: "Rival B",
           turnNumber: 7,
@@ -1589,6 +1677,7 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
   const observed = events.find((event) => event.kind === "message_observation");
   assert.equal(selected.messageBodySHA256, digest);
   assert.equal(observed.messageBodySHA256, digest);
+  assert.equal(observed.messageEventID, firstMessageEventID);
   assert.deepEqual(selected.offeredMessageActionIDs, [message.id]);
   assert.equal(selected.selectedMessageActionID, message.id);
   assert.equal(selected.selectedLegalActionOffered, true);

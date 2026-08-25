@@ -138,8 +138,11 @@ The current hosted Coworld advertises messaging with
 capability and one exact `message` action are both present. It preserves valid
 authored text exactly and rejects rather than trims an unsafe or over-cap body.
 It also emits bounded `PROXYWAR_OWNER_CAPABILITY_EVIDENCE` policy-log records
-containing offered/chosen IDs and message digests, never raw bodies or model
-prompts. After an isolated XP, use `owner-evidence-check.mjs` to verify the
+containing offered/chosen IDs, message digests, and each current inbound
+message's exact server-owned `messageEventID`, never raw bodies or model
+prompts. The sender-side selection record cannot invent that ID because the
+server assigns it after selection. After an isolated XP, use
+`owner-evidence-check.mjs` to verify unique exact observation IDs and the
 policy-reported sender-to-recipient join. This is not game-owned delivery
 authority: retain the Coworld request/result identities and require the replay
 message event as a separate hosted layer.
