@@ -240,9 +240,19 @@ jobs:
             "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/source-status-recheck.json" \
             > "$RUNNER_TEMP/resume-source-validation.json"
           node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/resume-coworld-list.json"
+          node .github/scripts/coworld-commissioner-production.mjs select-resume-candidate "$SOURCE_SHA" \
+            "$INTENT" "$RUNNER_TEMP/resume-coworld-list.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            > "$RUNNER_TEMP/resume-candidate.json"
+          RESUME_COMMISSIONER_IMAGE_ID=$(jq -r .patchedCommissionerImageId "$RUNNER_TEMP/resume-candidate.json")
+          node .github/scripts/coworld-authenticated-command.mjs images "$RESUME_COMMISSIONER_IMAGE_ID" --json \
+            > "$RUNNER_TEMP/resume-hosted-image.json"
           node .github/scripts/coworld-commissioner-production.mjs discover-resume-patch "$SOURCE_SHA" \
             "$INTENT" "$RUNNER_TEMP/resume-coworld-list.json" "$RUNNER_TEMP/source-status-recheck.json" \
+            "$RUNNER_TEMP/resume-hosted-image.json" \
             > "$RUNNER_TEMP/patch.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-commissioner-image-binding "$SOURCE_SHA" \
+            "$INTENT" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/resume-hosted-image.json" \
+            > "$RUNNER_TEMP/hosted-image-binding.json"
           {
             echo "SOURCE_COWORLD_ID=$SOURCE_COWORLD_ID"
             echo "SOURCE_VERSION=$(jq -r .sourceCoworldVersion "$RUNNER_TEMP/source-preflight-recheck.json")"
@@ -251,6 +261,7 @@ jobs:
             echo "PATCHED_COWORLD_ID=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")"
             echo "MUTATION_WORKFLOW_RUN_ID=$RESUME_RUN_ID"
             echo "MUTATION_AUTHORITY_ARTIFACT_ID=$RESUME_ARTIFACT_ID"
+            echo "MUTATION_INTENT_PATH=$INTENT"
           } >> "$GITHUB_ENV"
       - name: Verify certified canonical source and current league binding
         id: source
@@ -402,6 +413,7 @@ jobs:
             "$RUNNER_TEMP/release-context.json" "$RUNNER_TEMP/source-preflight-recheck.json" \
             "$PATCH_VERSION" "$RUNNER_TEMP/image-validation.json" \
             > "$RUNNER_TEMP/coworld-commissioner-mutation-intent.json"
+          echo "MUTATION_INTENT_PATH=$RUNNER_TEMP/coworld-commissioner-mutation-intent.json" >> "$GITHUB_ENV"
       - name: Upload immutable pre-mutation resume authority
         id: mutation_authority
         if: ${{ needs.admission.outputs.migration_mode == 'new' }}
@@ -441,6 +453,18 @@ jobs:
             echo "PATCHED_COWORLD_ID=$(jq -r .patchedCoworldId "$RUNNER_TEMP/patch.json")"
             echo "MUTATION_WORKFLOW_RUN_ID=$GITHUB_RUN_ID"
           } >> "$GITHUB_ENV"
+      - name: Bind the returned hosted image to the authorized config digest
+        if: ${{ needs.admission.outputs.migration_mode == 'new' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          PATCHED_COMMISSIONER_IMAGE_ID=$(jq -r .patchedCommissionerImageId "$RUNNER_TEMP/patch.json")
+          node .github/scripts/coworld-authenticated-command.mjs images "$PATCHED_COMMISSIONER_IMAGE_ID" --json \
+            > "$RUNNER_TEMP/hosted-image.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-commissioner-image-binding "$SOURCE_SHA" \
+            "$MUTATION_INTENT_PATH" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/hosted-image.json" \
+            > "$RUNNER_TEMP/hosted-image-binding.json"
       - name: Write post-mutation diagnostic receipt
         if: ${{ needs.admission.outputs.migration_mode == 'new' }}
         run: |
@@ -495,11 +519,12 @@ jobs:
             "$RUNNER_TEMP/source-preflight-recheck.json" "$RUNNER_TEMP/patch.json" "$RUNNER_TEMP/source-status-recheck.json" \
             "$RUNNER_TEMP/patched-status.json" "$RUNNER_TEMP/patched-league.json" \
             > "$RUNNER_TEMP/migration-evidence-core.json"
-          jq -s '.[0] + .[1] + {migrationMode:$mode,controlSha:$control_sha,mutationControlSha:.[2].controlSha,mainCiRunId:.[2].mainCiRunId,releaseRunId:.[2].releaseRunId,releaseArtifactId:.[2].releaseArtifactId,releaseArtifactName:.[2].releaseArtifactName,releaseArtifactBytes:.[2].releaseArtifactBytes,workflowRunId:$workflow_run,mutationWorkflowRunId:.[2].workflowRunId,mutationAuthorityArtifactId:($authority_id|tonumber),mutationReceiptArtifactId:($receipt_id|if .=="" then null else tonumber end)}' \
+          jq -s '.[0] + .[1] + .[2] + {migrationMode:$mode,controlSha:$control_sha,mutationControlSha:.[3].controlSha,mainCiRunId:.[3].mainCiRunId,releaseRunId:.[3].releaseRunId,releaseArtifactId:.[3].releaseArtifactId,releaseArtifactName:.[3].releaseArtifactName,releaseArtifactBytes:.[3].releaseArtifactBytes,workflowRunId:$workflow_run,mutationWorkflowRunId:.[3].workflowRunId,mutationAuthorityArtifactId:($authority_id|tonumber),mutationReceiptArtifactId:($receipt_id|if .=="" then null else tonumber end)}' \
             --arg mode "$MIGRATION_MODE" --arg control_sha "$CONTROL_SHA" --argjson workflow_run "$GITHUB_RUN_ID" \
             --arg authority_id "$MUTATION_AUTHORITY_ARTIFACT_ID" \
             --arg receipt_id "${MUTATION_RECEIPT_ARTIFACT_ID:-}" \
-            "$RUNNER_TEMP/migration-evidence-core.json" "$RUNNER_TEMP/image-validation.json" "$RUNNER_TEMP/release-context.json" \
+            "$RUNNER_TEMP/migration-evidence-core.json" "$RUNNER_TEMP/image-validation.json" \
+            "$RUNNER_TEMP/hosted-image-binding.json" "$RUNNER_TEMP/release-context.json" \
             > "$RUNNER_TEMP/coworld-commissioner-migration-evidence.json"
       - name: Capture resumable reconciliation state
         if: ${{ always() }}

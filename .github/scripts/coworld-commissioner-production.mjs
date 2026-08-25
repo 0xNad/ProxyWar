@@ -920,7 +920,7 @@ export function validateResumeSourceStatus({
   return boundedSource;
 }
 
-export function discoverAllocatedCommissionerMutation({
+export function selectAllocatedCommissionerMutationCandidate({
   expectedSourceSha,
   intent,
   coworlds,
@@ -975,6 +975,83 @@ export function discoverAllocatedCommissionerMutation({
     patchedCommissionerImageId: hostedCommissioner.image,
     canonical: true,
   };
+}
+
+export function validateAuthorizedHostedCommissionerImage({
+  expectedSourceSha,
+  intent,
+  patch,
+  hostedImage,
+}) {
+  const sha = sourceSha(expectedSourceSha);
+  const validated = validateMutationIntentDocument(intent, sha);
+  const boundedPatch = validatePatchProjection(
+    patch,
+    validated.source.sourceCoworldVersion,
+  );
+  exactObjectKeys(
+    hostedImage,
+    [
+      "id",
+      "name",
+      "version",
+      "client_hash",
+      "status",
+      "image_uri",
+      "image_digest",
+      "public_image_uri",
+    ],
+    "hosted commissioner image",
+  );
+  invariant(
+    hostedImage.id === boundedPatch.patchedCommissionerImageId,
+    "hosted commissioner image id mismatch",
+  );
+  invariant(
+    hostedImage.name === "proxywar-commissioner-local",
+    "hosted commissioner image name mismatch",
+  );
+  positiveId(hostedImage.version, "hosted commissioner image version");
+  invariant(
+    hostedImage.client_hash === validated.image.localCommissionerImageId,
+    "hosted commissioner image does not match the authorized local config digest",
+  );
+  invariant(
+    SAFE_LABEL.test(hostedImage.status ?? ""),
+    "hosted commissioner image status is malformed",
+  );
+  invariant(
+    hostedImage.image_digest === null ||
+      DIGEST.test(hostedImage.image_digest ?? ""),
+    "hosted commissioner registry digest is malformed",
+  );
+  return {
+    hostedCommissionerImageId: boundedPatch.patchedCommissionerImageId,
+    authorizedLocalConfigDigest: validated.image.localCommissionerImageId,
+    hostedImageDigest: hostedImage.image_digest,
+  };
+}
+
+export function discoverAllocatedCommissionerMutation({
+  expectedSourceSha,
+  intent,
+  coworlds,
+  sourceStatus,
+  hostedImage,
+}) {
+  const patch = selectAllocatedCommissionerMutationCandidate({
+    expectedSourceSha,
+    intent,
+    coworlds,
+    sourceStatus,
+  });
+  validateAuthorizedHostedCommissionerImage({
+    expectedSourceSha,
+    intent,
+    patch,
+    hostedImage,
+  });
+  return patch;
 }
 
 function exactOutputValue(text, prefix, pattern) {
@@ -1430,13 +1507,36 @@ function main(argv) {
     );
     return;
   }
-  if (command === "discover-resume-patch" && args.length === 4) {
+  if (command === "select-resume-candidate" && args.length === 4) {
+    print(
+      selectAllocatedCommissionerMutationCandidate({
+        expectedSourceSha: args[0],
+        intent: readJson(args[1]),
+        coworlds: readJson(args[2]),
+        sourceStatus: readJson(args[3]),
+      }),
+    );
+    return;
+  }
+  if (command === "discover-resume-patch" && args.length === 5) {
     print(
       discoverAllocatedCommissionerMutation({
         expectedSourceSha: args[0],
         intent: readJson(args[1]),
         coworlds: readJson(args[2]),
         sourceStatus: readJson(args[3]),
+        hostedImage: readJson(args[4]),
+      }),
+    );
+    return;
+  }
+  if (command === "validate-commissioner-image-binding" && args.length === 4) {
+    print(
+      validateAuthorizedHostedCommissionerImage({
+        expectedSourceSha: args[0],
+        intent: readJson(args[1]),
+        patch: readJson(args[2]),
+        hostedImage: readJson(args[3]),
       }),
     );
     return;

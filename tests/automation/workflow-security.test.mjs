@@ -126,7 +126,7 @@ test("commissioner migration is an operator-only exact-source protected producti
   const commissionerSecrets = [
     ...commissionerProduction.matchAll(/secrets\.([A-Z0-9_]+)/g),
   ].map((match) => match[1]);
-  assert.equal(commissionerSecrets.length, 6);
+  assert.equal(commissionerSecrets.length, 7);
   assert.ok(
     commissionerSecrets.every((secret) => secret === "COWORLD_API_TOKEN"),
   );
@@ -195,6 +195,12 @@ test("commissioner mutation is narrow, guarded, certified, canonical, bound, and
   assert.match(commissionerProduction, /validate-resume-reference/);
   assert.match(commissionerProduction, /validate-resume-intent/);
   assert.match(commissionerProduction, /discover-resume-patch/);
+  assert.match(commissionerProduction, /select-resume-candidate/);
+  assert.match(
+    commissionerProduction,
+    /images "\$RESUME_COMMISSIONER_IMAGE_ID" --json/,
+  );
+  assert.match(commissionerProduction, /validate-commissioner-image-binding/);
   assert.doesNotMatch(commissionerProduction, /validate-resume-receipt/);
   assert.match(commissionerProduction, /validate-resume-source/);
   assert.match(
@@ -251,6 +257,10 @@ test("commissioner recovery resumes only an exact retained mutation and never re
   );
   assert.match(commissionerProduction, /validate-resume-intent/);
   assert.match(commissionerProduction, /discover-resume-patch/);
+  assert.match(
+    commissionerProductionScript,
+    /hosted commissioner image does not match the authorized local config digest/,
+  );
   assert.match(commissionerProduction, /validate-resume-source/);
   assert.match(commissionerProduction, /status "\$SOURCE_COWORLD_ID" --json/);
   assert.match(

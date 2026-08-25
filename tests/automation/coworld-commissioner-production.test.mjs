@@ -82,6 +82,19 @@ function status(id, version, image, overrides = {}) {
   };
 }
 
+function hostedImage(id, clientHash) {
+  return {
+    id,
+    name: "proxywar-commissioner-local",
+    version: 7,
+    client_hash: clientHash,
+    status: "ready",
+    image_uri: null,
+    image_digest: `sha256:${"8".repeat(64)}`,
+    public_image_uri: null,
+  };
+}
+
 test("resolves only successful exact-source main CI and production runs", () => {
   const ci = selectSuccessfulMainCiRun(
     {
@@ -534,6 +547,7 @@ test("pre-mutation authority recovers an exact successful mutation after output 
       },
     ],
     sourceStatus: historicalSource,
+    hostedImage: hostedImage(patchedImage, image.localCommissionerImageId),
   });
   assert.deepEqual(discovered, {
     patchedCoworldVersion: "0.1.63",
@@ -618,8 +632,28 @@ test("pre-mutation authority recovers an exact successful mutation after output 
           },
         ],
         sourceStatus: historicalSource,
+        hostedImage: hostedImage(patchedImage, image.localCommissionerImageId),
       }),
     /changed outside package version and commissioner image/,
+  );
+  assert.throws(
+    () =>
+      discoverAllocatedCommissionerMutation({
+        expectedSourceSha: sha,
+        intent,
+        coworlds: [
+          {
+            id: patchedId,
+            name: "proxywar",
+            version: "0.1.63",
+            canonical: true,
+            manifest: manifest("0.1.63", patchedImage),
+          },
+        ],
+        sourceStatus: historicalSource,
+        hostedImage: hostedImage(patchedImage, `sha256:${"9".repeat(64)}`),
+      }),
+    /does not match the authorized local config digest/,
   );
 });
 

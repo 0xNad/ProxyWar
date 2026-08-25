@@ -19,6 +19,7 @@ const allowedCommands = new Set([
   "commander-xp-certify",
   "episode-logs",
   "episodes",
+  "images",
   "leagues",
   "list",
   "next-version",
@@ -299,6 +300,18 @@ if (
 }
 if (command === "list" && !(args.length === 1 && args[0] === "--json")) {
   throw new Error("authenticated Coworld list mode is malformed");
+}
+if (
+  command === "images" &&
+  !(
+    args.length === 2 &&
+    /^img_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      args[0] ?? "",
+    ) &&
+    args[1] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld image lookup mode is malformed");
 }
 if (
   command === "next-version" &&
