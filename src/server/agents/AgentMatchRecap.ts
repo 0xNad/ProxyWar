@@ -97,6 +97,7 @@ export interface AgentMatchRecapBeat {
     | "deal_proposed"
     | "deal_accepted"
     | "deal_rejected"
+    | "deal_superseded"
     | "deal_expired"
     | "deal_fulfilled"
     | "deal_violated"
@@ -131,15 +132,16 @@ export interface AgentMatchRecapBeat {
  * structured deal lifecycle facts to the public recap without adding them
  * to the legacy composite drama score. Then 6 -> 7 requires
  * `evidenceLevel === "confirmed_effect"` before alliance, first-strike,
- * betrayal, or final-confrontation effect claims enter the recap. Every bump
- * means exactly
+ * betrayal, or final-confrontation effect claims enter the recap. Then 7 -> 8
+ * adds the engine-authored `deal_superseded` lifecycle fact without folding
+ * it into rejection or expiry counts. Every bump means exactly
  * that: `CoworldLeagueMatchNarrativeBackfill.ts`'s `recapNeedsRegeneration`
  * compares against this constant to force re-curation, and
  * `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact` refuses to parse
  * anything but the current version (a stale artifact reads as "no recap
  * yet", never as spammy/scoreless content, until the backfill upgrades it).
  */
-export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 7;
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 8;
 
 export interface AgentMatchRecap {
   schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
@@ -176,6 +178,7 @@ const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   deal_proposed: "deal proposal",
   deal_accepted: "accepted deal",
   deal_rejected: "rejected deal",
+  deal_superseded: "superseded deal",
   deal_expired: "expired deal",
   deal_fulfilled: "fulfilled promise",
   deal_violated: "violated promise",
@@ -194,6 +197,7 @@ const TRIMMABLE_KIND_PRIORITY: Record<
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
+  | "deal_superseded"
   | "deal_expired",
   number
 > = {
@@ -202,9 +206,10 @@ const TRIMMABLE_KIND_PRIORITY: Record<
   deal_accepted: 2,
   deal_expired: 3,
   deal_rejected: 4,
-  deal_proposed: 5,
-  alliance: 6,
-  first_strike: 7,
+  deal_superseded: 5,
+  deal_proposed: 6,
+  alliance: 7,
+  first_strike: 8,
 };
 
 interface AllianceRun {
@@ -282,6 +287,7 @@ export interface CuratedWarRoomBeats {
     dealProposed: number;
     dealAccepted: number;
     dealRejected: number;
+    dealSuperseded: number;
     dealExpired: number;
     dealFulfilled: number;
     dealViolated: number;
@@ -324,6 +330,7 @@ function curateWarRoomBeats(
     dealProposed: 0,
     dealAccepted: 0,
     dealRejected: 0,
+    dealSuperseded: 0,
     dealExpired: 0,
     dealFulfilled: 0,
     dealViolated: 0,
@@ -343,6 +350,7 @@ function curateWarRoomBeats(
       event.kind === "deal_proposed" ||
       event.kind === "deal_accepted" ||
       event.kind === "deal_rejected" ||
+      event.kind === "deal_superseded" ||
       event.kind === "deal_expired" ||
       event.kind === "deal_fulfilled" ||
       event.kind === "deal_violated"
@@ -360,6 +368,7 @@ function curateWarRoomBeats(
         deal_proposed: "dealProposed",
         deal_accepted: "dealAccepted",
         deal_rejected: "dealRejected",
+        deal_superseded: "dealSuperseded",
         deal_expired: "dealExpired",
         deal_fulfilled: "dealFulfilled",
         deal_violated: "dealViolated",
@@ -367,6 +376,7 @@ function curateWarRoomBeats(
         | "dealProposed"
         | "dealAccepted"
         | "dealRejected"
+        | "dealSuperseded"
         | "dealExpired"
         | "dealFulfilled"
         | "dealViolated";
@@ -779,6 +789,7 @@ function buildSummary(
     ["deal_proposed", counts.dealProposed],
     ["deal_accepted", counts.dealAccepted],
     ["deal_rejected", counts.dealRejected],
+    ["deal_superseded", counts.dealSuperseded],
     ["deal_expired", counts.dealExpired],
     ["deal_fulfilled", counts.dealFulfilled],
     ["deal_violated", counts.dealViolated],

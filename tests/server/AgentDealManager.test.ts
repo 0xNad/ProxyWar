@@ -14,6 +14,7 @@ import {
   DEALS_FLAG,
   dealLeagueHarness,
   pickByID,
+  pickWithDeal,
   stubObservation,
   stubVisiblePlayer,
   type StubSeat,
@@ -21,13 +22,15 @@ import {
 
 // Phase B (PROXYWAR_TUNE_STRUCTURED_DEALS): deterministic deal IDs, decision
 // step timing (proposed at N => visible at N+1; accepted at N+1 => active
-// from N+2), lifecycle (open -> accepted | rejected | withdrawn | expired),
+// from N+2), lifecycle
+// (open -> accepted | rejected | withdrawn | superseded | expired),
 // caps, and bilateral privacy (a third seat's observation never contains the
 // deal).
 
 const A: StubSeat = { agentID: "a1", playerID: "P_A", username: "Auri" };
 const B: StubSeat = { agentID: "b1", playerID: "P_B", username: "Sefirot" };
 const C: StubSeat = { agentID: "c1", playerID: "P_C", username: "Riven" };
+const D: StubSeat = { agentID: "d1", playerID: "P_D", username: "Mori" };
 
 beforeEach(() => {
   process.env[DEALS_FLAG] = "1";
@@ -315,6 +318,179 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
     expect(await run()).toEqual(["deal:P_A:P_B:non_aggression_pact:0"]);
   });
 
+  it.each([
+    { first: A, second: B },
+    { first: B, second: A },
+  ])(
+    "terminally supersedes the crossed loser without a later unanswered lapse in $first.username-first order",
+    async ({ first, second }) => {
+      const template = "non_aggression_pact";
+      const firstToSecond = `deal:${first.playerID}:${second.playerID}:${template}:0`;
+      const secondToFirst = `deal:${second.playerID}:${first.playerID}:${template}:0`;
+      const harness = dealLeagueHarness({
+        seats: [first, second],
+        scripts: [
+          [
+            pickWithDeal(null, `deal_propose:${second.playerID}:${template}`),
+            pickWithDeal(null, `deal_accept:${secondToFirst}`),
+            () => null,
+          ],
+          [
+            pickWithDeal(null, `deal_propose:${first.playerID}:${template}`),
+            pickWithDeal(null, `deal_accept:${firstToSecond}`),
+            () => null,
+          ],
+        ],
+      });
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const acceptRecords = await harness.league.runDecisionTurn({
+        turnNumber: 25,
+      });
+
+      const beforeNextMenu = harness.league.dealLedger();
+      expect(
+        beforeNextMenu.deals.find((deal) => deal.dealID === secondToFirst),
+      ).toMatchObject({ status: "accepted", respondedAtStep: 1 });
+      expect(
+        beforeNextMenu.deals.find((deal) => deal.dealID === firstToSecond),
+      ).toMatchObject({
+        status: "superseded",
+        respondedAtStep: 1,
+        respondedAtTurn: 25,
+        supersededByDealID: secondToFirst,
+      });
+      expect(beforeNextMenu.events.map((event) => event.event)).toEqual([
+        "deal_proposed",
+        "deal_proposed",
+        "deal_accepted",
+        "deal_superseded",
+      ]);
+      expect(beforeNextMenu.events[3]).toMatchObject({
+        actorPlayerID: second.playerID,
+        targetPlayerID: first.playerID,
+        supersededByDealID: secondToFirst,
+        publicText: `${second.username}'s acceptance of ${first.username}'s non-aggression pact was redundant; their equivalent deal was already accepted.`,
+      });
+
+      const winner = acceptRecords.find(
+        (record) => record.agentID === first.agentID,
+      )!;
+      const crossedLoser = acceptRecords.find(
+        (record) => record.agentID === second.agentID,
+      )!;
+      expect(winner.dealSlotEvidence).toMatchObject({
+        validation: {
+          accepted: true,
+          actionID: `deal_accept:${secondToFirst}`,
+        },
+        application: { attempted: true, accepted: true },
+      });
+      expect(crossedLoser).toMatchObject({
+        chosenActionID: "hold",
+        chosenActionKind: "hold",
+        result: { accepted: true },
+        dealSlotEvidence: {
+          validation: {
+            accepted: true,
+            actionID: `deal_accept:${firstToSecond}`,
+          },
+          application: {
+            attempted: true,
+            accepted: false,
+            reason: `redundant accept superseded by equivalent accepted deal: ${secondToFirst}`,
+          },
+        },
+      });
+      expect(crossedLoser.decisionMetadata).toMatchObject({
+        dealTerminalCause: "redundant_accept_superseded",
+        dealSupersededByDealID: secondToFirst,
+      });
+      expect(
+        JSON.parse(
+          crossedLoser.decisionMetadata!.dealComplianceEvent as string,
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          event: "deal_superseded",
+          dealID: firstToSecond,
+          supersededByDealID: secondToFirst,
+        }),
+      ]);
+      expect(crossedLoser.legalActionIDs).toContain(
+        `deal_accept:${firstToSecond}`,
+      );
+
+      await harness.league.runDecisionTurn({ turnNumber: 50 });
+      const proposerInput = harness.handles[0].inputs[2];
+      const recipientInput = harness.handles[1].inputs[2];
+      expect(
+        proposerInput.observation.deals?.outgoingProposals.map(
+          (proposal) => proposal.dealID,
+        ),
+      ).not.toContain(firstToSecond);
+      expect(
+        proposerInput.legalActions.map((action) => action.id),
+      ).not.toContain(`deal_withdraw:${firstToSecond}`);
+      expect(
+        recipientInput.observation.deals?.incomingProposals.map(
+          (proposal) => proposal.dealID,
+        ),
+      ).not.toContain(firstToSecond);
+      const recipientMenuIDs = recipientInput.legalActions.map(
+        (action) => action.id,
+      );
+      expect(recipientMenuIDs).not.toContain(`deal_accept:${firstToSecond}`);
+      expect(recipientMenuIDs).not.toContain(`deal_reject:${firstToSecond}`);
+
+      // Run beyond the original proposal TTL without a withdrawal. A recorded
+      // blocked accept is already terminal and can never be narrated later as
+      // an unanswered lapse.
+      for (const turnNumber of [75, 100, 125, 150]) {
+        await harness.league.runDecisionTurn({ turnNumber });
+      }
+      harness.league.finalizeDeals({ turnNumber: 150 });
+      const finalLedger = harness.league.dealLedger();
+      expect(
+        finalLedger.deals.find((deal) => deal.dealID === firstToSecond),
+      ).toMatchObject({
+        status: "superseded",
+        respondedAtStep: 1,
+        supersededByDealID: secondToFirst,
+      });
+      const supersededEvents = finalLedger.events.filter(
+        (event) =>
+          event.event === "deal_superseded" && event.dealID === firstToSecond,
+      );
+      expect(supersededEvents).toHaveLength(1);
+      expect(
+        finalLedger.events.some(
+          (event) =>
+            event.dealID === firstToSecond &&
+            (event.event === "deal_expired" ||
+              event.publicText.includes("unanswered")),
+        ),
+      ).toBe(false);
+      const evidence = finalLedger.actionEvidence.filter(
+        (entry) => entry.selectedActionID === `deal_accept:${firstToSecond}`,
+      );
+      expect(evidence).toEqual([
+        expect.objectContaining({
+          offeredActionIDs: expect.arrayContaining([
+            `deal_accept:${firstToSecond}`,
+          ]),
+          managerApplied: false,
+          terminalCause: "redundant_accept_superseded",
+          supersededByDealID: secondToFirst,
+        }),
+      ]);
+      expect(
+        finalLedger.actionEvidence.some(
+          (entry) => entry.selectedActionKind === "deal_withdraw",
+        ),
+      ).toBe(false);
+    },
+  );
+
   it("preserves same-step causal append order instead of lexically sorting events", async () => {
     // Participant B applies first, but B's deal id sorts AFTER A's. The
     // immutable ledger must retain application order; sorting by deal id would
@@ -583,6 +759,303 @@ describe("AgentDealManager caps and clamps (direct)", () => {
           option.terms.template === "support_request",
       ),
     ).toBe(false);
+  });
+
+  it("preserves executable crossed proposals with a distinct template, pair, or one-sided target", () => {
+    const observe = (
+      manager: AgentDealManager,
+      seat: StubSeat,
+      others: StubSeat[],
+    ) =>
+      manager.observationFor({
+        agentID: seat.agentID,
+        observation: stubObservation({
+          seat,
+          others: others.map((other) => stubVisiblePlayer(other)),
+          turnNumber: 25,
+        }),
+      })!;
+
+    // Same pair, distinct template: accepting B→A NAP must not hide A→B TSP.
+    const distinctTemplate = registeredManager([A, B]);
+    const tsp = distinctTemplate.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "trade_security_pact"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    const nap = distinctTemplate.manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: proposeAction(A, "non_aggression_pact"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    distinctTemplate.beginStep(25);
+    expect(
+      distinctTemplate.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: responseAction("deal_accept", nap),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      observe(distinctTemplate.manager, B, [A]).incomingProposals.map(
+        (proposal) => proposal.dealID,
+      ),
+    ).toEqual([tsp]);
+    expect(
+      distinctTemplate.manager.applyDealAction({
+        agentID: B.agentID,
+        playerID: B.playerID,
+        playerName: B.username,
+        action: responseAction("deal_accept", tsp),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+
+    // Same template, distinct pair: active A↔B must not hide C→B.
+    const distinctPair = registeredManager([A, B, C]);
+    const bToA = distinctPair.manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: proposeAction(A, "non_aggression_pact"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    const cToB = distinctPair.manager.applyDealAction({
+      agentID: C.agentID,
+      playerID: C.playerID,
+      playerName: C.username,
+      action: proposeAction(B, "non_aggression_pact"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    distinctPair.beginStep(25);
+    expect(
+      distinctPair.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: responseAction("deal_accept", bToA),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      observe(distinctPair.manager, B, [A, C]).incomingProposals.map(
+        (proposal) => proposal.dealID,
+      ),
+    ).toEqual([cToB]);
+
+    // Reciprocal joint attacks carry different one-sided promises: the
+    // proposer is the obligor, and these proposals name different targets.
+    const asymmetricTarget = registeredManager([A, B, C, D]);
+    const aAttacksC = asymmetricTarget.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "joint_attack", {
+        targetID: C.playerID,
+        targetName: C.username,
+      }),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    const bAttacksD = asymmetricTarget.manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: proposeAction(A, "joint_attack", {
+        targetID: D.playerID,
+        targetName: D.username,
+      }),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    asymmetricTarget.beginStep(25);
+    expect(
+      asymmetricTarget.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: responseAction("deal_accept", bAttacksD),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+    const preserved = observe(asymmetricTarget.manager, B, [A, C, D]);
+    expect(preserved.incomingProposals).toEqual([
+      expect.objectContaining({
+        dealID: aAttacksC,
+        terms: expect.objectContaining({ targetPlayerID: C.playerID }),
+      }),
+    ]);
+    expect(
+      asymmetricTarget.manager.applyDealAction({
+        agentID: B.agentID,
+        playerID: B.playerID,
+        playerName: B.username,
+        action: responseAction("deal_accept", aAttacksC),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      asymmetricTarget.manager
+        .ledgerSnapshot()
+        .deals.filter((deal) => deal.status === "accepted"),
+    ).toHaveLength(2);
+  });
+
+  it("keeps proposal menus and apply-time equivalence gates in parity", () => {
+    const accept = (
+      harness: ReturnType<typeof registeredManager>,
+      recipient: StubSeat,
+      dealID: string,
+    ) => {
+      harness.beginStep(25);
+      expect(
+        harness.manager.applyDealAction({
+          agentID: recipient.agentID,
+          playerID: recipient.playerID,
+          playerName: recipient.username,
+          action: responseAction("deal_accept", dealID),
+          turnNumber: 25,
+        }).result.accepted,
+      ).toBe(true);
+    };
+    const optionsFor = (
+      manager: AgentDealManager,
+      seat: StubSeat,
+      others: ReturnType<typeof stubVisiblePlayer>[],
+    ) =>
+      manager.observationFor({
+        agentID: seat.agentID,
+        observation: stubObservation({ seat, others, turnNumber: 25 }),
+      })!.proposalOptions;
+
+    // Exact reciprocal trade-security is the same symmetric promise: neither
+    // the menu nor applyPropose may offer/accept it again.
+    const trade = registeredManager([A, B]);
+    const tradeID = trade.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "trade_security_pact"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    accept(trade, B, tradeID);
+    expect(
+      optionsFor(trade.manager, B, [stubVisiblePlayer(A)]).some(
+        (option) => option.terms.template === "trade_security_pact",
+      ),
+    ).toBe(false);
+    const duplicateTrade = trade.manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: proposeAction(A, "trade_security_pact"),
+      turnNumber: 25,
+    });
+    expect(duplicateTrade.result).toMatchObject({
+      accepted: false,
+      reason:
+        "an equivalent active trade_security_pact between this pair already exists",
+    });
+
+    // Reciprocal support reverses the obligor, so it is a distinct promise in
+    // both the offered menu and apply-time gate.
+    const support = registeredManager([A, B]);
+    const supportID = support.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "support_request"),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    accept(support, B, supportID);
+    const reciprocalSupport = optionsFor(support.manager, B, [
+      stubVisiblePlayer(A, { isFriendly: true }),
+    ]).find((option) => option.terms.template === "support_request");
+    expect(reciprocalSupport).toMatchObject({
+      recipientPlayerID: A.playerID,
+      terms: { goldAmount: "50000", troopAmount: 5000 },
+    });
+    expect(
+      support.manager.applyDealAction({
+        agentID: B.agentID,
+        playerID: B.playerID,
+        playerName: B.username,
+        action: proposeAction(A, "support_request"),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+
+    // Reverse joint promises remain distinct because the proposer is the
+    // obligor, both when they name the same target and a different target.
+    for (const expectedTarget of [C, D]) {
+      const joint = registeredManager([A, B, C, D]);
+      const jointID = joint.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: proposeAction(B, "joint_attack", {
+          targetID: C.playerID,
+          targetName: C.username,
+        }),
+        turnNumber: 0,
+      }).stamps.dealID as string;
+      accept(joint, B, jointID);
+      const reverseJoint = optionsFor(joint.manager, B, [
+        stubVisiblePlayer(A),
+        stubVisiblePlayer(C, {
+          tilesOwned: expectedTarget === C ? 900 : 100,
+        }),
+        stubVisiblePlayer(D, {
+          tilesOwned: expectedTarget === D ? 900 : 100,
+        }),
+      ]).find(
+        (option) =>
+          option.recipientPlayerID === A.playerID &&
+          option.terms.template === "joint_attack",
+      );
+      expect(reverseJoint?.terms.targetPlayerID).toBe(expectedTarget.playerID);
+      expect(
+        joint.manager.applyDealAction({
+          agentID: B.agentID,
+          playerID: B.playerID,
+          playerName: B.username,
+          action: proposeAction(A, "joint_attack", {
+            targetID: expectedTarget.playerID,
+            targetName: expectedTarget.username,
+          }),
+          turnNumber: 25,
+        }).result.accepted,
+      ).toBe(true);
+    }
+
+    // Symmetric pacts with distinct durations are distinct exact terms.
+    const duration = registeredManager([A, B]);
+    const longNap = duration.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "non_aggression_pact", { durationSteps: 20 }),
+      turnNumber: 0,
+    }).stamps.dealID as string;
+    accept(duration, B, longNap);
+    expect(
+      optionsFor(duration.manager, B, [stubVisiblePlayer(A)]).find(
+        (option) => option.terms.template === "non_aggression_pact",
+      )?.terms.durationSteps,
+    ).toBe(12);
+    expect(
+      duration.manager.applyDealAction({
+        agentID: B.agentID,
+        playerID: B.playerID,
+        playerName: B.username,
+        action: proposeAction(A, "non_aggression_pact"),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
   });
 
   it("resolves the withdraw-vs-accept same-step race deterministically by pass order", () => {

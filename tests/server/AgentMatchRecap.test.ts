@@ -291,6 +291,12 @@ describe("buildAgentMatchRecap", () => {
             "Cinder rejected Atlas's support request.",
           ),
           dealEvent(
+            107,
+            1250,
+            "deal_superseded",
+            "Blitz's acceptance was redundant; the reciprocal pact was already accepted.",
+          ),
+          dealEvent(
             104,
             1300,
             "deal_expired",
@@ -322,15 +328,17 @@ describe("buildAgentMatchRecap", () => {
       "deal_proposed",
       "deal_accepted",
       "deal_rejected",
+      "deal_superseded",
       "deal_expired",
       "deal_fulfilled",
       "deal_violated",
     ]);
-    expect(dealBeats).toHaveLength(6);
+    expect(dealBeats).toHaveLength(7);
     expect(dealBeats.map((beat) => beat.message).join(" ")).not.toContain(
       "Blitz became too dangerous",
     );
     expect(withDeals?.summary).toContain("1 deal proposal");
+    expect(withDeals?.summary).toContain("1 superseded deal");
     expect(withDeals?.summary).toContain("1 violated promise");
     expect(withDeals?.curatedDramaScore).toBe(baseline?.curatedDramaScore);
   });

@@ -1194,6 +1194,7 @@ export type AgentDealStatus =
   | "accepted"
   | "rejected"
   | "withdrawn"
+  | "superseded"
   | "expired";
 
 export type AgentDealObligationStatus =

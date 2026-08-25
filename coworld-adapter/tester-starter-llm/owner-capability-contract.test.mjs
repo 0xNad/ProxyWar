@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  OWNER_EVIDENCE_MAX_EVENTS_BY_KIND,
+  OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP,
+  OWNER_EVIDENCE_SATURATION_KIND,
+  OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS,
   OWNER_MESSAGE_MAX_CHARS,
   OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
   SPATIAL_VISIBILITY_MODEL,
@@ -1615,7 +1619,6 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
   const lines = [];
   const logEvidence = createOwnerCapabilityEvidenceLogger({
     emit: (line) => lines.push(line),
-    maxEventsPerKind: 1,
   });
   const body = "Hold the shared border exactly.";
   const digest = createHash("sha256").update(body, "utf8").digest("hex");
@@ -1654,7 +1657,6 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
     },
   };
   logEvidence(args);
-  logEvidence(args);
 
   assert.equal(lines.length, 4);
   assert.equal(
@@ -1689,4 +1691,226 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
   assert.ok(spatial.minimapSerializedUTF8Bytes > 0);
   assert.ok(spatial.minimapSerializedUTF8Bytes <= 4 * 1024);
   assert.equal("serializedUTF8Bytes" in spatial, false);
+});
+
+test("capability evidence capacity covers the complete supported horizon", () => {
+  assert.equal(OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS, 600);
+  assert.equal(OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP, 8);
+  assert.deepEqual(OWNER_EVIDENCE_MAX_EVENTS_BY_KIND, {
+    deal_selection: OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS,
+    message_selection: OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS,
+    message_observation:
+      OWNER_EVIDENCE_SUPPORTED_MAX_DECISION_STEPS *
+      OWNER_EVIDENCE_MAX_INBOUND_MESSAGES_PER_STEP,
+    spatial_observation: 1,
+  });
+});
+
+test("capability evidence retains observations beyond the old sample cap", () => {
+  const lines = [];
+  const logEvidence = createOwnerCapabilityEvidenceLogger({
+    emit: (line) => lines.push(line),
+  });
+  for (let offset = 0; offset < 65; offset += 8) {
+    const inboundMessages = Array.from(
+      { length: Math.min(8, 65 - offset) },
+      (_, localIndex) => {
+        const index = offset + localIndex + 1;
+        const senderIndex = localIndex % 3;
+        return {
+          messageEventID: `msg_00000000-0000-4000-8000-${index
+            .toString(16)
+            .padStart(12, "0")}`,
+          senderID: ["P_B", "P_C", "P_D"][senderIndex],
+          senderName: ["Rival B", "Rival C", "Rival D"][senderIndex],
+          turnNumber: index,
+          text: `message ${index}`,
+        };
+      },
+    );
+    logEvidence({
+      requestID: `req_${offset}`,
+      slot: 0,
+      actions: [primary],
+      observation: {
+        ownState: { playerID: "P_A" },
+        visiblePlayers: [],
+        nonCombat: { inboundMessages },
+      },
+      response: { selectedLegalActionId: primary.id },
+    });
+  }
+  const events = lines.map((line) =>
+    JSON.parse(line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", "")),
+  );
+  assert.equal(
+    events.filter((event) => event.kind === "message_observation").length,
+    65,
+  );
+  assert.equal(
+    events.some((event) => event.kind === OWNER_EVIDENCE_SATURATION_KIND),
+    false,
+  );
+});
+
+test("capability evidence emits one explicit marker when a kind saturates", () => {
+  const lines = [];
+  const logEvidence = createOwnerCapabilityEvidenceLogger({
+    emit: (line) => lines.push(line),
+    maxEventsByKind: {
+      deal_selection: 1,
+      message_selection: 1,
+      message_observation: 1,
+      spatial_observation: 1,
+    },
+  });
+  const evidenceInput = (requestID, messageEventID) => ({
+    requestID,
+    slot: 0,
+    actions: [primary, deal, message],
+    observation: {
+      ownState: { playerID: "P_A" },
+      visiblePlayers: [],
+      nonCombat: {
+        inboundMessages: [
+          {
+            messageEventID,
+            senderID: "P_B",
+            senderName: "Rival B",
+            turnNumber: 7,
+            text: "bounded evidence",
+          },
+        ],
+      },
+    },
+    response: {
+      selectedLegalActionId: primary.id,
+      selectedDealActionId: deal.id,
+      selectedMessageActionId: message.id,
+      messageText: "bounded evidence",
+    },
+  });
+  logEvidence(evidenceInput("req_1", firstMessageEventID));
+  logEvidence(evidenceInput("req_2", secondMessageEventID));
+  logEvidence(
+    evidenceInput(
+      "req_3",
+      "msg_00000000-0000-4000-8000-000000000003",
+    ),
+  );
+
+  const events = lines.map((line) =>
+    JSON.parse(line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", "")),
+  );
+  const saturated = events.filter(
+    (event) => event.kind === OWNER_EVIDENCE_SATURATION_KIND,
+  );
+  assert.deepEqual(
+    saturated.map((event) => event.saturatedKind).sort(),
+    ["deal_selection", "message_observation", "message_selection"],
+  );
+  assert.ok(saturated.every((event) => event.maximum === 1));
+});
+
+test("capability evidence retries a saturation marker after emit failure", () => {
+  const lines = [];
+  let saturationAttempts = 0;
+  const logEvidence = createOwnerCapabilityEvidenceLogger({
+    emit: (line) => {
+      const event = JSON.parse(
+        line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", ""),
+      );
+      if (
+        event.kind === OWNER_EVIDENCE_SATURATION_KIND &&
+        saturationAttempts++ === 0
+      ) {
+        throw new Error("injected saturation write failure");
+      }
+      lines.push(line);
+    },
+    maxEventsByKind: {
+      deal_selection: 1,
+      message_selection: 1,
+      message_observation: 1,
+      spatial_observation: 1,
+    },
+  });
+  const args = {
+    requestID: "req_saturation_retry",
+    slot: 0,
+    actions: [primary, deal],
+    observation: { ownState: { playerID: "P_A" }, visiblePlayers: [] },
+    response: {
+      selectedLegalActionId: primary.id,
+      selectedDealActionId: deal.id,
+    },
+    spawn: true,
+  };
+  logEvidence(args);
+  logEvidence(args);
+  logEvidence(args);
+  logEvidence(args);
+
+  const events = lines.map((line) =>
+    JSON.parse(line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", "")),
+  );
+  assert.equal(saturationAttempts, 2);
+  assert.equal(
+    events.filter(
+      (event) => event.kind === OWNER_EVIDENCE_SATURATION_KIND,
+    ).length,
+    1,
+  );
+});
+
+test("capability evidence retries the same inbound event after emit failure", () => {
+  const lines = [];
+  let observationAttempts = 0;
+  const logEvidence = createOwnerCapabilityEvidenceLogger({
+    emit: (line) => {
+      const event = JSON.parse(
+        line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", ""),
+      );
+      if (
+        event.kind === "message_observation" &&
+        observationAttempts++ === 0
+      ) {
+        throw new Error("injected observation write failure");
+      }
+      lines.push(line);
+    },
+  });
+  const args = {
+    requestID: "req_observation_retry",
+    slot: 0,
+    actions: [primary],
+    observation: {
+      ownState: { playerID: "P_A" },
+      visiblePlayers: [],
+      nonCombat: {
+        inboundMessages: [
+          {
+            messageEventID: firstMessageEventID,
+            senderID: "P_B",
+            senderName: "Rival B",
+            turnNumber: 7,
+            text: "retry this exact observation",
+          },
+        ],
+      },
+    },
+    response: { selectedLegalActionId: primary.id },
+    spawn: true,
+  };
+  logEvidence(args);
+  logEvidence(args);
+
+  const observations = lines
+    .map((line) =>
+      JSON.parse(line.replace("PROXYWAR_OWNER_CAPABILITY_EVIDENCE ", "")),
+    )
+    .filter((event) => event.kind === "message_observation");
+  assert.equal(observationAttempts, 2);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].messageEventID, firstMessageEventID);
 });

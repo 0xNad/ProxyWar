@@ -84,6 +84,7 @@ export type SpectatorEventKind =
   | "deal_proposed"
   | "deal_accepted"
   | "deal_rejected"
+  | "deal_superseded"
   | "deal_expired"
   | "deal_fulfilled"
   | "deal_violated";
@@ -130,6 +131,8 @@ export interface SpectatorEvent {
   secondaryName?: string | null;
   message: string;
   publicText?: string;
+  /** Linked accepted deal for an engine-authored redundant-accept terminal. */
+  supersededByDealID?: string;
   /**
    * The acting agent's OWN one-line rationale (structured-deal events only,
    * PROXYWAR_TUNE_STRUCTURED_DEALS): sanitized, <= 160 chars, absent when the
@@ -1297,12 +1300,12 @@ function tradeSeveredText(
  *
  * 1. Deal ACTION stamps (dealAction/dealID/dealPublicText, stamped by the
  *    deal manager on accepted propose/accept/reject records) become
- *    deal_proposed / deal_accepted (tone pact) / deal_rejected. Withdrawn
- *    proposals are silent by design.
+ *    deal_proposed / deal_accepted (tone pact) / deal_rejected. Explicit
+ *    withdrawals are silent by design.
  * 2. The dealComplianceEvent stamp (a JSON array of compact referee/lifecycle
- *    events authored by AgentDealCompliance) becomes deal_expired /
- *    deal_fulfilled / deal_violated (tone betrayal, high importance), with
- *    tone/importance/publicText carried in the stamp.
+ *    events authored by AgentDealCompliance) becomes deal_superseded /
+ *    deal_expired / deal_fulfilled / deal_violated (tone betrayal, high
+ *    importance), with tone/importance/publicText carried in the stamp.
  *
  * Force-resolution events emitted after the final record are ledger-only by
  * construction (no record exists to carry them) — the full ledger remains
@@ -1333,6 +1336,7 @@ const DEAL_LEDGER_EVENT_KINDS: ReadonlySet<string> = new Set([
   "deal_proposed",
   "deal_accepted",
   "deal_rejected",
+  "deal_superseded",
   "deal_expired",
   "deal_fulfilled",
   "deal_violated",
@@ -1378,6 +1382,10 @@ function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
             "not_applicable",
             "missing",
           ].includes(candidate.sourceAuditStatus));
+      const validSupersessionLink =
+        candidate.event !== "deal_superseded" ||
+        (typeof candidate.supersededByDealID === "string" &&
+          candidate.supersededByDealID.length > 0);
       return (
         typeof candidate.event === "string" &&
         DEAL_LEDGER_EVENT_KINDS.has(candidate.event) &&
@@ -1392,6 +1400,9 @@ function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
         validOptionalInteger("sourceTurnNumber") &&
         validOptionalBoolean("sourceFallbackUsed") &&
         validOptionalBoolean("sourceLlmPlannerDegraded") &&
+        (candidate.supersededByDealID === undefined ||
+          typeof candidate.supersededByDealID === "string") &&
+        validSupersessionLink &&
         validSourceAuditStatus &&
         (candidate.sourceAuditReason === undefined ||
           typeof candidate.sourceAuditReason === "string")
@@ -1489,6 +1500,9 @@ function addDealEvents(input: {
       // Re-sanitized at the boundary: this path also rebuilds telemetry from
       // an on-disk decisions.jsonl, so the stamp is untrusted input here.
       ...(claim !== null ? { statedReason: claim } : {}),
+      ...(typeof origin?.supersededByDealID === "string"
+        ? { supersededByDealID: origin.supersededByDealID }
+        : {}),
       actionKind,
       actionID: dedupeKey,
       ...provenance,
@@ -1610,6 +1624,7 @@ function buildCommunicationThreads(
         "deal_proposed",
         "deal_accepted",
         "deal_rejected",
+        "deal_superseded",
         "deal_expired",
         "deal_fulfilled",
         "deal_violated",

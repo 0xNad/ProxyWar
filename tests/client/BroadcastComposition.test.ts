@@ -261,6 +261,7 @@ describe("renderWarRoomFeed", () => {
       "deal_proposed",
       "deal_accepted",
       "deal_rejected",
+      "deal_superseded",
       "deal_expired",
       "deal_fulfilled",
       "deal_violated",
@@ -271,7 +272,7 @@ describe("renderWarRoomFeed", () => {
           id: `deal-${index}`,
           kind,
           headline: `SERVER FACT ${kind}`,
-          publicReason: index === 5 ? "I chose to break the pact" : null,
+          publicReason: kind === "deal_violated" ? "I chose to break the pact" : null,
         }),
       ),
     );

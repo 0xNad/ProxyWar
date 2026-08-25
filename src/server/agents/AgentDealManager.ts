@@ -5,6 +5,7 @@ import {
   dealProposedPublicText,
   dealRejectedPublicText,
   dealReliabilityByObligor,
+  dealSupersededPublicText,
   forceResolveDeals,
   judgeDealComplianceRecords,
   proposalLapsedEvent,
@@ -142,6 +143,16 @@ export interface AgentDealActionOutcome {
   stamps: Record<string, string | number | boolean | null>;
 }
 
+interface AgentDealConflictCandidate {
+  template: AgentDealTemplate;
+  proposerPlayerID: string;
+  recipientPlayerID: string;
+  durationSteps: number;
+  targetPlayerID?: string;
+  goldAmount?: bigint | string;
+  troopAmount?: number;
+}
+
 export interface AgentDealLedgerSnapshot {
   /** True only after match-end force resolution has completed. */
   finalized: boolean;
@@ -168,8 +179,9 @@ export interface AgentDealLedgerSnapshot {
   events: AgentDealLedgerEvent[];
   /**
    * Bounded public proof of validator-accepted diplomacy-slot selections. It
-   * carries server-authored offered IDs, the exact validated selection, and a
-   * manager-application boolean. Rejected agent input, reasons, prompts, and
+   * carries server-authored offered IDs, the exact validated selection, a
+   * manager-application boolean, and the bounded terminal cause/link for a
+   * redundant accept. Rejected agent input, free-text reasons, prompts, and
    * the primary action stay out.
    */
   actionEvidence: AgentDealActionEvidence[];
@@ -188,6 +200,10 @@ export interface AgentDealActionEvidence {
     | "deal_reject"
     | "deal_withdraw";
   managerApplied: boolean;
+  /** Engine-authored terminal cause for a validated but redundant accept. */
+  terminalCause?: "redundant_accept_superseded";
+  /** Exact accepted deal that made the selected proposal redundant. */
+  supersededByDealID?: string;
   sourceFallbackUsed: boolean;
   sourceLlmPlannerDegraded: boolean;
 }
@@ -318,13 +334,18 @@ export class AgentDealManager {
     this.registerSeat(input.agentID, ownState.playerID);
 
     const playerID = ownState.playerID;
+    // Executable view only: keep a blocked crossed proposal truthfully open
+    // in the ledger, but do not keep offering accept/reject after an equivalent
+    // pact became active. The proposer-facing outgoing view below deliberately
+    // remains unfiltered so its owner can explicitly withdraw the open offer.
     const incomingProposals = this.deals
       .filter(
         (deal) =>
           deal.status === "open" &&
           deal.recipientPlayerID === playerID &&
           deal.proposedAtStep < this.currentStep &&
-          this.currentStep <= deal.answerableThroughStep,
+          this.currentStep <= deal.answerableThroughStep &&
+          this.activeDealConflictFor(deal) === null,
       )
       .sort((a, b) => a.dealID.localeCompare(b.dealID))
       .slice(0, OBSERVATION_PROPOSAL_CAP)
@@ -450,6 +471,13 @@ export class AgentDealManager {
         if (!evidence.validation.accepted || !evidence.application.attempted) {
           throw new Error("accepted deal action evidence invariant failed");
         }
+        const supersededByDealID =
+          typeof record.decisionMetadata?.dealSupersededByDealID === "string"
+            ? record.decisionMetadata.dealSupersededByDealID
+            : null;
+        const terminallySuperseded =
+          record.decisionMetadata?.dealTerminalCause ===
+            "redundant_accept_superseded" && supersededByDealID !== null;
         return {
           sequence: record.sequence,
           turnNumber: record.turnNumber,
@@ -461,6 +489,12 @@ export class AgentDealManager {
           selectedActionID: evidence.validation.actionID,
           selectedActionKind: evidence.validation.actionKind,
           managerApplied: evidence.application.accepted,
+          ...(terminallySuperseded
+            ? {
+                terminalCause: "redundant_accept_superseded" as const,
+                supersededByDealID: supersededByDealID!,
+              }
+            : {}),
           sourceFallbackUsed: record.decisionMetadata?.fallbackUsed === true,
           sourceLlmPlannerDegraded:
             record.decisionMetadata?.llmPlannerDegraded === true,
@@ -627,12 +661,6 @@ export class AgentDealManager {
         `an open ${template} proposal to this recipient already exists`,
       );
     }
-    if (this.activeDealBetween(proposerPlayerID, recipientPlayerID, template)) {
-      return this.failure(
-        "propose",
-        `an active ${template} between this pair already exists`,
-      );
-    }
     if (
       this.activeDealCount(proposerPlayerID) >= MAX_ACTIVE_DEALS_PER_AGENT ||
       this.activeDealCount(recipientPlayerID) >= MAX_ACTIVE_DEALS_PER_AGENT
@@ -688,6 +716,12 @@ export class AgentDealManager {
     if (template === "support_request") {
       deal.goldAmount = DEAL_SUPPORT_GOLD_AMOUNT;
       deal.troopAmount = DEAL_SUPPORT_TROOP_AMOUNT;
+    }
+    if (this.activeDealConflictFor(deal) !== null) {
+      return this.failure(
+        "propose",
+        `an equivalent active ${template} between this pair already exists`,
+      );
     }
     // VIEWER-ONLY: the proposer's own one-line rationale for this offer. No
     // extra model call — the decision already produced it. Sanitized here,
@@ -854,6 +888,51 @@ export class AgentDealManager {
         },
       };
     }
+    const supersedingDeal = this.activeDealConflictFor(deal);
+    if (supersedingDeal !== null) {
+      deal.status = "superseded";
+      deal.supersededByDealID = supersedingDeal.dealID;
+      const publicText = dealSupersededPublicText(deal);
+      const event: AgentDealLedgerEvent = {
+        event: "deal_superseded",
+        dealID,
+        template: deal.template,
+        actorPlayerID,
+        actorName: deal.recipientName,
+        targetPlayerID: deal.proposerPlayerID,
+        targetName: deal.proposerName,
+        tone: "info",
+        importance: 42,
+        publicText,
+        supersededByDealID: supersedingDeal.dealID,
+        step: this.currentStep,
+      };
+      this.events.push(event);
+      // Use the same bounded queued channel as every other state-derived
+      // lifecycle fact. AgentLeagueMatch drains it onto this decision after
+      // applying the deal slot, so an already-pending compliance event and
+      // this terminal response are serialized together instead of competing
+      // for (and overwriting) the one dealComplianceEvent metadata key.
+      const pending = this.pendingStampsByAgentID.get(input.agentID) ?? [];
+      pending.push(event);
+      this.pendingStampsByAgentID.set(input.agentID, pending);
+      const reason =
+        `redundant accept superseded by equivalent accepted deal: ` +
+        supersedingDeal.dealID;
+      return {
+        result: { accepted: false, reason, submittedIntent: null },
+        stamps: {
+          dealAction: "accept",
+          dealID,
+          dealTemplate: deal.template,
+          dealCounterpartyID: deal.proposerPlayerID,
+          dealCounterpartyName: deal.proposerName,
+          dealApplyAccepted: false,
+          dealTerminalCause: "redundant_accept_superseded",
+          dealSupersededByDealID: supersedingDeal.dealID,
+        },
+      };
+    }
     if (
       deal.template === "support_request" &&
       metadata.supportFeasible !== true
@@ -876,26 +955,6 @@ export class AgentDealManager {
       return this.failure(
         "accept",
         `active-deal cap reached (${MAX_ACTIVE_DEALS_PER_AGENT} per agent)`,
-        dealID,
-      );
-    }
-    // Crossed proposals (A→B and B→A open at once) must not both activate:
-    // duplicate-template gating on propose alone cannot see a crossing pair,
-    // and two live copies of one pact would double every verdict and
-    // reliability count. Re-check at accept time; earlier acceptance in the
-    // pass wins, the loser fails loudly.
-    if (
-      this.activeDealBetween(
-        deal.proposerPlayerID,
-        deal.recipientPlayerID,
-        deal.template,
-      )
-    ) {
-      deal.respondedAtStep = null;
-      deal.respondedAtTurn = null;
-      return this.failure(
-        "accept",
-        `an active ${deal.template} already exists between these players`,
         dealID,
       );
     }
@@ -1051,21 +1110,53 @@ export class AgentDealManager {
     ).length;
   }
 
-  private activeDealBetween(
-    a: string,
-    b: string,
-    template: AgentDealTemplate,
-  ): boolean {
-    return this.deals.some(
-      (deal) =>
-        deal.status === "accepted" &&
-        deal.template === template &&
-        deal.obligations.some(
+  /**
+   * Whether accepting this still-open proposal would duplicate an active deal.
+   * Symmetric pacts conflict in either direction. One-sided commitments only
+   * conflict in the same direction with the same material terms: reversing a
+   * support request or joint attack changes the obligor, and changing a joint
+   * target changes the promise. This single predicate controls accept-time
+   * validation, applyPropose, proposalOptionsFor, and the recipient's
+   * executable incoming-proposal view so no gate can drift from another.
+   */
+  private activeDealConflictFor(
+    candidate: AgentDealConflictCandidate,
+  ): AgentDealState | null {
+    const conflict = this.deals.find((active) => {
+      if (
+        active.status !== "accepted" ||
+        active.template !== candidate.template ||
+        active.durationSteps !== candidate.durationSteps ||
+        !active.obligations.some(
           (obligation) => obligation.status === "pending",
-        ) &&
-        ((deal.proposerPlayerID === a && deal.recipientPlayerID === b) ||
-          (deal.proposerPlayerID === b && deal.recipientPlayerID === a)),
-    );
+        )
+      ) {
+        return false;
+      }
+      const sameDirection =
+        active.proposerPlayerID === candidate.proposerPlayerID &&
+        active.recipientPlayerID === candidate.recipientPlayerID;
+      const reverseDirection =
+        active.proposerPlayerID === candidate.recipientPlayerID &&
+        active.recipientPlayerID === candidate.proposerPlayerID;
+      if (
+        candidate.template === "non_aggression_pact" ||
+        candidate.template === "trade_security_pact"
+      ) {
+        return sameDirection || reverseDirection;
+      }
+      if (!sameDirection) {
+        return false;
+      }
+      if (candidate.template === "joint_attack") {
+        return active.targetPlayerID === candidate.targetPlayerID;
+      }
+      return (
+        `${active.goldAmount}` === `${candidate.goldAmount}` &&
+        active.troopAmount === candidate.troopAmount
+      );
+    });
+    return conflict ?? null;
   }
 
   /**
@@ -1203,11 +1294,21 @@ export class AgentDealManager {
         if (openFromMe.some((deal) => deal.template === template)) {
           continue;
         }
-        if (this.activeDealBetween(playerID, other.playerID, template)) {
-          continue;
-        }
         const terms = this.termsForTemplate(template, other, observation);
         if (terms === null) {
+          continue;
+        }
+        if (
+          this.activeDealConflictFor({
+            template,
+            proposerPlayerID: playerID,
+            recipientPlayerID: other.playerID,
+            durationSteps: terms.durationSteps,
+            targetPlayerID: terms.targetPlayerID,
+            goldAmount: terms.goldAmount,
+            troopAmount: terms.troopAmount,
+          }) !== null
+        ) {
           continue;
         }
         options.push({

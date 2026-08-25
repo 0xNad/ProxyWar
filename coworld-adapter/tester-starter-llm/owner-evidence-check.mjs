@@ -1,10 +1,13 @@
 import fs from "node:fs";
+import {
+  OWNER_EVIDENCE_MAX_EVENTS_BY_KIND,
+  OWNER_EVIDENCE_SATURATION_KIND,
+} from "./owner-capabilities.mjs";
 
 const PREFIX = "PROXYWAR_OWNER_CAPABILITY_EVIDENCE ";
 const MAX_LINE_BYTES = 8 * 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_FILES = 25;
-const MAX_EVENTS_PER_KIND_PER_FILE = 64;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const MESSAGE_EVENT_ID =
   /^msg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -15,6 +18,7 @@ const ALLOWED_KINDS = new Set([
   "message_selection",
   "message_observation",
   "spatial_observation",
+  OWNER_EVIDENCE_SATURATION_KIND,
 ]);
 const FORBIDDEN_KEYS = new Set([
   "messagetext",
@@ -76,6 +80,10 @@ const ALLOWED_KEYS = new Map([
       "minimapSerializedUTF8Bytes",
     ]),
   ],
+  [
+    OWNER_EVIDENCE_SATURATION_KIND,
+    new Set(["kind", "saturatedKind", "maximum"]),
+  ],
 ]);
 
 function fail(message) {
@@ -113,6 +121,19 @@ function exactEventSchema(event, file) {
   const allowed = ALLOWED_KEYS.get(event.kind);
   for (const key of Object.keys(event)) {
     if (!allowed.has(key)) fail(`${file}: unknown owner evidence field ${key}`);
+  }
+  if (event.kind === OWNER_EVIDENCE_SATURATION_KIND) {
+    const supportedMaximum =
+      OWNER_EVIDENCE_MAX_EVENTS_BY_KIND[event.saturatedKind];
+    if (
+      !Number.isSafeInteger(supportedMaximum) ||
+      !Number.isSafeInteger(event.maximum) ||
+      event.maximum < 0 ||
+      event.maximum > supportedMaximum
+    ) {
+      fail(`${file}: malformed owner evidence saturation marker`);
+    }
+    return;
   }
   if (
     !isBoundedString(event.requestID) ||
@@ -287,8 +308,14 @@ function readEvents(files) {
         fail(`${file}: forbidden raw/private evidence key`);
       }
       exactEventSchema(event, file);
+      if (event.kind === OWNER_EVIDENCE_SATURATION_KIND) {
+        fail(
+          `${file}: owner evidence saturated ${event.saturatedKind} at ${event.maximum}; complete supported-horizon evidence is unavailable`,
+        );
+      }
       const count = (perKind.get(event.kind) ?? 0) + 1;
-      if (count > MAX_EVENTS_PER_KIND_PER_FILE) {
+      const maximum = OWNER_EVIDENCE_MAX_EVENTS_BY_KIND[event.kind];
+      if (count > maximum) {
         fail(`${file}: too many ${event.kind} events`);
       }
       perKind.set(event.kind, count);
@@ -351,24 +378,41 @@ function joinedMessageChecks(events) {
       "message selection and recipient-observation evidence are both required",
     );
   }
-  const joinedObservationIDs = new Set();
+  const joinKey = ({
+    messageBodySHA256,
+    messageBodyUTF8Bytes,
+    messageBodyUTF16CodeUnits,
+    senderID,
+    ownPlayerID,
+  }) =>
+    JSON.stringify([
+      messageBodySHA256,
+      messageBodyUTF8Bytes,
+      messageBodyUTF16CodeUnits,
+      senderID,
+      ownPlayerID,
+    ]);
+  const observationsByJoin = new Map();
+  for (const observation of observations) {
+    const key = joinKey(observation);
+    const queue = observationsByJoin.get(key) ?? { ids: [], next: 0 };
+    queue.ids.push(observation.messageEventID);
+    observationsByJoin.set(key, queue);
+  }
   for (const selection of selections) {
-    const joinedObservation = observations.find(
-      (observation) =>
-        !joinedObservationIDs.has(observation.messageEventID) &&
-        observation.messageBodySHA256 === selection.messageBodySHA256 &&
-        observation.messageBodyUTF8Bytes === selection.messageBodyUTF8Bytes &&
-        observation.messageBodyUTF16CodeUnits ===
-          selection.messageBodyUTF16CodeUnits &&
-        observation.senderID === selection.ownPlayerID &&
-        observation.ownPlayerID === selection.selectedMessageRecipientID,
+    const queue = observationsByJoin.get(
+      joinKey({
+        ...selection,
+        senderID: selection.ownPlayerID,
+        ownPlayerID: selection.selectedMessageRecipientID,
+      }),
     );
-    if (!joinedObservation) {
+    if (!queue || queue.next >= queue.ids.length) {
       fail(
         `${selection.sourceFile}: no recipient observation joined the selected message digest`,
       );
     }
-    joinedObservationIDs.add(joinedObservation.messageEventID);
+    queue.next += 1;
   }
 }
 

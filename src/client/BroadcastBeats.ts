@@ -91,6 +91,8 @@ export interface AiLeagueSpectatorEvent {
   targetName: string | null;
   message: string;
   publicText?: string;
+  /** Exact accepted deal linked by an engine-authored supersession event. */
+  supersededByDealID?: string;
   /** Viewer-only agent-authored claim. Never merge this into publicText. */
   statedReason?: string;
   evidenceLevel?:
@@ -262,6 +264,7 @@ const AI_LEAGUE_DEAL_EVENT_KINDS = new Set<CuratedWarRoomEventKind>([
   "deal_proposed",
   "deal_accepted",
   "deal_rejected",
+  "deal_superseded",
   "deal_expired",
   "deal_fulfilled",
   "deal_violated",
