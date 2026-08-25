@@ -45,6 +45,8 @@ export function makeCommanderStage2Fixture(
   input: {
     reverseSources?: boolean;
     decisionSequence?: number;
+    validSpatial?: boolean;
+    absentSpatial?: boolean;
   } = {},
 ): CommanderStage2Fixture {
   const rivals = makeRivals();
@@ -115,6 +117,11 @@ export function makeCommanderStage2Fixture(
     } as unknown as AgentObservation["recentDecisions"][number],
   ];
   observation.notes = [RAW_MENU_CANARY];
+  if (input.absentSpatial) {
+    observation.spatial = undefined;
+  } else if (input.validSpatial) {
+    addValidCommanderOrientation(observation);
+  }
 
   const legalActions = makeLegalActions();
   if (input.reverseSources) {
@@ -165,6 +172,112 @@ export function makeCommanderStage2Fixture(
     exposedOptions,
     builtState,
   };
+}
+
+function addValidCommanderOrientation(observation: AgentObservation): void {
+  observation.mapInfo = {
+    name: "Commander orientation fixture",
+    width: 100,
+    height: 100,
+    tileRefEncoding: "row-major-y-width-plus-x",
+    coordinateFrame: {
+      origin: "top_left",
+      xIncreases: "east",
+      yIncreases: "south",
+    },
+  };
+  observation.spatial = {
+    schemaVersion: 5,
+    visibilityModel: "global-lockstep-public-map-v1",
+    ownShape: {
+      quadrant: "northwest",
+      compactness: "fragmented",
+      regionCount: 2,
+      largestRegionShare: 75,
+      regionAnalysis: "complete",
+      centroidBasis: "largest_region_border",
+      coastShare: 18,
+      largestNeighborBorderShare: 25,
+      centroid: { xPct: 37, yPct: 62 },
+    },
+    positionedAssets: {
+      analysis: "complete",
+      structures: [
+        {
+          ownerPlayerID: "SELF",
+          type: UnitType.City,
+          tile: 403,
+          x: 3,
+          y: 4,
+        },
+      ],
+      structuresTotal: 1,
+      structuresReturned: 1,
+      structuresTruncated: false,
+      warships: [],
+      warshipsTotal: 0,
+      warshipsReturned: 0,
+      warshipsTruncated: false,
+    },
+    minimap: {
+      schemaVersion: 1,
+      width: 24,
+      height: 12,
+      rows: [MINIMAP_CANARY, ...Array.from({ length: 11 }, () => "")],
+      legend: [],
+    },
+  };
+
+  const bearings = [
+    "north",
+    "northeast",
+    "east",
+    "southeast",
+    "south",
+    "southwest",
+    "west",
+    "northwest",
+  ] as const;
+  for (const player of observation.visiblePlayers) {
+    const ordinal = Number.parseInt(player.playerID.slice(1), 10);
+    player.bearing = bearings[(ordinal - 1) % bearings.length];
+    player.distanceClass = player.sharesBorder
+      ? "adjacent"
+      : ordinal % 2 === 0
+        ? "near"
+        : "far";
+    player.borderWithYou = player.sharesBorder
+      ? {
+          tiles: 10 + ordinal,
+          shareOfYourBorder: 25,
+          terrain: "land",
+          terrainBreakdown: {
+            plains: 10 + ordinal,
+            highland: 0,
+            mountain: 0,
+            shore: 0,
+          },
+          defensePostsCovering: 0,
+          defensePostFrontCoverage: {
+            covered: 0,
+            uncovered: 10 + ordinal,
+          },
+          underAttackHere: false,
+        }
+      : undefined;
+    player.bordersWith = [];
+    player.navalExposure = {
+      transportReachableOwnShoreTiles: ordinal,
+      ...(player.playerID === "P2"
+        ? {
+            nearestEnemyPort: {
+              bearing: "east" as const,
+              distanceClass: "near" as const,
+            },
+          }
+        : {}),
+    };
+  }
 }
 
 function makeRivals(): AgentVisiblePlayer[] {

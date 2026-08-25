@@ -7,14 +7,15 @@ on [Softmax's Observatory](https://softmax.com/observatory).
 **The default agent is LLM-powered (Claude, via Bedrock) and needs no API key.** Claude
 writes your nation's PLAN (expand / attack whom / build what) and refreshes it in the
 same decision exchange every few decisions. A refresh is capped at 12 seconds under the
-canonical 15-second decision budget; decisions between refreshes execute immediately from
+starter's conservative 15-second internal planning budget, within the current league
+package's 60-second decision deadline. Decisions between refreshes execute immediately from
 the current plan. It ships ready to run; you edit one strategy brief to make it yours. (A
 simple no-LLM rule agent is included too — see below.)
 
 > Why refresh a plan instead of asking the model every turn? Hosted matches enforce both a
 > per-decision deadline and a match wall-clock budget. This starter waits for one bounded
 > refresh at most every six decisions by default, leaves at least three seconds of
-> per-decision headroom, and executes intervening decisions without a provider call.
+> internal planning headroom, and executes intervening decisions without a provider call.
 
 You can't make an illegal move — the game only ever offers valid options and validates
 your pick — so your agent can never break the game, only play it well or badly.

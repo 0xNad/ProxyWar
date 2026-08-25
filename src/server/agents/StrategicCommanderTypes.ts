@@ -1,4 +1,10 @@
-import type { AgentGamePhase, AgentStrategyProfile } from "./AgentTypes";
+import type {
+  AgentGamePhase,
+  AgentOwnShape,
+  AgentSpatialBearing,
+  AgentSpatialQuadrant,
+  AgentStrategyProfile,
+} from "./AgentTypes";
 
 export const strategicOptionFamilies = [
   "expand",
@@ -146,6 +152,58 @@ export interface CommanderRivalState {
   iAmAttackingThem: boolean;
 }
 
+export interface CommanderOwnSpatialOrientation {
+  quadrant: AgentSpatialQuadrant;
+  compactness: NonNullable<AgentOwnShape["compactness"]> | null;
+  regionCount: number | null;
+  largestRegionShare: number | null;
+  regionAnalysis: AgentOwnShape["regionAnalysis"];
+  centroidBasis: AgentOwnShape["centroidBasis"];
+  coastShare: number;
+  largestNeighborBorderShare: number;
+  /** Normalized map percentages, not raw map or tile coordinates. */
+  centroid: { xPct: number; yPct: number };
+}
+
+export interface CommanderSharedFrontOrientation {
+  tiles: number;
+  shareOfYourBorder: number;
+  terrain: "land" | "coastal" | "mixed";
+  defenseCoverage: {
+    coveredTiles: number;
+    uncoveredTiles: number;
+  };
+  underAttackHere: boolean;
+}
+
+export interface CommanderNavalOrientation {
+  transportReachableOwnShoreTiles: number;
+  nearestEnemyPort: {
+    bearing: AgentSpatialBearing;
+    distanceClass: "near" | "far";
+  } | null;
+}
+
+export interface CommanderRivalSpatialOrientation {
+  /** Selected visible-rival identity only; never an action or intent id. */
+  playerID: string;
+  bearing: AgentSpatialBearing | null;
+  distanceClass: "adjacent" | "near" | "far";
+  sharedFront: CommanderSharedFrontOrientation | null;
+  naval: CommanderNavalOrientation;
+}
+
+/**
+ * Bounded schema-5 global-public-map context. Minimap, positioned assets, raw
+ * coordinates, executable ids, and recommendations are deliberately absent.
+ */
+export interface CommanderSpatialOrientation {
+  schemaVersion: 5;
+  visibilityModel: "global-lockstep-public-map-v1";
+  own: CommanderOwnSpatialOrientation;
+  rivals: CommanderRivalSpatialOrientation[];
+}
+
 export interface CommanderPlanProgressSnapshot {
   decisionsExecuted: number;
   tilesDelta: number;
@@ -199,6 +257,7 @@ export type CommanderRecentEvent =
 export interface CommanderState {
   self: CommanderSelfState;
   rivals: CommanderRivalState[];
+  orientation?: CommanderSpatialOrientation;
   plan: CommanderPlanSnapshot | null;
   recentEvents: string[];
   options: ExposedStrategicOption[];

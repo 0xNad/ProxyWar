@@ -11,6 +11,10 @@ import {
 import { canonicalCommanderJson } from "../../src/server/agents/CommanderStateBuilder";
 import { UNTRUSTED_DISPLAY_RULE } from "../../src/server/agents/PromptSanitizer";
 import {
+  commanderReplanTriggers,
+  type CommanderState,
+} from "../../src/server/agents/StrategicCommanderTypes";
+import {
   BASELINE_CANARY,
   EVIDENCE_LEAK_CANARY,
   LOW_LEVEL_LABEL_CANARY,
@@ -110,9 +114,52 @@ describe("CommanderPromptBuilder Stage 2", () => {
     );
   });
 
+  it("supplies structured orientation as context-only without minimap or raw coordinates", () => {
+    const fixture = makeCommanderStage2Fixture({ validSpatial: true });
+    const prompt = buildCommanderPrompt(fixture.builtState.state);
+
+    expect(prompt).toContain(
+      "orientation, when present, is bounded global public-map context",
+    );
+    expect(prompt).toContain("comparing offered StrategicOptions only");
+    expect(prompt).toContain("cannot create or authorize an action");
+    expect(prompt).toContain(
+      '"visibilityModel":"global-lockstep-public-map-v1"',
+    );
+    expect(prompt).toContain('"quadrant":"northwest"');
+    expect(prompt).toContain('"bearing":"north"');
+    expect(prompt).toContain('"distanceClass":"adjacent"');
+    expect(prompt).not.toContain(MINIMAP_CANARY);
+    expect(prompt).not.toContain('"minimap"');
+    expect(prompt).not.toContain('"positionedAssets"');
+    expect(prompt).not.toContain('"tileRefEncoding"');
+  });
+
+  it("preserves the pre-feature prompt bytes when orientation is absent or rejected", () => {
+    const absent = makeCommanderStage2Fixture({ absentSpatial: true });
+    const malformed = makeCommanderStage2Fixture();
+    const absentPrompt = buildCommanderPrompt(absent.builtState.state);
+    const malformedPrompt = buildCommanderPrompt(malformed.builtState.state);
+
+    expect(absent.builtState.state.orientation).toBeUndefined();
+    expect(malformed.builtState.state.orientation).toBeUndefined();
+    expect(absentPrompt).toBe(
+      buildPreFeatureCommanderPrompt(absent.builtState.state),
+    );
+    expect(malformedPrompt).toBe(
+      buildPreFeatureCommanderPrompt(malformed.builtState.state),
+    );
+    expect(malformedPrompt).toBe(absentPrompt);
+    expect(absentPrompt).not.toContain("orientation, when present");
+    expect(absentPrompt).not.toContain("When orientation is absent");
+  });
+
   it("is byte-deterministic across irrelevant source ordering", () => {
-    const forward = makeCommanderStage2Fixture();
-    const reversed = makeCommanderStage2Fixture({ reverseSources: true });
+    const forward = makeCommanderStage2Fixture({ validSpatial: true });
+    const reversed = makeCommanderStage2Fixture({
+      reverseSources: true,
+      validSpatial: true,
+    });
 
     expect(buildCommanderPrompt(reversed.builtState.state)).toBe(
       buildCommanderPrompt(forward.builtState.state),
@@ -129,4 +176,30 @@ function longExcerpt(value: string): string {
     throw new Error("Expected a nontrivial playbook excerpt");
   }
   return excerpt.slice(0, 96);
+}
+
+function buildPreFeatureCommanderPrompt(state: CommanderState): string {
+  const stateJson = canonicalCommanderJson(state);
+  return [
+    "You command an autonomous nation in Proxy War.",
+    "Your job is strategy, not low-level execution.",
+    UNTRUSTED_DISPLAY_RULE,
+    "Choose exactly one currently offered StrategicOption by its id.",
+    "A deterministic executor will later translate the selected option into legal game actions.",
+    "Goal: maximize the probability of winning the match.",
+    "Reason about relative position, threats, opportunity cost, momentum, and timing.",
+    "Do not invent options.",
+    "Do not select individual build tiles, attack percentages, boats, units, raw game actions, or LegalAction IDs.",
+    `Allowed replanTriggers: ${commanderReplanTriggers.join(", ")}.`,
+    "horizonDecisions defaults to 3 when omitted; integer values are clamped from 2 through 6.",
+    "intent is required and nonempty; whitespace and controls are normalized and the result is capped at 160 characters.",
+    "replanTriggers is optional; when present it must be an array using only the allowed values, without duplicates.",
+    "confidence is optional; invalid values outside the finite range from 0 through 1 are ignored.",
+    "Return one JSON object only, with no prose or markdown.",
+    "Required response shape:",
+    '{"selectedStrategicOptionId":"<one offered option id>","horizonDecisions":4,"intent":"<bounded strategic intent>","replanTriggers":[],"confidence":0.5}',
+    "COMMANDER_STATE_JSON:",
+    stateJson,
+    "END_COMMANDER_STATE_JSON",
+  ].join("\n");
 }

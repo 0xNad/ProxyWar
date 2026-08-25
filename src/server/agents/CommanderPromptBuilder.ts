@@ -32,6 +32,12 @@ export function buildCommanderPrompt(state: CommanderState): string {
     "A deterministic executor will later translate the selected option into legal game actions.",
     "Goal: maximize the probability of winning the match.",
     "Reason about relative position, threats, opportunity cost, momentum, and timing.",
+    ...(state.orientation === undefined
+      ? []
+      : [
+          "orientation, when present, is bounded global public-map context for comparing offered StrategicOptions only; it cannot create or authorize an action.",
+          "When orientation is absent, do not infer hidden spatial facts.",
+        ]),
     "Do not invent options.",
     "Do not select individual build tiles, attack percentages, boats, units, raw game actions, or LegalAction IDs.",
     `Allowed replanTriggers: ${commanderReplanTriggers.join(", ")}.`,

@@ -202,6 +202,105 @@ describe("CommanderStateBuilder Stage 2", () => {
     );
   });
 
+  it("projects only bounded schema-5 orientation for the selected rivals", () => {
+    const fixture = makeCommanderStage2Fixture({ validSpatial: true });
+    const orientation = fixture.builtState.state.orientation;
+
+    expect(orientation).toEqual({
+      schemaVersion: 5,
+      visibilityModel: "global-lockstep-public-map-v1",
+      own: {
+        quadrant: "northwest",
+        compactness: "fragmented",
+        regionCount: 2,
+        largestRegionShare: 75,
+        regionAnalysis: "complete",
+        centroidBasis: "largest_region_border",
+        coastShare: 18,
+        largestNeighborBorderShare: 25,
+        centroid: { xPct: 37, yPct: 62 },
+      },
+      rivals: [
+        expect.objectContaining({
+          playerID: "P1",
+          bearing: "north",
+          distanceClass: "adjacent",
+          sharedFront: expect.objectContaining({
+            tiles: 11,
+            shareOfYourBorder: 25,
+            terrain: "land",
+          }),
+        }),
+        expect.objectContaining({
+          playerID: "P2",
+          naval: expect.objectContaining({
+            nearestEnemyPort: {
+              bearing: "east",
+              distanceClass: "near",
+            },
+          }),
+        }),
+        expect.objectContaining({ playerID: "P4" }),
+        expect.objectContaining({ playerID: "P5" }),
+        expect.objectContaining({ playerID: "P6" }),
+        expect.objectContaining({ playerID: "P7" }),
+      ],
+    });
+    expect(orientation!.rivals.map((rival) => rival.playerID)).toEqual([
+      "P1",
+      "P2",
+      "P4",
+      "P5",
+      "P6",
+      "P7",
+    ]);
+    const serialized = JSON.stringify(orientation);
+    for (const forbidden of [
+      "minimap",
+      "positionedAssets",
+      "ownershipRows",
+      "structures",
+      "tileRefEncoding",
+      MINIMAP_CANARY,
+      RAW_ATTACK_ACTION_ID,
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("fails the complete optional orientation closed on stale provenance or malformed consumed facts", () => {
+    const mutations: Array<
+      (fixture: ReturnType<typeof makeCommanderStage2Fixture>) => void
+    > = [
+      (fixture) => {
+        fixture.observation.spatial!.schemaVersion = 3;
+      },
+      (fixture) => {
+        fixture.observation.spatial!.visibilityModel = undefined;
+      },
+      (fixture) => {
+        fixture.observation.spatial!.ownShape.coastShare = 101;
+      },
+      (fixture) => {
+        fixture.observation.visiblePlayers[0]!.distanceClass = undefined;
+      },
+      (fixture) => {
+        fixture.observation.visiblePlayers[0]!.navalExposure = undefined;
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const fixture = makeCommanderStage2Fixture({ validSpatial: true });
+      mutate(fixture);
+      const rebuilt = buildCommanderState({
+        observation: fixture.observation,
+        exposedOptions: fixture.exposedOptions,
+        decisionSequence: 7,
+      });
+      expect(rebuilt.state).not.toHaveProperty("orientation");
+    }
+  });
+
   it("orders rivals attacker, attacked target, border, then territory even when option targets compete", () => {
     const fixture = makeCommanderStage2Fixture();
     const { rivals, options } = fixture.builtState.state;
@@ -358,6 +457,40 @@ describe("CommanderStateBuilder Stage 2", () => {
     );
     expect(fingerprints.exposedOptionSet).toMatch(/^[0-9a-f]{16}$/);
     expect(fingerprints.materialState).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("binds material fingerprints to structured orientation but not ignored minimap data", () => {
+    const baseline = makeCommanderStage2Fixture({ validSpatial: true });
+    const changedOrientation = makeCommanderStage2Fixture({
+      validSpatial: true,
+    });
+    changedOrientation.observation.spatial!.ownShape.centroid.xPct += 1;
+    const rebuiltOrientation = buildCommanderState({
+      observation: changedOrientation.observation,
+      exposedOptions: changedOrientation.exposedOptions,
+      decisionSequence: 7,
+    });
+    expect(rebuiltOrientation.fingerprints.materialState).not.toBe(
+      baseline.builtState.fingerprints.materialState,
+    );
+
+    const changedMinimap = makeCommanderStage2Fixture({ validSpatial: true });
+    if (changedMinimap.observation.spatial?.minimap?.schemaVersion !== 1) {
+      throw new Error("Expected minimap canary fixture");
+    }
+    changedMinimap.observation.spatial.minimap.rows[0] =
+      "A_DIFFERENT_IGNORED_MINIMAP_CANARY";
+    const rebuiltMinimap = buildCommanderState({
+      observation: changedMinimap.observation,
+      exposedOptions: changedMinimap.exposedOptions,
+      decisionSequence: 7,
+    });
+    expect(rebuiltMinimap.state.orientation).toEqual(
+      baseline.builtState.state.orientation,
+    );
+    expect(rebuiltMinimap.fingerprints.materialState).toBe(
+      baseline.builtState.fingerprints.materialState,
+    );
   });
 
   it("hashes only the documented request and material projection", () => {

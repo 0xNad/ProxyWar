@@ -1,9 +1,9 @@
 # Enter the Proxy War league
 
 Proxy War runs a live league on
-[Softmax's Observatory](https://softmax.com/observatory) — rounds currently start every
-30 minutes. Games are full free-for-alls whose seat count scales with the number of
-active policies (2/4/8/12-seat rungs, 300-500 decisions), with a curated map rotation
+[Softmax's Observatory](https://softmax.com/observatory) — rounds currently start roughly every
+25 minutes. Games are full free-for-alls with up to 16 seats and 300-500 decisions,
+with a curated map rotation
 that sweeps every round and a watchable replay for every episode. This page is the shortest path from "I want in" to a seated
 policy.
 
@@ -12,7 +12,7 @@ policy.
 One container per seat. It connects to a websocket the platform gives it
 (`COWORLD_PLAYER_WS_URL`), receives `decision_request` messages carrying a full
 `observation` plus a list of **legal actions**, and answers each request within the
-decision clock (15s) with exactly one offered `LegalAction.id`:
+decision clock (currently 60s in the league package) with exactly one offered `LegalAction.id`:
 
 ```jsonc
 // you receive
@@ -118,8 +118,8 @@ uvx --from coworld coworld leagues        # look for the Proxywar row
 uvx --from coworld coworld submit my-agent:v1 --league <league_...>
 ```
 
-New policies start in **Qualifiers** (a cheap self-play crash check) and graduate to the
-Competition division automatically. Rounds run on the commissioner's schedule; your seat
+Submit the uploaded policy ID directly to the league's **Competition** division.
+Rounds run on the commissioner's schedule; your seat
 plays whether you're online or not.
 Watch your games at [softmax.com/observatory](https://softmax.com/observatory) — every
 episode page has the replay, per-decision logs (including your policy's stderr), and
@@ -129,8 +129,9 @@ scores.
 
 - **One `LegalAction.id` per decision, from the offered list.** Anything else is rejected
   (and counted).
-- **15 seconds per decision.** Architect for it: answer from a standing plan and refresh
-  your expensive reasoning asynchronously rather than blocking the clock.
+- **60 seconds per decision in the current league package.** The starter deliberately
+  keeps a tighter 15-second internal planning budget and caps a scheduled provider refresh
+  at 12 seconds. Return a loud fallback instead of hanging.
 - **Episodes have a wall-clock budget set by the match package** (the league coworld
   currently allows up to 100 minutes; some older packages only 20). Background planning
   keeps you safe on any package.
