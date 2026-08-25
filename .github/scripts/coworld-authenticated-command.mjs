@@ -287,13 +287,9 @@ if (command === "commander-public-base-materialize") {
     !/^ghcr\.io\/0xnad\/proxywar-commander-public-base@sha256:[0-9a-f]{64}$/.test(
       parsed.get("image") ?? "",
     ) ||
-    !/^proxywar-commander-public-base-v2-[0-9a-f]{64}$/.test(
-      parsed.get("policy-name") ?? "",
-    ) ||
+    !/^[0-9a-f]{64}$/.test(parsed.get("policy-name") ?? "") ||
     !/^[0-9a-f]{64}$/.test(parsed.get("policy-identity-sha256") ?? "") ||
-    !parsed
-      .get("policy-name")
-      ?.endsWith(`-${parsed.get("policy-identity-sha256")}`) ||
+    parsed.get("policy-name") !== parsed.get("policy-identity-sha256") ||
     !/^[0-9a-f]{40}$/.test(parsed.get("source-sha") ?? "") ||
     !/^[0-9a-f]{40}$/.test(parsed.get("source-tree-sha") ?? "") ||
     [
