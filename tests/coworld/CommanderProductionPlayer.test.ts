@@ -12,6 +12,7 @@ import {
   withCommanderProviderEvidence,
   withProductionCommanderSocial,
 } from "../../coworld-adapter/commander-starter/commander-player";
+import { CommanderBedrockProvider } from "../../coworld-adapter/commander-starter/commander-production-runtime";
 import {
   composeCoworldDecision,
   normalizeDecisionResponse,
@@ -48,6 +49,7 @@ describe("Commander production player", () => {
       }),
     ).toEqual({
       provider: "bedrock-sidecar",
+      callKind: "planner",
       requestedModel: "us.anthropic.claude-sonnet-4-6",
       responseModel: "claude-sonnet-4-6-20260801",
       requestID: "msg_01ABC",
@@ -56,7 +58,7 @@ describe("Commander production player", () => {
     });
   });
 
-  it("omits provider evidence on a degraded fallback decision", () => {
+  it("keeps provider evidence on a degraded decision after a real model call", () => {
     const evidence = commanderProviderEvidenceFromResponse({
       id: "msg_fallback",
       model: "claude-sonnet-4-6-20260801",
@@ -72,7 +74,47 @@ describe("Commander production player", () => {
         },
         evidence,
       ),
+    ).toHaveProperty("providerEvidence.callKind", "planner");
+  });
+
+  it("omits provider evidence on a fallback that made no model call", () => {
+    expect(
+      withCommanderProviderEvidence(
+        { type: "decision_response", selectedLegalActionId: "hold" },
+        {
+          actionID: "hold",
+          reason: null,
+          metadata: { llmPlannerDegraded: true },
+        },
+        undefined,
+      ),
     ).not.toHaveProperty("providerEvidence");
+  });
+
+  it("records a failed Bedrock call without inventing response usage", async () => {
+    const provider = new CommanderBedrockProvider(
+      "us-east-1",
+      "http://127.0.0.1:4567",
+    );
+    Object.defineProperty(provider, "client", {
+      value: {
+        messages: {
+          create: async () => {
+            throw new Error("provider unavailable");
+          },
+        },
+      },
+    });
+    const cursor = provider.evidenceCursor();
+
+    await expect(provider.complete("choose")).rejects.toThrow(
+      "provider unavailable",
+    );
+    expect(provider.providerEvidenceAfter(cursor)).toEqual({
+      provider: "bedrock-sidecar",
+      callKind: "planner",
+      requestedModel: "us.anthropic.claude-sonnet-4-6",
+    });
   });
 
   it("keeps bounded provider evidence inside retained Coworld decision evidence", () => {
@@ -107,6 +149,7 @@ describe("Commander production player", () => {
     const retained = String(decision.metadata.externalRawOutput);
 
     expect(retained).toContain('"providerEvidence"');
+    expect(retained).toContain('"callKind":"planner"');
     expect(retained).toContain('"inputTokens":321');
     expect(retained).toContain('"outputTokens":45');
     expect(retained).not.toContain("private model body");
