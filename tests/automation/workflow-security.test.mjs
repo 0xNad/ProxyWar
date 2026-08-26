@@ -38,6 +38,14 @@ const trustedReleasePolicy = JSON.parse(
   readFileSync(".github/automation/trusted-release-policy.json", "utf8"),
 );
 
+test("commissioner live reconcile uses the current Coworld status API client", () => {
+  assert.match(commissionerReconcile, /COWORLD_CLI_VERSION: "0\.1\.43"/);
+  assert.match(
+    commissionerReconcile,
+    /COWORLD_EXPECTED_VERSION: \$\{\{ env\.COWORLD_CLI_VERSION \}\}/,
+  );
+});
+
 test("privileged admission executes only protected main metadata code", () => {
   assert.match(admission, /pull_request_target:/);
   assert.match(admission, /ref: main/);

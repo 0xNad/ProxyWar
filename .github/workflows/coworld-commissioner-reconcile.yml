@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  COWORLD_CLI_VERSION: "0.1.42"
+  COWORLD_CLI_VERSION: "0.1.43"
   EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
 
 jobs:
@@ -78,6 +78,7 @@ jobs:
       - name: Dry-run and apply current league seed reconciliation
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          COWORLD_EXPECTED_VERSION: ${{ env.COWORLD_CLI_VERSION }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
