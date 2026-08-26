@@ -504,8 +504,36 @@ jobs:
             sleep 30
           done
           test "$READY" = true
+          PACKAGE_BOUND=false
+          for attempt in $(seq 1 20); do
+            node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$RUNNER_TEMP/patched-league.json"
+            if [ "$(jq -r .game.coworld_id "$RUNNER_TEMP/patched-league.json")" = "$PATCHED_COWORLD_ID" ]; then
+              PACKAGE_BOUND=true
+              break
+            fi
+            sleep 15
+          done
+          test "$PACKAGE_BOUND" = true
+
+          if [ "$(jq -r .commissioner_migration_version "$RUNNER_TEMP/patched-league.json")" = "$MIGRATION_BEFORE" ]; then
+            node .github/scripts/coworld-authenticated-command.mjs league list --json > "$RUNNER_TEMP/league-seeds.json"
+            node .github/scripts/coworld-commissioner-production.mjs build-league-rebind-plan \
+              "$RUNNER_TEMP/league-seeds.json" > "$RUNNER_TEMP/league-rebind-plan.json"
+            node .github/scripts/coworld-authenticated-command.mjs league rebind \
+              "$RUNNER_TEMP/league-rebind-plan.json" --json > "$RUNNER_TEMP/league-rebind-dry-run.json"
+            node .github/scripts/coworld-commissioner-production.mjs validate-league-rebind \
+              "$RUNNER_TEMP/league-rebind-plan.json" "$RUNNER_TEMP/league-rebind-dry-run.json" \
+              "$PATCHED_COWORLD_ID" dry-run > "$RUNNER_TEMP/league-rebind-dry-run-projection.json"
+            node .github/scripts/coworld-authenticated-command.mjs league rebind \
+              "$RUNNER_TEMP/league-rebind-plan.json" --commit --json > "$RUNNER_TEMP/league-rebind-commit.json"
+            node .github/scripts/coworld-commissioner-production.mjs validate-league-rebind-commit \
+              "$RUNNER_TEMP/league-rebind-plan.json" "$RUNNER_TEMP/league-rebind-commit.json" \
+              "$PATCHED_COWORLD_ID" "$RUNNER_TEMP/league-rebind-dry-run-projection.json" \
+              > "$RUNNER_TEMP/league-rebind-commit-projection.json"
+          fi
+
           BOUND=false
-          for attempt in $(seq 1 80); do
+          for attempt in $(seq 1 40); do
             node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$RUNNER_TEMP/patched-league.json"
             if [ "$(jq -r .game.coworld_id "$RUNNER_TEMP/patched-league.json")" = "$PATCHED_COWORLD_ID" ] && \
                [ "$(jq -r .commissioner_migration_version "$RUNNER_TEMP/patched-league.json")" != "$MIGRATION_BEFORE" ]; then

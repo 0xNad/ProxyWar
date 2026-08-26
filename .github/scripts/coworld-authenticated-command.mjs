@@ -21,6 +21,7 @@ const allowedCommands = new Set([
   "episode-logs",
   "episodes",
   "images",
+  "league",
   "leagues",
   "list",
   "next-version",
@@ -133,6 +134,25 @@ if (
   )
 ) {
   throw new Error("authenticated Coworld xp-request mode is malformed");
+}
+if (
+  command === "league" &&
+  !(
+    (args.length === 2 && args[0] === "list" && args[1] === "--json") ||
+    (args.length === 3 &&
+      args[0] === "rebind" &&
+      exactRunnerTempInput(args[1]) &&
+      args[1].endsWith(".json") &&
+      args[2] === "--json") ||
+    (args.length === 4 &&
+      args[0] === "rebind" &&
+      exactRunnerTempInput(args[1]) &&
+      args[1].endsWith(".json") &&
+      args[2] === "--commit" &&
+      args[3] === "--json")
+  )
+) {
+  throw new Error("authenticated Coworld league mode is malformed");
 }
 if (
   command === "episode-logs" &&

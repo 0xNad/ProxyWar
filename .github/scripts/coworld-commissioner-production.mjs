@@ -16,6 +16,9 @@ const PUBLIC_COMMISSIONER_IMAGE =
 const HOSTED_COMMISSIONER_IMAGE =
   /^(?:img_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|public\.ecr\.aws\/q5f4m8t9\/cogames@sha256:[0-9a-f]{64})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LEAGUE_SEED_ID =
+  /^lseed_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LEAGUE_KEY = /^[a-z0-9][a-z0-9_-]{0,119}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SAFE_LABEL = /^[A-Za-z0-9._:/-]{1,200}$/;
 const LOCAL_COMMISSIONER_IMAGE =
@@ -83,6 +86,125 @@ function positiveId(value, label) {
     `${label} must be a positive integer`,
   );
   return value;
+}
+
+function nonnegativeCount(value, label) {
+  invariant(
+    Number.isSafeInteger(value) && value >= 0,
+    `${label} must be a nonnegative integer`,
+  );
+  return value;
+}
+
+export function buildLeagueSeedRebindPlan(seeds) {
+  const matches = jsonArray(seeds, "Coworld league seeds").filter(
+    (seed) =>
+      seed?.coworld_name === COWORLD_NAME &&
+      seed?.league_id === LEAGUE_ID &&
+      seed?.enabled === true,
+  );
+  const seed = exactSingle(matches, "enabled ProxyWar league seed");
+  invariant(
+    LEAGUE_SEED_ID.test(seed?.id ?? ""),
+    "ProxyWar league seed id is malformed",
+  );
+  invariant(
+    LEAGUE_KEY.test(seed?.league_key ?? ""),
+    "ProxyWar league seed key is malformed",
+  );
+  return {
+    changes: [
+      {
+        seed_id: seed.id,
+        coworld_name: COWORLD_NAME,
+        league_key: seed.league_key,
+      },
+    ],
+  };
+}
+
+function rebindCounts(value, label) {
+  return {
+    divisions: nonnegativeCount(value?.divisions, `${label} divisions`),
+    memberships: nonnegativeCount(value?.memberships, `${label} memberships`),
+    submissions: nonnegativeCount(value?.submissions, `${label} submissions`),
+    activeRounds: nonnegativeCount(
+      value?.active_rounds,
+      `${label} active rounds`,
+    ),
+  };
+}
+
+export function validateLeagueSeedRebind({
+  plan,
+  response,
+  expectedCoworldId,
+  commit,
+  dryRunProjection = null,
+}) {
+  invariant(
+    COWORLD_ID.test(expectedCoworldId ?? ""),
+    "rebind Coworld id is malformed",
+  );
+  const change = exactSingle(
+    jsonArray(plan?.changes, "league rebind changes"),
+    "league rebind change",
+  );
+  invariant(
+    LEAGUE_SEED_ID.test(change?.seed_id ?? "") &&
+      change?.coworld_name === COWORLD_NAME &&
+      LEAGUE_KEY.test(change?.league_key ?? ""),
+    "league rebind plan is malformed",
+  );
+  invariant(response?.dry_run === !commit, "league rebind mode mismatch");
+  invariant(response?.applied === commit, "league rebind application mismatch");
+  const result = exactSingle(
+    jsonArray(response?.results, "league rebind results"),
+    "league rebind result",
+  );
+  invariant(result?.seed_id === change.seed_id, "league rebind seed mismatch");
+  invariant(result?.league_id === LEAGUE_ID, "league rebind league mismatch");
+  invariant(
+    result?.current?.coworld_name === COWORLD_NAME &&
+      result?.current?.league_key === change.league_key &&
+      result?.proposed?.coworld_name === COWORLD_NAME &&
+      result?.proposed?.league_key === change.league_key,
+    "league rebind binding mismatch",
+  );
+  invariant(
+    result?.commissioner_key === "platform",
+    "league rebind commissioner is not platform",
+  );
+  invariant(
+    result?.canonical_coworld_id === expectedCoworldId,
+    "league rebind canonical Coworld mismatch",
+  );
+  invariant(
+    Array.isArray(result?.blocking_reasons) &&
+      result.blocking_reasons.length === 0,
+    "league rebind is blocked",
+  );
+  const counts = rebindCounts(result?.counts, "league rebind");
+  const projection = {
+    seedId: change.seed_id,
+    leagueId: LEAGUE_ID,
+    leagueKey: change.league_key,
+    canonicalCoworldId: expectedCoworldId,
+    commissionerKey: "platform",
+    counts,
+    applied: commit,
+  };
+  if (dryRunProjection !== null) {
+    invariant(
+      dryRunProjection?.applied === false,
+      "league rebind dry-run projection is malformed",
+    );
+    invariant(
+      isDeepStrictEqual({ ...dryRunProjection, applied: true }, projection),
+      "league rebind changed between dry-run and commit",
+    );
+  }
+  return projection;
 }
 
 function exactObjectKeys(value, expected, label) {
@@ -1639,6 +1761,37 @@ function main(argv) {
   }
   if (command === "certification-state" && args.length === 1) {
     process.stdout.write(`${certificationState(readJson(args[0]))}\n`);
+    return;
+  }
+  if (command === "build-league-rebind-plan" && args.length === 1) {
+    print(buildLeagueSeedRebindPlan(readJson(args[0])));
+    return;
+  }
+  if (
+    command === "validate-league-rebind" &&
+    args.length === 4 &&
+    args[3] === "dry-run"
+  ) {
+    print(
+      validateLeagueSeedRebind({
+        plan: readJson(args[0]),
+        response: readJson(args[1]),
+        expectedCoworldId: args[2],
+        commit: args[3] === "commit",
+      }),
+    );
+    return;
+  }
+  if (command === "validate-league-rebind-commit" && args.length === 4) {
+    print(
+      validateLeagueSeedRebind({
+        plan: readJson(args[0]),
+        response: readJson(args[1]),
+        expectedCoworldId: args[2],
+        commit: true,
+        dryRunProjection: readJson(args[3]),
+      }),
+    );
     return;
   }
   if (command === "validate-final" && args.length === 8) {
