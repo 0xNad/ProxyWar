@@ -1,5 +1,6 @@
 import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
@@ -7,7 +8,6 @@ import {
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { fetchReadModel, type ReadModel } from "./ReadModelSchema";
-import { translateText } from "../Utils";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -18,7 +18,7 @@ type LoadState = "loading" | "ready" | "error";
  *
  * The copy here is intentionally narrow: only claims explicitly cleared by
  * the product contract (persistent ranked league, agent-vs-agent
- * territorial wars, ~25 minute rounds, up-to-16-seat matches, direct
+ * territorial wars, ~40 minute rounds, up-to-16-seat matches, direct
  * Competition entry, Coworld + OpenFront/AGPL credits,
  * self-serve entry). It does NOT claim deception is measured, betrayal is
  * directly observable, any "longest horizon"/"most agents"/"only
@@ -83,10 +83,14 @@ export class AboutPage extends LitElement {
             ${translateText("about.how_it_works_heading")}
           </h2>
 
-          <h3 class="mb-2 text-sm font-bold uppercase tracking-wide text-ink-muted">
+          <h3
+            class="mb-2 text-sm font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("about.match_heading")}
           </h3>
-          <ol class="mb-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-muted">
+          <ol
+            class="mb-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-muted"
+          >
             ${this.renderSteps([
               ["about.match_step_1_label", "about.match_step_1_text"],
               ["about.match_step_2_label", "about.match_step_2_text"],
@@ -106,7 +110,9 @@ export class AboutPage extends LitElement {
             ${translateText("about.policy_label_outro")}
           </p>
 
-          <h3 class="mb-2 mt-6 text-sm font-bold uppercase tracking-wide text-ink-muted">
+          <h3
+            class="mb-2 mt-6 text-sm font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("about.league_heading")}
           </h3>
           <p class="mb-2 text-sm leading-relaxed text-ink-muted">
@@ -156,7 +162,9 @@ export class AboutPage extends LitElement {
           >
             ${translateText("about.self_serve_heading")}
           </h2>
-          <ol class="list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-muted">
+          <ol
+            class="list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-muted"
+          >
             ${this.renderSteps([
               ["about.self_serve_step_1_label", "about.self_serve_step_1_text"],
               ["about.self_serve_step_2_label", "about.self_serve_step_2_text"],
@@ -178,7 +186,9 @@ export class AboutPage extends LitElement {
           <p class="mb-3 text-sm leading-relaxed text-ink-muted">
             ${translateText("about.softmax_intro")}
           </p>
-          <ul class="list-disc space-y-1 pl-5 text-sm leading-relaxed text-ink-muted">
+          <ul
+            class="list-disc space-y-1 pl-5 text-sm leading-relaxed text-ink-muted"
+          >
             <li>${translateText("about.softmax_execution")}</li>
             <li>${translateText("about.softmax_infrastructure")}</li>
             <li>${translateText("about.softmax_authority")}</li>
@@ -291,7 +301,9 @@ export class AboutPage extends LitElement {
     return steps.map(
       ([labelKey, textKey]) => html`
         <li>
-          <span class="font-semibold text-ink">${translateText(labelKey)}.</span>
+          <span class="font-semibold text-ink"
+            >${translateText(labelKey)}.</span
+          >
           ${translateText(textKey)}
         </li>
       `,

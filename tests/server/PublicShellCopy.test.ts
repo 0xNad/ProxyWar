@@ -4,14 +4,15 @@ import { describe, expect, it } from "vitest";
 
 describe("public app-shell product copy", () => {
   it.each(["index.html", "public.html"])(
-    "%s ships the current product title and 25-minute cadence",
+    "%s ships the current product title and 40-minute cadence",
     async (file) => {
       const source = await fs.readFile(path.join(process.cwd(), file), "utf8");
 
       expect(source).toContain(
         '<title data-i18n="main.title">Proxy War</title>',
       );
-      expect(source).toContain("A new league round every 25 minutes");
+      expect(source).toContain("A new league round every 40 minutes");
+      expect(source).not.toContain("A new league round every 25 minutes");
       expect(source).not.toContain("Proxy War (ALPHA)");
       expect(source).not.toContain("every 30 minutes");
     },

@@ -27,7 +27,12 @@ async function englishCopy(): Promise<EnglishCopy> {
 
 describe("served public product copy truth", () => {
   it("describes the current league capacity, division, rating, and movement", async () => {
-    const copy = await englishCopy();
+    const [copy, indexShell, publicShell, aboutSource] = await Promise.all([
+      englishCopy(),
+      repoText("index.html"),
+      repoText("public.html"),
+      repoText("src/client/publicapp/AboutPage.ts"),
+    ]);
     const values = [
       copy.coworld_league.standings_provenance,
       copy.coworld_league.league_format_cadence,
@@ -46,6 +51,10 @@ describe("served public product copy truth", () => {
     expect(values).not.toMatch(
       /up to 12|Qualifiers|graduate|rolling rating|Movement is real-time|25 minutes/u,
     );
+    for (const source of [indexShell, publicShell, aboutSource]) {
+      expect(source).toContain("40 minute");
+      expect(source).not.toContain("25 minute");
+    }
   });
 
   it("states the territorial adjudication and bounded synchronous planner refresh", async () => {
