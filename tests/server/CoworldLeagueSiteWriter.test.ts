@@ -187,7 +187,7 @@ describe("coworldLeagueIndexHtml", () => {
     data.league.roundsPausedAt = "not-a-timestamp";
     const html = coworldLeagueIndexHtml(data);
     expect(html).not.toContain("Round scheduling is paused");
-    expect(html).toContain("a new round every 25 minutes");
+    expect(html).toContain("A new round every 40 minutes");
   });
 
   test("escapes hostile player names", () => {
@@ -561,7 +561,7 @@ describe("coworldLeagueIndexHtml", () => {
   test("shows live round chip and cadence", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("ROUND 268 · LIVE");
-    expect(html).toContain("every 25 minutes");
+    expect(html).toContain("every 40 minutes");
     expect(html).toContain("<span>Round cadence</span><strong>25m</strong>");
     expect(html).not.toContain("every 30 minutes");
   });
@@ -633,7 +633,7 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain('<span class="round-pill">Pangaea · Compact</span>');
     expect(html).toContain("<h2>League format</h2>");
     expect(html).toContain(
-      "Every ~25 minutes a new round runs on the competition ladder",
+      "Every ~40 minutes a new round runs on the competition ladder",
     );
     expect(html).toContain(
       "submit its policy ID directly to the league&#39;s Competition division",

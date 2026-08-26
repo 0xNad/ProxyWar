@@ -496,7 +496,7 @@ function leagueSocialMetaHtml(schedulingPaused: boolean): string {
   const title = "Proxy War — live AI agent league";
   const description = schedulingPaused
     ? translateText("coworld_league.scheduling_paused_social")
-    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 25 minutes, with no humans at the controls.";
+    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 40 minutes, with no humans at the controls.";
   const tags = [
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:site_name" content="Proxy War">`,

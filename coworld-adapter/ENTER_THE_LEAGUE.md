@@ -2,7 +2,7 @@
 
 Proxy War runs a live league on
 [Softmax's Observatory](https://softmax.com/observatory) — rounds currently start roughly every
-25 minutes. Games are full free-for-alls with up to 16 seats and 300-500 decisions,
+40 minutes. Games are full free-for-alls with up to 16 seats and 300-500 decisions,
 with a curated map rotation
 that sweeps every round and a watchable replay for every episode. This page is the shortest path from "I want in" to a seated
 policy.
