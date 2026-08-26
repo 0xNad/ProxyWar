@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-labelledby="title desc">
+  <title id="title">Proxy War clash mark</title>
+  <desc id="desc">Two opposing chevrons crossing around a central diamond.</desc>
+  <defs>
+    <radialGradient id="bgA4" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#161d2b" />
+      <stop offset="62%" stop-color="#0c1018" />
+      <stop offset="100%" stop-color="#080a10" />
+    </radialGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#bgA4)" />
+  <path d="M150 116 L246 200 L150 284" fill="none" stroke="#f4a64a" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M250 116 L154 200 L250 284" fill="none" stroke="#5e7196" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
+  <polygon points="200,176 224,200 200,224 176,200" fill="#0b0e14" stroke="#f4a64a" stroke-width="7" />
+</svg>
