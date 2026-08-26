@@ -524,8 +524,10 @@ try {
             ]
           : command === "commander-xp-run-episode"
             ? ["run-episode", ...args]
-            : command === "commander-xp-certify"
+          : command === "commander-xp-certify"
               ? ["certify", ...args]
+              : command === "league"
+                ? ["--elevated", "league", ...args]
               : [command, ...args];
   const result = spawnSync(executable, executableArgs, {
     env: childEnv,
