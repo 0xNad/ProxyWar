@@ -576,36 +576,12 @@ describe("deterministic comms text obeys the server contract", () => {
     },
   );
 
-  it.each(STARTER_FILES)(
-    "%s uses wording distinct from the LLM starter, so a replay shows who spoke",
-    async (file) => {
-      const { MESSAGE_REPLIES, MESSAGE_OPENERS } = await commsFor(file);
-      const llmSource = await readStarter(LLM_STARTER_FILE);
-      const llm = new Function(
-        [
-          extractConst(llmSource, "MESSAGE_REPLIES"),
-          extractConst(llmSource, "MESSAGE_OPENERS"),
-          "return { MESSAGE_REPLIES, MESSAGE_OPENERS };",
-        ].join("\n"),
-      )() as {
-        MESSAGE_REPLIES: Record<string, string>;
-        MESSAGE_OPENERS: Record<string, string>;
-      };
-      const llmTexts = new Set([
-        ...Object.values(llm.MESSAGE_REPLIES),
-        ...Object.values(llm.MESSAGE_OPENERS),
-      ]);
-      for (const text of [
-        ...Object.values(MESSAGE_REPLIES),
-        ...Object.values(MESSAGE_OPENERS),
-      ]) {
-        expect(
-          llmTexts.has(text),
-          `shares wording with llm-player: ${text}`,
-        ).toBe(false);
-      }
-    },
-  );
+  it("keeps deterministic templates out of the LLM starter", async () => {
+    const llmSource = await readStarter(LLM_STARTER_FILE);
+    expect(llmSource).not.toContain("const MESSAGE_REPLIES");
+    expect(llmSource).not.toContain("const MESSAGE_OPENERS");
+    expect(llmSource).toContain("authorOpenEndedMessage");
+  });
 
   it.each(STARTER_FILES)(
     "%s reads no clock and rolls no dice in its comms routine",

@@ -33,7 +33,6 @@ const STARTER_FILES = [
   path.join("coworld-adapter", "src", "starter-player.mjs"),
   path.join("coworld-adapter", "tester-starter", "starter-player.mjs"),
   path.join("coworld-adapter", "tester-starter-llm", "starter-player.mjs"),
-  path.join("coworld-adapter", "tester-starter-llm", "llm-player.mjs"),
 ];
 
 function extractFunction(source: string, name: string): string {

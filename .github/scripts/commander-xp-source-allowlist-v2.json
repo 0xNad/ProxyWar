@@ -137,6 +137,7 @@
   "coworld-adapter/tester-starter-llm/README.md",
   "coworld-adapter/tester-starter-llm/launch.sh",
   "coworld-adapter/tester-starter-llm/llm-player.mjs",
+  "coworld-adapter/tester-starter-llm/open-ended-message.d.mts",
   "coworld-adapter/tester-starter-llm/open-ended-message.mjs",
   "coworld-adapter/tester-starter-llm/owner-capabilities.d.mts",
   "coworld-adapter/tester-starter-llm/owner-capabilities.mjs",
