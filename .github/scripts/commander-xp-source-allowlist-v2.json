@@ -46,6 +46,7 @@
   ".github/workflows/commander-xp-external-seal.yml",
   ".github/workflows/commander-xp-provision.yml",
   ".github/workflows/coworld-commissioner-production.yml",
+  ".github/workflows/coworld-commissioner-reconcile.yml",
   ".github/workflows/coworld-emergency-league-pause.yml",
   ".github/workflows/coworld-production.yml",
   "OWNER-UPGRADE.md",
