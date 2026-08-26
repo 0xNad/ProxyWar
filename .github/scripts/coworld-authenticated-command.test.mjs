@@ -125,17 +125,20 @@ test("runs only exact league seed inventory and rebind commands", () => {
       assert.equal(result.status, 0, result.stderr);
     }
     const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
-    assert.match(lines[1], /^coworld\|league list --json\|.+\|$/);
+    assert.match(
+      lines[1],
+      /^coworld\|--elevated league list --json\|.+\|$/,
+    );
     assert.match(
       lines[3],
       new RegExp(
-        `^coworld\\|league rebind ${escapeRegex(plan)} --json\\|.+\\|$`,
+        `^coworld\\|--elevated league rebind ${escapeRegex(plan)} --json\\|.+\\|$`,
       ),
     );
     assert.match(
       lines[5],
       new RegExp(
-        `^coworld\\|league rebind ${escapeRegex(plan)} --commit --json\\|.+\\|$`,
+        `^coworld\\|--elevated league rebind ${escapeRegex(plan)} --commit --json\\|.+\\|$`,
       ),
     );
   });
