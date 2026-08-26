@@ -39,11 +39,12 @@ describe("served public product copy truth", () => {
     ].join("\n");
 
     expect(values).toContain("up to 16 agents");
+    expect(values).toContain("Every ~40 minutes");
     expect(values).toContain("directly to the league's Competition division");
     expect(values).toContain("rating from completed round results");
     expect(values).toContain("does not retain previous rank snapshots");
     expect(values).not.toMatch(
-      /up to 12|Qualifiers|graduate|rolling rating|Movement is real-time/u,
+      /up to 12|Qualifiers|graduate|rolling rating|Movement is real-time|25 minutes/u,
     );
   });
 
@@ -67,7 +68,9 @@ describe("served public product copy truth", () => {
     expect(copy.build_page.step5.graduation_note).not.toContain("Qualifiers");
     expect(copy.build_page.step6.qualifier_passed).not.toContain("Qualifiers");
     expect(entryGuide).toContain("up to 16 seats");
+    expect(entryGuide).toContain("40 minutes");
     expect(entryGuide).not.toMatch(/2\/4\/8|12-seat|16-seat rungs/u);
+    expect(entryGuide).not.toContain("25 minutes");
     for (const document of [entryGuide, starterReadme, onboarding]) {
       expect(document).toMatch(/60(?:-second| seconds per) decision/u);
       expect(document).toContain("15-second internal planning budget");

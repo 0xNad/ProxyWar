@@ -97,9 +97,11 @@ test("production secrets are isolated to a protected main environment job", () =
   );
 });
 
-test("emergency league pause is operator-only, exact-source, and fail-closed", () => {
+test("emergency league scheduling control is operator-only, exact-source, and fail-closed", () => {
   assert.match(emergencyLeaguePause, /workflow_dispatch:/);
   assert.match(emergencyLeaguePause, /source_sha:\n\s+description:/);
+  assert.match(emergencyLeaguePause, /action:\n\s+description:/);
+  assert.match(emergencyLeaguePause, /options:\n\s+- pause\n\s+- resume/);
   assert.doesNotMatch(
     emergencyLeaguePause,
     /pull_request:|pull_request_target:|schedule:/,
@@ -138,8 +140,10 @@ test("emergency league pause is operator-only, exact-source, and fail-closed", (
   );
   assert.match(
     emergencyLeaguePause,
-    /\/leagues\/\$\{leagueID\}\/rounds-paused`, \{ paused: true \}/,
+    /\/leagues\/\$\{leagueID\}\/rounds-paused`, \{ paused: desiredPaused \}/,
   );
+  assert.match(emergencyLeaguePause, /action === "pause"/);
+  assert.match(emergencyLeaguePause, /after\.rounds_paused_at === null/);
   assert.match(emergencyLeaguePause, /league\.id !== leagueID/);
   assert.match(emergencyLeaguePause, /after\.rounds_paused_at/);
   assert.match(emergencyLeaguePause, /flag: "wx"/);
