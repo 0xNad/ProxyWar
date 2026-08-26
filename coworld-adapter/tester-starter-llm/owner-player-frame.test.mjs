@@ -247,7 +247,7 @@ async function runPlayer(playerFile, request) {
 }
 
 for (const playerFile of PLAYER_FILES) {
-  test(`${playerFile} emits all three independent exact slots`, async () => {
+  test(`${playerFile} preserves exact independent slot authority`, async () => {
     const request = capabilityRequest();
     const response = await runPlayer(playerFile, request);
     const offered = new Set(
@@ -256,10 +256,18 @@ for (const playerFile of PLAYER_FILES) {
     assert.equal(response.type, "decision_response");
     assert.ok(offered.has(response.selectedLegalActionId));
     assert.ok(offered.has(response.selectedDealActionId));
-    assert.equal(response.selectedMessageActionId, "message:P_B");
-    assert.equal(typeof response.messageText, "string");
-    assert.ok(response.messageText.length > 0);
-    assert.ok(response.messageText.length <= 280);
+    if (playerFile === "starter-player.mjs") {
+      assert.equal(response.selectedMessageActionId, "message:P_B");
+      assert.equal(typeof response.messageText, "string");
+      assert.ok(response.messageText.length > 0);
+      assert.ok(response.messageText.length <= 280);
+    } else {
+      // This harness deliberately provides no Bedrock response. The LLM path
+      // must stay silent rather than substituting deterministic negotiation.
+      assert.equal("selectedMessageActionId" in response, false);
+      assert.equal("messageText" in response, false);
+      assert.equal(response.llmPlannerDegraded, true);
+    }
   });
 
   test(`${playerFile} preserves absent-field compatibility`, async () => {
