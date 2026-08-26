@@ -40,6 +40,7 @@ import {
   parseMatchNarrativeSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
+  readRecentRoundEpisodeRows,
   resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
@@ -899,61 +900,96 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   if (division === null) {
     throw new Error(`League ${options.leagueId} has no readable division`);
   }
-  const [standingsRaw, championMembershipRead, replayRead, roundIntegrityRead] =
-    await Promise.all([
-      coworldJson(["results", division.id]),
-      // Results retain the policy label that owns the historical rating. Fetch
-      // current champion memberships separately instead of relabeling that score.
-      coworldJson([
-        "memberships",
-        "-d",
-        division.id,
-        "--active-only",
-        "--champions-only",
-        "--limit",
-        "1000",
-      ])
-        .then((value) => ({ ok: true as const, value }))
-        .catch((error: unknown) => {
-          log(
-            `champion memberships unavailable; publishing qualified rating rows only: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-          return { ok: false as const };
-        }),
-      coworldJson([
-        "replays",
-        "-d",
-        division.id,
-        "--limit",
-        String(
-          options.recoverPinnedArtifacts ? 1000 : options.episodeMetaLimit,
-        ),
-      ])
-        .then((value) => ({ ok: true as const, value }))
-        .catch((error: unknown) => {
-          log(
-            `replay feed unavailable; retaining last published battles: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-          return { ok: false as const };
-        }),
-      // Ranking integrity is not a replay property. Read ALL recent
-      // episode-request rows independently so missing replay URLs/downloads stay
-      // quarantined to replayFeedStale.
-      coworldJson(["episodes", "-d", division.id, "--limit", "1000"])
-        .then((value) => ({ ok: true as const, value }))
-        .catch((error: unknown) => {
-          log(
-            `round-integrity episode rows unavailable; retaining last verified assessment: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-          return { ok: false as const };
-        }),
-    ]);
+  const [
+    standingsRaw,
+    championMembershipRead,
+    divisionReplayRead,
+    divisionRoundIntegrityRead,
+  ] = await Promise.all([
+    coworldJson(["results", division.id]),
+    // Results retain the policy label that owns the historical rating. Fetch
+    // current champion memberships separately instead of relabeling that score.
+    coworldJson([
+      "memberships",
+      "-d",
+      division.id,
+      "--active-only",
+      "--champions-only",
+      "--limit",
+      "1000",
+    ])
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error: unknown) => {
+        log(
+          `champion memberships unavailable; publishing qualified rating rows only: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { ok: false as const };
+      }),
+    coworldJson([
+      "replays",
+      "-d",
+      division.id,
+      "--limit",
+      String(options.recoverPinnedArtifacts ? 1000 : options.episodeMetaLimit),
+    ])
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error: unknown) => {
+        log(
+          `replay feed unavailable; retaining last published battles: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { ok: false as const };
+      }),
+    // Ranking integrity is not a replay property. Read ALL recent
+    // episode-request rows independently so missing replay URLs/downloads stay
+    // quarantined to replayFeedStale.
+    coworldJson(["episodes", "-d", division.id, "--limit", "1000"])
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error: unknown) => {
+        log(
+          `round-integrity episode rows unavailable; retaining last verified assessment: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { ok: false as const };
+      }),
+  ]);
+
+  let replayRead = divisionReplayRead;
+  let roundIntegrityRead = divisionRoundIntegrityRead;
+  if (!replayRead.ok || !roundIntegrityRead.ok) {
+    const fallback = await readRecentRoundEpisodeRows({
+      roundsRaw,
+      readCoworldJson: coworldJson,
+      minimumRows: Math.max(
+        options.episodeMetaLimit,
+        league.episodesPerRound ?? 1,
+      ),
+      maximumRounds: options.roundsShown,
+    });
+    if (fallback.latestRoundReadable && fallback.rows.length > 0) {
+      const value = { entries: fallback.rows };
+      if (!replayRead.ok) {
+        replayRead = { ok: true as const, value };
+        log(
+          `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s) after the division-wide feed failed`,
+        );
+      }
+      if (!roundIntegrityRead.ok) {
+        roundIntegrityRead = { ok: true as const, value };
+        log(
+          `round-integrity feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
+        );
+      }
+    } else {
+      log(
+        `round-scoped episode fallback could not read the latest completed round; retaining old replay and integrity evidence (${fallback.failedRoundIds.length} failed round read(s))`,
+      );
+    }
+  }
 
   const standings = buildStandingRows(
     standingsRaw,

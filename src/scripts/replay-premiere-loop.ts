@@ -9,6 +9,7 @@ import {
   minimumAvailableDiskBytes,
   removeRetentionPinOwner,
 } from "../server/agents/CoworldLeagueArtifactRetention";
+import { readRecentRoundEpisodeRows } from "../server/agents/CoworldLeagueMirrorCore";
 import {
   LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
   latestPremierePointerPath,
@@ -115,7 +116,12 @@ const execFileAsync = promisify(execFile);
 const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;
 const MAX_REPLAY_BYTES = 256 * MIB;
-const COWORLD_READ_VERBS = new Set(["rounds", "replays", "divisions"]);
+const COWORLD_READ_VERBS = new Set([
+  "rounds",
+  "replays",
+  "episodes",
+  "divisions",
+]);
 const MAX_TERMINAL_BACKFILL_JOURNAL_BYTES = 64 * MIB;
 const MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS = 100_000;
 
@@ -869,34 +875,49 @@ interface DivisionReplays {
   rawById: Map<string, Record<string, unknown>>;
 }
 
+function divisionReplaysFromRaw(raw: unknown): DivisionReplays {
+  const rows = parseLoopReplayRows(raw);
+  const rawById = new Map<string, Record<string, unknown>>();
+  for (const entry of asArray(raw)) {
+    if (isRecord(entry) && typeof entry.id === "string") {
+      rawById.set(entry.id, entry);
+    }
+  }
+  return { rows, rawById };
+}
+
 async function fetchDivisionReplays(
   config: LoopConfig,
 ): Promise<DivisionReplays> {
-  // Over-fetch (limit 60) with bounded retry against the known replay-feed
-  // pagination flake; a transient short page must not drop the target round.
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const raw = await coworldRead(
+  try {
+    return divisionReplaysFromRaw(
+      await coworldRead(
         ["replays", "-d", config.divisionId, "--limit", "60"],
         config,
-      );
-      const rows = parseLoopReplayRows(raw);
-      const rawById = new Map<string, Record<string, unknown>>();
-      for (const entry of asArray(raw)) {
-        if (isRecord(entry) && typeof entry.id === "string") {
-          rawById.set(entry.id, entry);
-        }
-      }
-      return { rows, rawById };
-    } catch (error) {
-      lastError = error;
-      log(`replay feed attempt ${attempt + 1} failed: ${errorMessage(error)}`);
+      ),
+    );
+  } catch (divisionError) {
+    log(
+      `division replay feed failed; trying recent completed rounds: ${errorMessage(divisionError)}`,
+    );
+    const roundsRaw = await coworldRead(
+      ["rounds", "-l", config.leagueId, "--limit", "10"],
+      config,
+    );
+    const fallback = await readRecentRoundEpisodeRows({
+      roundsRaw,
+      readCoworldJson: (args) => coworldRead(args, config),
+      minimumRows: 60,
+      maximumRounds: 10,
+    });
+    if (!fallback.latestRoundReadable || fallback.rows.length === 0) {
+      throw divisionError;
     }
+    log(
+      `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
+    );
+    return divisionReplaysFromRaw({ entries: fallback.rows });
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("replay feed unavailable");
 }
 
 interface RawReplayFacts {

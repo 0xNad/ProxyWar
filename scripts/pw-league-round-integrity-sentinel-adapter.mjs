@@ -6,7 +6,7 @@
  */
 
 const DEFAULT_ROUND_LIMIT = "10";
-const DEFAULT_EPISODE_LIMIT = "1000";
+const DEFAULT_EPISODE_LIMIT = "100";
 
 function asRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -110,19 +110,28 @@ async function readLatestRoundAssessment({
       divisionId: null,
     };
   }
+  const roundId = nonemptyString(asRecord(latestRound)?.id);
+  if (roundId === null) {
+    return {
+      evaluation: {
+        kind: "incomplete",
+        reason: "latest_round_id_unreadable",
+      },
+      divisionId: division.id,
+    };
+  }
   const episodeRowsRaw = await coworld([
     "episodes",
-    "-d",
-    division.id,
+    "-r",
+    roundId,
     "--limit",
     DEFAULT_EPISODE_LIMIT,
   ]);
-  const roundId = nonemptyString(asRecord(latestRound)?.id);
   const episodeRows = detector.episodeRowsByRoundId(episodeRowsRaw);
   return {
     evaluation: detector.evaluateCoworldRoundIntegrity({
       round: latestRound,
-      episodeRows: roundId === null ? [] : (episodeRows.get(roundId) ?? []),
+      episodeRows: episodeRows.get(roundId) ?? [],
       settings,
     }),
     divisionId: division.id,
