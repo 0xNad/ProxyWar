@@ -1,5 +1,5 @@
-name: Coworld emergency league pause
-run-name: Pause Proxy War league at ${{ inputs.source_sha }}
+name: Coworld emergency league scheduling control
+run-name: ${{ inputs.action == 'resume' && 'Resume' || 'Pause' }} Proxy War league at ${{ inputs.source_sha }}
 
 on:
   workflow_dispatch:
@@ -8,6 +8,13 @@ on:
         description: Exact protected-main SHA with successful push CI
         required: true
         type: string
+      action:
+        description: Pause or resume new round scheduling
+        required: true
+        type: choice
+        options:
+          - pause
+          - resume
 
 concurrency:
   group: proxywar-coworld-production
@@ -21,8 +28,8 @@ env:
   EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
 
 jobs:
-  pause:
-    name: Pause exact Proxy War league
+  control:
+    name: Set exact Proxy War league scheduling state
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:
@@ -32,12 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          ACTION: ${{ inputs.action }}
         run: |
           set -euo pipefail
           test "$GITHUB_ACTOR" = "0xNad"
           test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test "$GITHUB_REF" = "refs/heads/main"
+          case "$ACTION" in pause|resume) ;; *) exit 1 ;; esac
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
@@ -45,12 +54,13 @@ jobs:
             > "$RUNNER_TEMP/ci-runs.json"
           test "$(jq --arg sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha==$sha and .event=="push" and .status=="completed" and .conclusion=="success")] | length' "$RUNNER_TEMP/ci-runs.json")" -ge 1
 
-      - name: Pause scheduling and verify readback
+      - name: Set scheduling state and verify readback
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          RECEIPT_PATH: ${{ runner.temp }}/proxywar-league-pause.json
+          ACTION: ${{ inputs.action }}
+          RECEIPT_PATH: ${{ runner.temp }}/proxywar-league-scheduling-control.json
         run: |
           set -euo pipefail
           test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
@@ -60,6 +70,7 @@ jobs:
           const apiRoot = "https://softmax.com/api/observatory/v2";
           const leagueID = process.env.EXPECTED_LEAGUE_ID;
           const sourceSHA = process.env.SOURCE_SHA;
+          const action = process.env.ACTION;
           const token = process.env.COWORLD_API_TOKEN;
           const receiptPath = process.env.RECEIPT_PATH;
           const idPattern = /^league_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -67,6 +78,7 @@ jobs:
 
           if (!idPattern.test(leagueID ?? "")) throw new Error("invalid fixed league id");
           if (!shaPattern.test(sourceSHA ?? "")) throw new Error("invalid source sha");
+          if (!(action === "pause" || action === "resume")) throw new Error("invalid scheduling action");
           if (typeof token !== "string" || token.length === 0) throw new Error("missing Coworld credential");
           if (typeof receiptPath !== "string" || receiptPath.length === 0) throw new Error("missing receipt path");
 
@@ -103,17 +115,24 @@ jobs:
           };
 
           const before = await readLeague();
-          if (before.rounds_paused_at === null) {
-            await requestJSON("POST", `/leagues/${leagueID}/rounds-paused`, { paused: true });
+          const desiredPaused = action === "pause";
+          const alreadyDesired = desiredPaused
+            ? typeof before.rounds_paused_at === "string"
+            : before.rounds_paused_at === null;
+          if (!alreadyDesired) {
+            await requestJSON("POST", `/leagues/${leagueID}/rounds-paused`, { paused: desiredPaused });
           }
           const after = await readLeague();
-          if (typeof after.rounds_paused_at !== "string" || after.rounds_paused_at.length === 0) {
-            throw new Error("Coworld league did not enter the paused state");
+          const reachedDesired = desiredPaused
+            ? typeof after.rounds_paused_at === "string" && after.rounds_paused_at.length > 0
+            : after.rounds_paused_at === null;
+          if (!reachedDesired) {
+            throw new Error(`Coworld league did not enter the ${desiredPaused ? "paused" : "running"} state`);
           }
 
           const receipt = {
             schemaVersion: 1,
-            action: "pause_scheduling",
+            action: desiredPaused ? "pause_scheduling" : "resume_scheduling",
             sourceSHA,
             leagueID,
             previousRoundsPausedAt: before.rounds_paused_at,
@@ -130,10 +149,10 @@ jobs:
           console.log(JSON.stringify(receipt));
           NODE
 
-      - name: Retain sanitized pause receipt
+      - name: Retain sanitized scheduling-control receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: proxywar-league-pause-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/proxywar-league-pause.json
+          name: proxywar-league-${{ inputs.action }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proxywar-league-scheduling-control.json
           if-no-files-found: error
           retention-days: 7
