@@ -226,7 +226,6 @@ function cleanID(s) {
     .trim()
     .slice(0, 180);
 }
-const MESSAGE_MAX_CHARS = 280;
 // Message bodies need their own cleaner. clean() caps at 60 chars and strips
 // every non-ASCII byte, which would silently truncate a 280-char message and
 // destroy any non-English one — the server explicitly accepts Unicode text.
@@ -247,7 +246,7 @@ function cleanMessage(s) {
       )
       .replace(/\s+/gu, " ")
       .trim()
-      .slice(0, MESSAGE_MAX_CHARS)
+      .slice(0, 280)
   );
 }
 function normalizeDealPolicies(value) {
