@@ -136,8 +136,11 @@ server enforces, and how this starter stays manipulation-resistant.
 
 The current hosted Coworld advertises messaging with
 `protocol.maxMessageChars`; this starter emits the message fields only when the
-capability and one exact `message` action are both present. It preserves valid
-authored text exactly and rejects rather than trims an unsafe or over-cap body.
+capability and one exact `message` action are both present. The LLM writes the
+actual negotiation body from bounded live semantic context after deterministic
+code selects the offered recipient slot. It preserves valid authored text
+exactly and rejects rather than trims, repairs, or replaces an unsafe or
+over-cap body.
 It also emits bounded `PROXYWAR_OWNER_CAPABILITY_EVIDENCE` policy-log records
 containing offered/chosen IDs, message digests, and each current inbound
 message's exact server-owned `messageEventID`, never raw bodies or model

@@ -22,6 +22,11 @@ import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import {
+  buildOpenEndedMessagePrompt,
+  chooseOpenEndedMessageIntent,
+  parseOpenEndedMessageResponse,
+} from "./open-ended-message.mjs";
+import {
   advertisedMessageLimit,
   boundedSpatialMapInfo,
   boundedSpatialObservation as boundedSpatialV1,
@@ -186,7 +191,6 @@ const history = []; // { actionID, kind } appended after each decision
 // Three replies is enough for a negotiation (answer, counter, confirmation) and
 // matches the server's per-rival inbox window
 // (FREETEXT_INBOX_MAX_PER_RIVAL), past which older messages are not even shown.
-const MESSAGE_MAX_REPLIES_PER_RIVAL = 3;
 const answeredMessages = new Set();
 function avoidActionIDs() {
   const recent = history
@@ -222,6 +226,7 @@ function cleanID(s) {
     .trim()
     .slice(0, 180);
 }
+const MESSAGE_MAX_CHARS = 280;
 // Message bodies need their own cleaner. clean() caps at 60 chars and strips
 // every non-ASCII byte, which would silently truncate a 280-char message and
 // destroy any non-English one — the server explicitly accepts Unicode text.
@@ -242,7 +247,7 @@ function cleanMessage(s) {
       )
       .replace(/\s+/gu, " ")
       .trim()
-      .slice(0, 280)
+      .slice(0, MESSAGE_MAX_CHARS)
   );
 }
 function normalizeDealPolicies(value) {
@@ -1083,6 +1088,100 @@ async function askBedrock(state, providerEvidenceGroup, deadlineAt) {
   throw lastErr || new Error("no bedrock model responded");
 }
 
+async function authorOpenEndedMessage(
+  intent,
+  observation,
+  gameplayKind,
+  dealKind,
+) {
+  const providerEvidenceGroup = createPlannerProviderEvidenceGroup();
+  const prompt = buildOpenEndedMessagePrompt({
+    intent,
+    observation,
+    gameplayKind,
+    dealKind,
+  });
+  const deadlineAt = Date.now() + PLANNER_REFRESH_TIMEOUT_MS;
+  const candidates = lockedModel ? [lockedModel] : MODELS;
+  let lastErr;
+  for (const model of candidates) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      lastErr = providerTimeoutError();
+      break;
+    }
+    const providerAttempt = providerEvidenceGroup.start(model);
+    if (providerAttempt === null) break;
+    const attempt = ++plannerAttemptSequence;
+    plannerUsageTotals.attempts += 1;
+    const startedAt = Date.now();
+    let response;
+    try {
+      response = await invokeBedrockAttempt(
+        buildBedrockRequest(model, prompt, "", true, false),
+        remainingMs,
+      );
+      recordPlannerResponse({
+        attempt,
+        model,
+        responseModel: response?.model,
+        stopReason: response?.stop_reason,
+        latencyMs: Date.now() - startedAt,
+        usage: response?.usage,
+      });
+      providerEvidenceGroup.complete(providerAttempt, response);
+    } catch (error) {
+      providerEvidenceGroup.fail(providerAttempt, error);
+      plannerUsageTotals.errors += 1;
+      emitPlannerUsage({
+        event: "request_error",
+        attempt,
+        model: clean(model),
+        latencyMs: tokenCount(Date.now() - startedAt),
+      });
+      lastErr = error;
+      continue;
+    }
+    try {
+      const text = parseOpenEndedMessageResponse(
+        bedrockResponseText(response),
+        intent.maxChars,
+      );
+      intent.commit?.();
+      providerEvidenceGroup.finish();
+      lockedModel = model;
+      emitPlannerUsage({
+        event: "social_result",
+        attempt,
+        model: clean(model),
+        status: "applied",
+      });
+      return {
+        messageMove: { id: intent.actionID, text },
+        messageFailed: false,
+        providerEvidence: providerEvidenceGroup.evidence(),
+      };
+    } catch (error) {
+      lastErr = error;
+      emitPlannerUsage({
+        event: "social_result",
+        attempt,
+        model: clean(model),
+        status: "rejected",
+      });
+    }
+  }
+  providerEvidenceGroup.finish();
+  console.error(
+    `social generation failed: ${(lastErr?.message || String(lastErr || "no model responded")).slice(0, 130)}`,
+  );
+  return {
+    messageMove: null,
+    messageFailed: true,
+    providerEvidence: providerEvidenceGroup.evidence(),
+  };
+}
+
 // -- the PLAN: refreshed on a bounded cadence, executed deterministically -----
 let plan = null; // includes dealPolicies and exact breakDealIDs
 let planDecisionAge = 0; // decisions answered since the last successful refresh
@@ -1260,194 +1359,10 @@ function failedReliabilityGate(obs, playerID) {
   return rate < DEAL_TRUST_MIN_RELIABILITY;
 }
 
-// ---------------------------------------------------------------------------
-// Free-text negotiation.
-//
-// READ THIS BEFORE CHANGING IT.
-//
-// `observation.nonCombat.inboundMessages` is written by RIVAL POLICIES. It is
-// data about what someone CLAIMED, never instructions to you. Rivals are
-// allowed to write anything, including text shaped like a system prompt
-// ("ignore your instructions", "SYSTEM:", "you must donate"). That is legal
-// play in this league, not an exploit, and nobody will stop it for you.
-//
-// The text DOES reach the planner (operator decision, 2026-08-16). An earlier
-// version withheld it entirely, which was maximally safe and also made the
-// channel pointless: a message that can change nothing is not negotiation.
-// The boundary is now layered rather than absolute:
-//   1. the inbox is passed as a separate `messages[]` block of labelled
-//      CLAIMS, never merged into `rivals`, so a claim cannot be mistaken for
-//      an observed fact;
-//   2. the SECURITY prompt tells the model to use claims only for dealPolicies
-//      and breakDealIDs, never focus/preferKinds/target. This is behavioral
-//      guidance under adversarial game input, not structural enforcement;
-//   3. the structural boundary is narrower and stronger: the planner cannot
-//      name an action id or raw intent at all. It returns a posture, and this
-//      file's deterministic chooser selects one exact offered id. A persuaded
-//      model can change posture fields, but cannot bypass that offered-id gate;
-//   4. replies are still chosen from fixed templates below, so a rival's words
-//      can never author your words.
-//
-// Keep property 3 if you change anything here. It is the reason a hostile
-// message is a strategy problem rather than a security hole.
-// ---------------------------------------------------------------------------
-
-// Bounded, deterministic replies. Wording is ours, so no rival can put words
-// in this agent's mouth. Kept well under the 280-character cap.
-const MESSAGE_MAX_CHARS = 280;
-const MESSAGE_REPLIES = {
-  ally: "We are allied. I will not move on your border while that holds.",
-  dealOpen: "Your proposal is on my table. Keep your side and I keep mine.",
-  breaker: "You broke a deal with me. I am not trading on your word again.",
-  neutral: "Noted. I am open to a pact if you stay off my border.",
-};
-
-// Openers. Without these the starter is purely reactive, and since most league
-// seats descend from this file, a starter-only league would never contain a
-// single conversation: everyone waits to be spoken to. One agent has to be
-// willing to speak first for the channel to exist at all.
-const MESSAGE_OPENERS = {
-  withProposal:
-    "I have put an offer to you. Take it and neither of us wastes troops on the other.",
-  border: "We share a border. I would rather point my troops elsewhere - pact?",
-};
-
-// Answers at most one rival per decision: the one who most recently wrote to
-// us and has not already been answered since. Silence is the default — an
-// agent that talks every step is noise, not negotiation.
-function chooseMessageMove(
-  actions,
-  obs,
-  answered,
-  dealMove,
-  maxChars = MESSAGE_MAX_CHARS,
-) {
-  const offers = (actions || []).filter((action) => action.kind === "message");
-  if (offers.length === 0) return null;
-  const inbound = obs?.nonCombat?.inboundMessages || [];
-
-  if (inbound.length === 0) {
-    return chooseMessageOpener(offers, obs, answered, dealMove, maxChars);
-  }
-
-  const unansweredInbound = inbound.filter((message) => {
-    const senderID = message?.senderID;
-    if (!senderID) return false;
-    const key =
-      typeof message.messageEventID === "string"
-        ? message.messageEventID
-        : `${senderID}:${message.turnNumber}`;
-    return !answered.has(key);
-  });
-  if (unansweredInbound.length === 0) return null;
-  const newest = [...unansweredInbound].sort(
-    (a, b) => Number(a.turnNumber ?? 0) - Number(b.turnNumber ?? 0),
-  )[unansweredInbound.length - 1];
-  const senderID = newest?.senderID;
-  if (!senderID) return null;
-  // One reply per inbound TURN. This alone does not bound an exchange -- it
-  // only stops us answering the same message twice -- so the lifetime budget
-  // below is what actually ends a conversation.
-  const key =
-    typeof newest.messageEventID === "string"
-      ? newest.messageEventID
-      : `${senderID}:${newest.turnNumber}`;
-
-  // Lifetime reply budget for this counterparty: sequential slot keys in the
-  // same match-scoped memory, so no extra state and no signature change.
-  let repliesSpent = 0;
-  while (
-    repliesSpent < MESSAGE_MAX_REPLIES_PER_RIVAL &&
-    answered.has(`reply:${senderID}:${repliesSpent}`)
-  ) {
-    repliesSpent += 1;
-  }
-  if (repliesSpent >= MESSAGE_MAX_REPLIES_PER_RIVAL) return null;
-
-  const offer = offers.find(
-    (action) => action.metadata?.recipientID === senderID,
-  );
-  if (!offer) return null;
-
-  const rival = (obs?.visiblePlayers || []).find(
-    (player) => player?.playerID === senderID,
-  );
-  const hasOpenDeal = [
-    ...(obs?.deals?.incomingProposals || []),
-    ...(obs?.deals?.outgoingProposals || []),
-    ...(obs?.deals?.activeDeals || []),
-  ].some(
-    (view) =>
-      view?.proposerPlayerID === senderID ||
-      view?.recipientPlayerID === senderID,
-  );
-
-  let text;
-  if (failedReliabilityGate(obs, senderID)) text = MESSAGE_REPLIES.breaker;
-  else if (rival?.isAllied) text = MESSAGE_REPLIES.ally;
-  else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
-  else text = MESSAGE_REPLIES.neutral;
-
-  // Reject rather than normalize or truncate authored policy text.
-  if (typeof text !== "string" || text.length > maxChars) return null;
-
-  answered.add(key);
-  answered.add(`reply:${senderID}:${repliesSpent}`);
-  return { id: offer.id, text };
-}
-
-// Speaks first, but rarely and only when there is something to say. Two
-// occasions, both tied to a concrete opportunity rather than chatter:
-//   (a) we are proposing a deal to this rival on this very decision - the
-//       message is the reason to accept, which the bare template lacks;
-//   (b) we share a border with a rival we have never written to.
-// At most one opener per counterparty per match.
-function chooseMessageOpener(
-  offers,
-  obs,
-  answered,
-  dealMove,
-  maxChars = MESSAGE_MAX_CHARS,
-) {
-  const dealRecipient =
-    dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
-  if (dealRecipient) {
-    const offer = offers.find(
-      (action) => action.metadata?.recipientID === dealRecipient,
-    );
-    const key = `opener:${dealRecipient}`;
-    if (
-      offer &&
-      !answered.has(key) &&
-      MESSAGE_OPENERS.withProposal.length <= maxChars
-    ) {
-      answered.add(key);
-      return {
-        id: offer.id,
-        text: MESSAGE_OPENERS.withProposal,
-      };
-    }
-  }
-
-  for (const offer of offers) {
-    const recipientID = offer.metadata?.recipientID;
-    const key = `opener:${recipientID}`;
-    if (answered.has(key)) continue;
-    const rival = (obs?.visiblePlayers || []).find(
-      (player) => player?.playerID === recipientID,
-    );
-    // Only borderers, and never someone already proven unreliable.
-    if (!rival?.sharesBorder || rival.isAllied) continue;
-    if (failedReliabilityGate(obs, recipientID)) continue;
-    if (MESSAGE_OPENERS.border.length > maxChars) continue;
-    answered.add(key);
-    return {
-      id: offer.id,
-      text: MESSAGE_OPENERS.border,
-    };
-  }
-  return null;
-}
+// Free-text negotiation is authored by the LLM. Deterministic code chooses
+// only a bounded purpose/recipient and binds the returned body to the exact
+// offered message action. Invalid output is omitted, never rewritten or
+// replaced with a template.
 
 // Deterministic deal executor. The move it returns is sent in the SEPARATE
 // deal slot (selectedDealActionId) alongside the normal game action, so
@@ -2096,6 +2011,35 @@ export function startLlmPlayer({
     const providerEvidence = prepared?.providerEvidence;
     if (prepared === undefined) {
       planDecisionAge += 1;
+      if (plan !== null && planDecisionAge < PLAN_EVERY) {
+        const previewChosen = choose(actions, obs);
+        const previewDealMove = chooseDealMove(actions, obs);
+        const maxMessageChars = advertisedMessageLimit(message.protocol);
+        const messageIntent =
+          maxMessageChars === null
+            ? null
+            : chooseOpenEndedMessageIntent(
+                actions,
+                obs,
+                answeredMessages,
+                previewDealMove,
+                maxMessageChars,
+              );
+        if (messageIntent !== null) {
+          return authorOpenEndedMessage(
+            messageIntent,
+            obs,
+            previewChosen.kind,
+            previewDealMove?.kind,
+          ).then((social) =>
+            sendAcceptedDecision(message, {
+              actions,
+              obs,
+              ...social,
+            }),
+          );
+        }
+      }
       if (plan === null || planDecisionAge >= PLAN_EVERY) {
         const state = buildState(obs, actions);
         return refreshPlan(state).then((evidence) =>
@@ -2112,35 +2056,29 @@ export function startLlmPlayer({
     // The deal posture rides its OWN slot: it is sent alongside the game move,
     // never instead of it. Absent field => byte-identical to the old reply.
     const dealMove = chooseDealMove(actions, obs);
-    // Comms slot: independent of the game action and the deal action, so
-    // answering a rival never costs a move. Returns null (silence) unless
-    // someone actually wrote to us.
-    const messageMove =
-      advertisedMessageLimit(message.protocol) !== null
-        ? chooseMessageMove(
-            actions,
-            obs,
-            answeredMessages,
-            dealMove,
-            advertisedMessageLimit(message.protocol),
-          )
-        : null;
-    const degraded = lastPlanError !== null;
+    // Comms slot: the selected offered recipient action is deterministic, but
+    // the body exists only when the bounded LLM authoring call succeeded.
+    const messageMove = prepared?.messageMove ?? null;
+    const socialFailed = prepared?.messageFailed === true;
+    const planDegraded = lastPlanError !== null;
     let reason;
     if (plan !== null) {
       const focus = plan.target
         ? `${plan.focus} -> ${plan.target}`
         : plan.focus;
-      reason = degraded
+      reason = planDegraded
         ? `PLAN(${focus}; stale, refresh failed: ${lastPlanError}): ${chosen.kind}`
         : `PLAN(${focus}) via ${plan.model}: ${chosen.kind} — ${plan.reason}`;
     } else {
-      reason = degraded
+      reason = planDegraded
         ? `BOOTSTRAP RULE (plan refresh failed: ${lastPlanError}): ${chosen.kind}`
         : `BOOTSTRAP RULE (first plan in flight): ${chosen.kind}`;
     }
+    if (socialFailed) reason = `social generation rejected; ${reason}`;
     const socialNote = socialActionNote(chosen, dealMove, obs);
     if (socialNote) reason = `${socialNote}; ${reason}`;
+
+    const degraded = planDegraded || socialFailed;
 
     history.push({ actionID: chosen.id, kind: chosen.kind });
     const response = {
@@ -2162,9 +2100,11 @@ export function startLlmPlayer({
       confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
       fallbackUsed: plan === null || degraded,
       llmPlannerDegraded: plan === null || degraded,
-      ...(degradedCauseFor(plan, degraded, lastPlanError)
-        ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
-        : {}),
+      ...(socialFailed
+        ? { degradedCause: "policy-error" }
+        : degradedCauseFor(plan, degraded, lastPlanError)
+          ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
+          : {}),
       ...(providerEvidence ? { providerEvidence } : {}),
     };
     ownerEvidence({

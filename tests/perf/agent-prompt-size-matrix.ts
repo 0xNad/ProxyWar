@@ -461,6 +461,17 @@ export async function loadStarterBuildState(): Promise<StarterBuildState> {
     }
     return source.slice(start, end + 2);
   };
+  const extractConst = (name: string): string => {
+    const match = source.match(
+      new RegExp(`const ${name} =[\\s\\S]*?;(?=\\n)`),
+    )?.[0];
+    if (match === undefined) {
+      throw new Error(
+        `agent-prompt-size-matrix: const ${name} not found in ${STARTER_FILE}`,
+      );
+    }
+    return match;
+  };
   // Same extraction contract as tests/coworld/StarterEconomyState.test.ts: the
   // starter opens a WebSocket at import time, so the pure functions are
   // evaluated standalone with the empty-history avoidActionIDs() stub.
@@ -473,6 +484,7 @@ export async function loadStarterBuildState(): Promise<StarterBuildState> {
     `function avoidActionIDs() { return []; }
 ${extract("clean")}
 ${extract("cleanID")}
+${extractConst("MESSAGE_MAX_CHARS")}
 ${extract("cleanMessage")}
 ${extract("normalizeDealPolicies")}
 ${extract("buildState")}
