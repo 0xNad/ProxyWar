@@ -18,6 +18,10 @@ const commissionerProduction = readFileSync(
   ".github/workflows/coworld-commissioner-production.yml",
   "utf8",
 );
+const commissionerReconcile = readFileSync(
+  ".github/workflows/coworld-commissioner-reconcile.yml",
+  "utf8",
+);
 const commissionerProductionScript = readFileSync(
   ".github/scripts/coworld-commissioner-production.mjs",
   "utf8",
@@ -195,6 +199,31 @@ test("commissioner migration is an operator-only exact-source protected producti
   assert.equal(commissionerSecrets.length, 7);
   assert.ok(
     commissionerSecrets.every((secret) => secret === "COWORLD_API_TOKEN"),
+  );
+});
+
+test("commissioner live reconciliation never pauses or repatches the league", () => {
+  assert.match(commissionerReconcile, /workflow_dispatch:/);
+  assert.match(commissionerReconcile, /test "\$GITHUB_ACTOR" = "0xNad"/);
+  assert.match(
+    commissionerReconcile,
+    /test "\$GITHUB_TRIGGERING_ACTOR" = "0xNad"/,
+  );
+  assert.match(commissionerReconcile, /test "\$GITHUB_SHA" = "\$SOURCE_SHA"/);
+  assert.match(commissionerReconcile, /group: proxywar-coworld-production/);
+  assert.match(commissionerReconcile, /league rebind/);
+  assert.match(commissionerReconcile, /league-rebind-dry-run-projection/);
+  assert.match(commissionerReconcile, /--commit --json/);
+  assert.match(commissionerReconcile, /rounds_paused_at/);
+  assert.match(commissionerReconcile, /test "\$RECONCILED" = true/);
+  assert.doesNotMatch(commissionerReconcile, /rounds-paused/);
+  assert.doesNotMatch(commissionerReconcile, /patch-commissioner/);
+  assert.doesNotMatch(commissionerReconcile, /upload-coworld/);
+  assert.deepEqual(
+    [...commissionerReconcile.matchAll(/secrets\.([A-Z0-9_]+)/g)].map(
+      (match) => match[1],
+    ),
+    ["COWORLD_API_TOKEN"],
   );
 });
 

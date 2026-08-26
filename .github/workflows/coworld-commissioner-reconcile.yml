@@ -1,0 +1,151 @@
+name: Coworld commissioner live reconcile
+run-name: Reconcile Proxy War commissioner at ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact protected-main SHA with successful push CI
+        required: true
+        type: string
+
+concurrency:
+  group: proxywar-coworld-production
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  COWORLD_CLI_VERSION: "0.1.42"
+  EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
+
+jobs:
+  reconcile:
+    name: Rebind current commissioner without pausing scheduling
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: coworld-production
+    steps:
+      - name: Checkout exact protected-main reconciliation controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+
+      - name: Require operator, exact protected main, and successful push CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          test "$(jq --arg sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha==$sha and .event=="push" and .status=="completed" and .conclusion=="success")] | length' "$RUNNER_TEMP/ci-runs.json")" -ge 1
+
+      - name: Install pinned Coworld CLI without credentials
+        run: |
+          set -euo pipefail
+          export UV_NO_CACHE=1
+          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
+          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          {
+            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
+            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+          } >> "$GITHUB_ENV"
+
+      - name: Dry-run and apply current league seed reconciliation
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+
+          node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json \
+            > "$RUNNER_TEMP/league-before.json"
+          test "$(jq -r .id "$RUNNER_TEMP/league-before.json")" = "$EXPECTED_LEAGUE_ID"
+          test "$(jq -r .rounds_paused_at "$RUNNER_TEMP/league-before.json")" = "null"
+          test "$(jq -r .commissioner_key "$RUNNER_TEMP/league-before.json")" = "platform"
+          CURRENT_COWORLD_ID=$(jq -r .game.coworld_id "$RUNNER_TEMP/league-before.json")
+          [[ "$CURRENT_COWORLD_ID" =~ ^cow_[0-9a-f-]{36}$ ]]
+          test "$CURRENT_COWORLD_ID" = "$(jq -r .game.canonical_coworld_id "$RUNNER_TEMP/league-before.json")"
+          MIGRATION_BEFORE=$(jq -r .commissioner_migration_version "$RUNNER_TEMP/league-before.json")
+          test -n "$MIGRATION_BEFORE"
+
+          node .github/scripts/coworld-authenticated-command.mjs status "$CURRENT_COWORLD_ID" --json \
+            > "$RUNNER_TEMP/coworld-status.json"
+          test "$(jq -r .coworld.id "$RUNNER_TEMP/coworld-status.json")" = "$CURRENT_COWORLD_ID"
+          test "$(jq -r .coworld.canonical "$RUNNER_TEMP/coworld-status.json")" = "true"
+          test "$(node .github/scripts/coworld-commissioner-production.mjs certification-state "$RUNNER_TEMP/coworld-status.json")" = "ready"
+
+          node .github/scripts/coworld-authenticated-command.mjs league list --json \
+            > "$RUNNER_TEMP/league-seeds.json"
+          node .github/scripts/coworld-commissioner-production.mjs build-league-rebind-plan \
+            "$RUNNER_TEMP/league-seeds.json" > "$RUNNER_TEMP/league-rebind-plan.json"
+          node .github/scripts/coworld-authenticated-command.mjs league rebind \
+            "$RUNNER_TEMP/league-rebind-plan.json" --json > "$RUNNER_TEMP/league-rebind-dry-run.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-league-rebind \
+            "$RUNNER_TEMP/league-rebind-plan.json" "$RUNNER_TEMP/league-rebind-dry-run.json" \
+            "$CURRENT_COWORLD_ID" dry-run > "$RUNNER_TEMP/league-rebind-dry-run-projection.json"
+          node .github/scripts/coworld-authenticated-command.mjs league rebind \
+            "$RUNNER_TEMP/league-rebind-plan.json" --commit --json > "$RUNNER_TEMP/league-rebind-commit.json"
+          node .github/scripts/coworld-commissioner-production.mjs validate-league-rebind-commit \
+            "$RUNNER_TEMP/league-rebind-plan.json" "$RUNNER_TEMP/league-rebind-commit.json" \
+            "$CURRENT_COWORLD_ID" "$RUNNER_TEMP/league-rebind-dry-run-projection.json" \
+            > "$RUNNER_TEMP/league-rebind-commit-projection.json"
+
+          RECONCILED=false
+          for attempt in $(seq 1 40); do
+            node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json \
+              > "$RUNNER_TEMP/league-after.json"
+            test "$(jq -r .rounds_paused_at "$RUNNER_TEMP/league-after.json")" = "null"
+            test "$(jq -r .game.coworld_id "$RUNNER_TEMP/league-after.json")" = "$CURRENT_COWORLD_ID"
+            if [ "$(jq -r .commissioner_migration_version "$RUNNER_TEMP/league-after.json")" != "$MIGRATION_BEFORE" ]; then
+              RECONCILED=true
+              break
+            fi
+            sleep 15
+          done
+          test "$RECONCILED" = true
+
+          jq -n \
+            --arg sourceSHA "$SOURCE_SHA" \
+            --arg leagueID "$EXPECTED_LEAGUE_ID" \
+            --arg coworldID "$CURRENT_COWORLD_ID" \
+            --arg migrationBefore "$MIGRATION_BEFORE" \
+            --arg migrationAfter "$(jq -r .commissioner_migration_version "$RUNNER_TEMP/league-after.json")" \
+            --argjson dryRun "$(cat "$RUNNER_TEMP/league-rebind-dry-run-projection.json")" \
+            --argjson committed "$(cat "$RUNNER_TEMP/league-rebind-commit-projection.json")" \
+            '{schemaVersion:1,sourceSHA:$sourceSHA,leagueID:$leagueID,coworldID:$coworldID,migrationBefore:$migrationBefore,migrationAfter:$migrationAfter,roundsPausedAt:null,dryRun:$dryRun,committed:$committed}' \
+            > "$RUNNER_TEMP/coworld-commissioner-live-reconcile.json"
+
+      - name: Retain sanitized reconciliation receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-commissioner-live-reconcile-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/coworld-commissioner-live-reconcile.json
+          if-no-files-found: error
+          retention-days: 30
