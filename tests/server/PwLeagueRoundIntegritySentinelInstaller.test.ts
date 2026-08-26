@@ -181,9 +181,10 @@ test("emits round_incomplete_execution only after identical evidence persists fo
       },
     },
   });
-  expect(
-    hosted.calls.filter(([command]) => command === "episodes"),
-  ).toHaveLength(2);
+  expect(hosted.calls.filter(([command]) => command === "episodes")).toEqual([
+    ["episodes", "-r", "round_1897", "--limit", "100"],
+    ["episodes", "-r", "round_1897", "--limit", "100"],
+  ]);
 });
 
 test("does not emit when evidence changes or elapsed confirmation is short", async () => {

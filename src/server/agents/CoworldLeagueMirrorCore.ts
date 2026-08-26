@@ -50,6 +50,7 @@ const housePolicyNames = new Set([
 ]);
 const replayUiRecentDecisionLimit = 60;
 const replayUiTextLimit = 1_000;
+const coworldRoundIdPattern = /^round_[A-Za-z0-9_-]+$/;
 
 const fallbackPlayerColors = [
   "#ef4444",
@@ -489,6 +490,114 @@ export function parseCompletedEpisodeMetaList(
     (b.completedAt ?? "").localeCompare(a.completedAt ?? ""),
   );
   return episodes;
+}
+
+export interface CoworldRecentRoundEpisodeRead {
+  rows: unknown[];
+  attemptedRoundIds: string[];
+  successfulRoundIds: string[];
+  failedRoundIds: string[];
+  latestRoundReadable: boolean;
+}
+
+/**
+ * Bounded read fallback for a failed division-wide episode feed.
+ *
+ * The latest completed round must itself be readable before this result can
+ * count as fresh. Older successful round reads may fill the display window,
+ * but they cannot make an unreadable latest round look healthy.
+ */
+export async function readRecentRoundEpisodeRows(args: {
+  roundsRaw: unknown;
+  readCoworldJson: (args: string[]) => Promise<unknown>;
+  minimumRows: number;
+  maximumRounds?: number;
+}): Promise<CoworldRecentRoundEpisodeRead> {
+  const maximumRounds = args.maximumRounds ?? 10;
+  if (
+    !Number.isInteger(args.minimumRows) ||
+    args.minimumRows < 1 ||
+    !Number.isInteger(maximumRounds) ||
+    maximumRounds < 1
+  ) {
+    throw new Error("round episode fallback bounds must be positive integers");
+  }
+  const rounds = asArray(args.roundsRaw)
+    .map(asRecord)
+    .filter(
+      (round): round is Record<string, unknown> =>
+        round !== null &&
+        round.status === "completed" &&
+        asString(round.completed_at) !== null &&
+        coworldRoundIdPattern.test(asString(round.id) ?? ""),
+    )
+    .sort(
+      (left, right) =>
+        (asNumber(right.round_number) ?? Number.NEGATIVE_INFINITY) -
+        (asNumber(left.round_number) ?? Number.NEGATIVE_INFINITY),
+    )
+    .slice(0, maximumRounds);
+  const latestRoundId = asString(rounds[0]?.id);
+  const rows: unknown[] = [];
+  const attemptedRoundIds: string[] = [];
+  const successfulRoundIds: string[] = [];
+  const failedRoundIds: string[] = [];
+  const seenEpisodeRequestIds = new Set<string>();
+  for (const round of rounds) {
+    const roundId = asString(round.id);
+    if (roundId === null) continue;
+    attemptedRoundIds.push(roundId);
+    try {
+      const value = await args.readCoworldJson([
+        "episodes",
+        "-r",
+        roundId,
+        "--limit",
+        "100",
+      ]);
+      const rawRoundRows = asArray(value);
+      const roundEpisodeRequestIds = new Set<string>();
+      const roundRows: unknown[] = [];
+      let roundRowsValid = rawRoundRows.length > 0;
+      for (const entry of rawRoundRows) {
+        const episode = asRecord(entry);
+        const episodeRequestId = asString(episode?.id);
+        if (
+          episode === null ||
+          asString(episode.round_id) !== roundId ||
+          episodeRequestId === null ||
+          !isSafeCoworldEpisodeRequestId(episodeRequestId) ||
+          seenEpisodeRequestIds.has(episodeRequestId) ||
+          roundEpisodeRequestIds.has(episodeRequestId)
+        ) {
+          roundRowsValid = false;
+          break;
+        }
+        roundEpisodeRequestIds.add(episodeRequestId);
+        roundRows.push(entry);
+      }
+      if (!roundRowsValid) {
+        failedRoundIds.push(roundId);
+      } else {
+        successfulRoundIds.push(roundId);
+        for (const episodeRequestId of roundEpisodeRequestIds) {
+          seenEpisodeRequestIds.add(episodeRequestId);
+        }
+        rows.push(...roundRows);
+      }
+    } catch {
+      failedRoundIds.push(roundId);
+    }
+    if (rows.length >= args.minimumRows) break;
+  }
+  return {
+    rows,
+    attemptedRoundIds,
+    successfulRoundIds,
+    failedRoundIds,
+    latestRoundReadable:
+      latestRoundId !== null && successfulRoundIds.includes(latestRoundId),
+  };
 }
 
 export interface ParsedHostedReplay {

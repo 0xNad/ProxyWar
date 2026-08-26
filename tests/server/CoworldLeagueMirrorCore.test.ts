@@ -21,6 +21,7 @@ import {
   parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
   premiereHrefForEpisode,
+  readRecentRoundEpisodeRows,
   resolveLatestRevealedPremiere,
   resolveMirroredMatchEvidence,
   revealedPremiereIdsFromArchiveIndex,
@@ -444,6 +445,152 @@ describe("CoworldLeagueMirrorCore", () => {
       "ereq_aaaa1111-2222",
     ]);
   });
+
+  test("readRecentRoundEpisodeRows recovers the newest completed round with a bounded round query", async () => {
+    const calls: string[][] = [];
+    const rows = Array.from({ length: 25 }, (_, index) => ({
+      id: `ereq_${index}`,
+      round_id: "round_latest",
+      status: "completed",
+    }));
+    const result = await readRecentRoundEpisodeRows({
+      roundsRaw: {
+        entries: [
+          {
+            id: "round_latest",
+            round_number: 12,
+            status: "completed",
+            completed_at: "2026-08-26T02:00:00Z",
+          },
+          {
+            id: "round_older",
+            round_number: 11,
+            status: "completed",
+            completed_at: "2026-08-26T01:00:00Z",
+          },
+        ],
+      },
+      minimumRows: 24,
+      readCoworldJson: async (args) => {
+        calls.push(args);
+        return { entries: rows };
+      },
+    });
+
+    expect(calls).toEqual([
+      ["episodes", "-r", "round_latest", "--limit", "100"],
+    ]);
+    expect(result).toMatchObject({
+      latestRoundReadable: true,
+      attemptedRoundIds: ["round_latest"],
+      successfulRoundIds: ["round_latest"],
+      failedRoundIds: [],
+    });
+    expect(result.rows).toHaveLength(25);
+  });
+
+  test("readRecentRoundEpisodeRows never calls an older round fresh when the latest round fails", async () => {
+    const result = await readRecentRoundEpisodeRows({
+      roundsRaw: [
+        {
+          id: "round_bad\n--flag",
+          round_number: 13,
+          status: "completed",
+          completed_at: "2026-08-26T03:00:00Z",
+        },
+        {
+          id: "round_latest",
+          round_number: 12,
+          status: "completed",
+          completed_at: "2026-08-26T02:00:00Z",
+        },
+        {
+          id: "round_older",
+          round_number: 11,
+          status: "completed",
+          completed_at: "2026-08-26T01:00:00Z",
+        },
+      ],
+      minimumRows: 1,
+      readCoworldJson: async (args) => {
+        if (args[2] === "round_latest") throw new Error("upstream failure");
+        return {
+          entries: [
+            {
+              id: "ereq_old",
+              round_id: "round_older",
+              status: "completed",
+            },
+          ],
+        };
+      },
+    });
+
+    expect(result).toMatchObject({
+      latestRoundReadable: false,
+      attemptedRoundIds: ["round_latest", "round_older"],
+      successfulRoundIds: ["round_older"],
+      failedRoundIds: ["round_latest"],
+    });
+  });
+
+  test.each([
+    {
+      label: "contains a wrong-round row",
+      entries: [
+        {
+          id: "ereq_latest",
+          round_id: "round_latest",
+          status: "completed",
+        },
+        {
+          id: "ereq_foreign",
+          round_id: "round_older",
+          status: "completed",
+        },
+      ],
+    },
+    {
+      label: "contains duplicate episode ids",
+      entries: [
+        {
+          id: "ereq_duplicate",
+          round_id: "round_latest",
+          status: "completed",
+        },
+        {
+          id: "ereq_duplicate",
+          round_id: "round_latest",
+          status: "completed",
+        },
+      ],
+    },
+    { label: "is empty", entries: [] },
+  ])(
+    "readRecentRoundEpisodeRows fails closed when the latest response $label",
+    async ({ entries }) => {
+      const result = await readRecentRoundEpisodeRows({
+        roundsRaw: [
+          {
+            id: "round_latest",
+            round_number: 12,
+            status: "completed",
+            completed_at: "2026-08-26T02:00:00Z",
+          },
+        ],
+        minimumRows: 1,
+        readCoworldJson: async () => ({ entries }),
+      });
+
+      expect(result).toEqual({
+        rows: [],
+        attemptedRoundIds: ["round_latest"],
+        successfulRoundIds: [],
+        failedRoundIds: ["round_latest"],
+        latestRoundReadable: false,
+      });
+    },
+  );
 
   test("parseHostedReplayPayload extracts results and filters artifact names", () => {
     const replay = parseHostedReplayPayload(replayPayloadFixture);
