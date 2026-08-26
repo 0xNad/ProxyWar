@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildLeagueSeedRebindPlan,
   buildMutationIntent,
   buildMutationReceipt,
   buildReconciliationState,
@@ -18,6 +19,7 @@ import {
   validateCommissionerImageInspection,
   validateCommissionerOnlyManifestPatch,
   validateFinalMigration,
+  validateLeagueSeedRebind,
   validateReleaseArtifact,
   validateResumeIntent,
   validateResumeReference,
@@ -29,6 +31,7 @@ const patchedId = "cow_22222222-2222-2222-2222-222222222222";
 const sourceImage = "img_11111111-1111-1111-1111-111111111111";
 const patchedImage = "img_22222222-2222-2222-2222-222222222222";
 const leagueId = "league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42";
+const seedId = "lseed_44444444-4444-4444-4444-444444444444";
 
 function publicCommissionerImage(hex = "8") {
   return `public.ecr.aws/q5f4m8t9/cogames@sha256:${hex.repeat(64)}`;
@@ -108,6 +111,135 @@ function hostedImageBinding(id = patchedImage) {
     hostedCommissionerManifestImage: publicCommissionerImage(),
   };
 }
+
+function rebindResponse({ dryRun, applied, blockers = [], activeRounds = 1 }) {
+  return {
+    dry_run: dryRun,
+    applied,
+    results: [
+      {
+        seed_id: seedId,
+        league_id: leagueId,
+        league_name: "ProxyWar",
+        current: {
+          coworld_name: "proxywar",
+          league_key: "league",
+          default_variant_id: "tournament-16p-pangaea",
+          effective_variant_id: "tournament-16p-pangaea",
+        },
+        proposed: {
+          coworld_name: "proxywar",
+          league_key: "league",
+          default_variant_id: "tournament-16p-pangaea",
+          effective_variant_id: "tournament-16p-pangaea",
+        },
+        commissioner_key: "platform",
+        canonical_coworld_id: patchedId,
+        counts: {
+          divisions: 1,
+          memberships: 18,
+          submissions: 18,
+          active_rounds: activeRounds,
+        },
+        blocking_reasons: blockers,
+      },
+    ],
+  };
+}
+
+test("builds one exact no-pause league rebind and preserves active work", () => {
+  const plan = buildLeagueSeedRebindPlan([
+    {
+      id: "lseed_33333333-3333-3333-3333-333333333333",
+      coworld_name: "other",
+      league_key: "league",
+      league_id: "league_other",
+      enabled: true,
+    },
+    {
+      id: seedId,
+      coworld_name: "proxywar",
+      league_key: "league",
+      league_id: leagueId,
+      enabled: true,
+    },
+  ]);
+  assert.deepEqual(plan, {
+    changes: [
+      {
+        seed_id: seedId,
+        coworld_name: "proxywar",
+        league_key: "league",
+      },
+    ],
+  });
+
+  const dryRun = validateLeagueSeedRebind({
+    plan,
+    response: rebindResponse({ dryRun: true, applied: false }),
+    expectedCoworldId: patchedId,
+    commit: false,
+  });
+  assert.equal(dryRun.counts.activeRounds, 1);
+  assert.equal(dryRun.applied, false);
+
+  const committed = validateLeagueSeedRebind({
+    plan,
+    response: rebindResponse({ dryRun: false, applied: true }),
+    expectedCoworldId: patchedId,
+    commit: true,
+    dryRunProjection: dryRun,
+  });
+  assert.equal(committed.applied, true);
+  assert.deepEqual(committed.counts, dryRun.counts);
+});
+
+test("rejects blocked or drifting league rebinds before certification", () => {
+  const plan = buildLeagueSeedRebindPlan([
+    {
+      id: seedId,
+      coworld_name: "proxywar",
+      league_key: "league",
+      league_id: leagueId,
+      enabled: true,
+    },
+  ]);
+  assert.throws(
+    () =>
+      validateLeagueSeedRebind({
+        plan,
+        response: rebindResponse({
+          dryRun: true,
+          applied: false,
+          blockers: ["seed is busy"],
+        }),
+        expectedCoworldId: patchedId,
+        commit: false,
+      }),
+    /league rebind is blocked/,
+  );
+  const dryRun = validateLeagueSeedRebind({
+    plan,
+    response: rebindResponse({ dryRun: true, applied: false }),
+    expectedCoworldId: patchedId,
+    commit: false,
+  });
+  assert.throws(
+    () =>
+      validateLeagueSeedRebind({
+        plan,
+        response: rebindResponse({
+          dryRun: false,
+          applied: true,
+          activeRounds: 0,
+        }),
+        expectedCoworldId: patchedId,
+        commit: true,
+        dryRunProjection: dryRun,
+      }),
+    /changed between dry-run and commit/,
+  );
+});
 
 test("resolves only successful exact-source main CI and production runs", () => {
   const ci = selectSuccessfulMainCiRun(
