@@ -477,12 +477,17 @@ if (command === "upload-coworld" || command === "patch-commissioner") {
   }
 }
 
+const expectedCoworldVersion = process.env.COWORLD_EXPECTED_VERSION ?? "0.1.42";
+if (!new Set(["0.1.42", "0.1.43"]).has(expectedCoworldVersion)) {
+  throw new Error("unsupported authenticated Coworld client version");
+}
+
 try {
   const install = spawnSync(
     python,
     [
       "-c",
-      "import importlib.metadata, os; assert importlib.metadata.version('coworld') == '0.1.42'; from softmax.auth import save_user_token; save_user_token(server='https://softmax.com/api', token=os.environ['COWORLD_API_TOKEN'])",
+      `import importlib.metadata, os; assert importlib.metadata.version('coworld') == '${expectedCoworldVersion}'; from softmax.auth import save_user_token; save_user_token(server='https://softmax.com/api', token=os.environ['COWORLD_API_TOKEN'])`,
     ],
     {
       env: { ...childEnv, COWORLD_API_TOKEN: token },
@@ -524,11 +529,11 @@ try {
             ]
           : command === "commander-xp-run-episode"
             ? ["run-episode", ...args]
-          : command === "commander-xp-certify"
+            : command === "commander-xp-certify"
               ? ["certify", ...args]
               : command === "league"
                 ? ["--elevated", "league", ...args]
-              : [command, ...args];
+                : [command, ...args];
   const result = spawnSync(executable, executableArgs, {
     env: childEnv,
     // Hosted `coworld list --json` grows with immutable release history and is

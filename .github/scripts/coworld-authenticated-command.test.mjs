@@ -30,6 +30,34 @@ test("runs allowlisted XP reads inside a removed credential home", () => {
   });
 });
 
+test("permits only the current authenticated Coworld client override", () => {
+  withFakeRuntime(({ env }) => {
+    const current = spawnSync(
+      process.execPath,
+      [wrapper, "status", "cow_f58621db-4a09-47de-bb13-24d61050a837", "--json"],
+      {
+        encoding: "utf8",
+        env: { ...env, COWORLD_EXPECTED_VERSION: "0.1.43" },
+      },
+    );
+    assert.equal(current.status, 0, current.stderr);
+
+    const unsupported = spawnSync(
+      process.execPath,
+      [wrapper, "status", "cow_f58621db-4a09-47de-bb13-24d61050a837", "--json"],
+      {
+        encoding: "utf8",
+        env: { ...env, COWORLD_EXPECTED_VERSION: "0.1.44" },
+      },
+    );
+    assert.notEqual(unsupported.status, 0);
+    assert.match(
+      unsupported.stderr,
+      /unsupported authenticated Coworld client version/,
+    );
+  });
+});
+
 test("runs an exact absolute-file XP create without exposing the token", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const body = path.join(root, "request.json");
@@ -125,10 +153,7 @@ test("runs only exact league seed inventory and rebind commands", () => {
       assert.equal(result.status, 0, result.stderr);
     }
     const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
-    assert.match(
-      lines[1],
-      /^coworld\|--elevated league list --json\|.+\|$/,
-    );
+    assert.match(lines[1], /^coworld\|--elevated league list --json\|.+\|$/);
     assert.match(
       lines[3],
       new RegExp(
@@ -622,7 +647,7 @@ function withFakeRuntime(callback) {
   const dockerCapture = path.join(root, "docker.txt");
   fs.writeFileSync(
     python,
-    `#!/bin/sh\ntest -z "$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nif [ "$1" = "-c" ]; then\n  case "$2" in *"importlib.metadata.version('coworld') == '0.1.42'"*) ;; *) exit 17 ;; esac\n  printf 'install|%s|%s\\n' "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nelse\n  printf 'python|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nfi\n`,
+    `#!/bin/sh\ntest -z "$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nif [ "$1" = "-c" ]; then\n  case "$2" in *"importlib.metadata.version('coworld') == '0.1.42'"*|*"importlib.metadata.version('coworld') == '0.1.43'"*) ;; *) exit 17 ;; esac\n  printf 'install|%s|%s\\n' "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nelse\n  printf 'python|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nfi\n`,
     { mode: 0o700 },
   );
   fs.writeFileSync(
