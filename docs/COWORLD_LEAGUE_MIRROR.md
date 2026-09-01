@@ -39,6 +39,10 @@ rounds after every expected episode-request row is present and terminal; and
 counts a request as score-bearing only when it has an episode id, a running
 timestamp, no error, and one finite unique score for every scheduled policy.
 The exact completed-without-running/no-score phantom is reported separately.
+Coworld's episode-list response can omit those execution fields even when the
+detail response contains them, so the mirror and sentinel hydrate the latest
+round's completed summaries through bounded read-only episode-detail calls.
+If any detail read fails, the round is incomplete evidence, never a failure.
 
 A breach first appears as confirmation-pending. Identical episode evidence must
 persist for 60 seconds before the state becomes degraded. A later healthy round
@@ -76,6 +80,25 @@ Coworld league/division/episode reads. It emits
 `round_incomplete_execution:round_<id>` only when the same breached round and
 episode-evidence hash survive a second direct read at least 60 seconds later.
 The class is deliberately absent from the sentinel's autofix allow-list.
+
+## Scheduler health
+
+`CoworldLeagueSchedulerHealth.ts` evaluates hosted round timestamps without
+mutating or restarting the league. An explicit hosted pause is reported as
+paused. Otherwise, silence longer than the larger of two hours or three
+configured round intervals is delayed. The current state and the latest proven
+gap between adjacent round numbers are published in `schedulerHealth`; a later
+round returns current status to healthy while retaining the recent recovered
+gap for diagnosis. Non-adjacent list rows never prove a gap.
+
+## Per-player fallback attribution
+
+New match summaries include cycle-level `playerReliability` aggregates: brain
+decisions, fallbacks, degraded decisions, and bounded degradation-cause counts.
+The mirror joins those server-authored aggregates to replay participants and
+shows non-zero fallback shares on the responsible player, rather than leaving
+the match-wide total to look like a platform-wide failure. Raw policy output
+and failure text are not included.
 
 Installation creates a timestamped receipt and exact backups beside the
 sentinel, installs the detector and adapter first, then atomically replaces the

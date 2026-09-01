@@ -236,6 +236,7 @@ describe("buildProxyWarPublicReadModel", () => {
       roundIntegrityFeedStale: false,
     });
     expect(model.roundIntegrity).toBeNull();
+    expect(model.schedulerHealth).toBeNull();
   });
 
   test("a stale champion feed is carried through feedStates without touching the overall stale flag", () => {
@@ -319,6 +320,34 @@ describe("buildProxyWarPublicReadModel", () => {
     });
     expect(model.roundIntegrity).toEqual(roundIntegrity);
     expect(ReadModelSchema.parse(model).roundIntegrity).toEqual(roundIntegrity);
+  });
+
+  test("projects scheduler delay and recovered-gap evidence", () => {
+    const schedulerHealth = {
+      status: "healthy" as const,
+      checkedAt: "2026-09-01T15:41:00.000Z",
+      roundIntervalMinutes: 25,
+      delayThresholdSeconds: 7_200,
+      latestRoundNumber: 2131,
+      latestActivityAt: "2026-09-01T15:30:00.000Z",
+      secondsSinceLatestActivity: 660,
+      latestObservedGap: {
+        fromRoundNumber: 2119,
+        toRoundNumber: 2120,
+        fromCompletedAt: "2026-08-31T17:04:23.000Z",
+        toCreatedAt: "2026-09-01T07:00:06.000Z",
+        gapSeconds: 50_143,
+      },
+    };
+    const model = buildProxyWarPublicReadModel(
+      baseMirror({ schedulerHealth }),
+      identitySnapshot(),
+      featuredMatchStoreOf(),
+    );
+    expect(model.schedulerHealth).toEqual(schedulerHealth);
+    expect(ReadModelSchema.parse(model).schedulerHealth).toEqual(
+      schedulerHealth,
+    );
   });
 
   test("a registered agent resolves full identity: slug, displayName, emblem, short code, standing, active version", () => {
@@ -471,6 +500,7 @@ describe("buildProxyWarPublicReadModel", () => {
       isAlive: true,
       isWinner: true,
       color: "#f00",
+      reliability: null,
     });
     // The unregistered participant's agentSlug is null, never fabricated.
     expect(match.participants[1].agentSlug).toBeNull();

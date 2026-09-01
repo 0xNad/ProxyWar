@@ -62,12 +62,14 @@ import {
 import {
   episodeRowsByRoundId,
   evaluateCoworldRoundIntegrity,
+  needsCoworldEpisodeIntegrityDetail,
   parseCoworldLadderIntegritySettings,
   recentTerminalCompletedRounds,
   reconcileCoworldRoundIntegrity,
   retainCoworldRoundIntegrityOnIncompleteProbe,
   type CoworldRoundIntegrityState,
 } from "../server/agents/CoworldLeagueRoundIntegrity";
+import { evaluateCoworldLeagueSchedulerHealth } from "../server/agents/CoworldLeagueSchedulerHealth";
 import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
@@ -399,6 +401,62 @@ async function coworldJson(args: string[]): Promise<unknown> {
     { timeout: 180_000, maxBuffer: 128 * 1024 * 1024 },
   );
   return JSON.parse(stdout) as unknown;
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+async function hydrateRoundIntegrityEpisodeDetails(args: {
+  roundId: string;
+  rows: unknown[];
+  concurrency?: number;
+}): Promise<{ rows: unknown[]; failedDetailReads: number }> {
+  const hydrated = [...args.rows];
+  const indexes = hydrated.flatMap((row, index) => {
+    const id = unknownRecord(row)?.id;
+    return needsCoworldEpisodeIntegrityDetail(row) &&
+      typeof id === "string" &&
+      id.length > 0
+      ? [index]
+      : [];
+  });
+  let cursor = 0;
+  let failedDetailReads = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < indexes.length) {
+      const index = indexes[cursor++];
+      const summary = unknownRecord(hydrated[index]);
+      const id = summary?.id;
+      if (typeof id !== "string") {
+        failedDetailReads += 1;
+        continue;
+      }
+      try {
+        const detail = unknownRecord(await coworldJson(["episodes", id]));
+        if (
+          detail === null ||
+          detail.id !== id ||
+          detail.round_id !== args.roundId ||
+          needsCoworldEpisodeIntegrityDetail(detail)
+        ) {
+          failedDetailReads += 1;
+          continue;
+        }
+        hydrated[index] = detail;
+      } catch {
+        failedDetailReads += 1;
+      }
+    }
+  };
+  const concurrency = Math.max(
+    1,
+    Math.min(args.concurrency ?? 5, indexes.length || 1),
+  );
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return { rows: hydrated, failedDetailReads };
 }
 
 async function downloadReplay(
@@ -1015,6 +1073,18 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     );
   } else {
     const episodeRows = episodeRowsByRoundId(roundIntegrityRead.value);
+    const latestRoundId = String(terminalRounds[0].id);
+    const latestEpisodeRows = episodeRows.get(latestRoundId) ?? [];
+    const hydratedLatest = await hydrateRoundIntegrityEpisodeDetails({
+      roundId: latestRoundId,
+      rows: latestEpisodeRows,
+    });
+    episodeRows.set(latestRoundId, hydratedLatest.rows);
+    if (hydratedLatest.failedDetailReads > 0) {
+      log(
+        `round-integrity detail hydration incomplete for ${hydratedLatest.failedDetailReads}/${latestEpisodeRows.length} latest-round episode row(s)`,
+      );
+    }
     const evaluations = terminalRounds.map((round) =>
       evaluateCoworldRoundIntegrity({
         round,
@@ -1384,6 +1454,17 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   );
 
   const now = new Date().toISOString();
+  const schedulerHealth = evaluateCoworldLeagueSchedulerHealth({
+    rounds: roundsRaw,
+    roundsPausedAt: league.roundsPausedAt,
+    roundIntervalMinutes: league.roundIntervalMinutes,
+    checkedAt: now,
+  });
+  if (schedulerHealth.status === "delayed") {
+    log(
+      `round scheduler delayed; no hosted round activity for ${schedulerHealth.secondsSinceLatestActivity ?? "unknown"} second(s)`,
+    );
+  }
   const data: CoworldLeagueMirrorData = {
     generatedAt: now,
     lastGoodSyncAt: now,
@@ -1392,6 +1473,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     replayFeedStale,
     roundIntegrityFeedStale,
     ...(roundIntegrity !== undefined ? { roundIntegrity } : {}),
+    schedulerHealth,
     lastGoodReplaySyncAt: replayFeedStale
       ? (previousData?.lastGoodReplaySyncAt ??
         previousData?.lastGoodSyncAt ??

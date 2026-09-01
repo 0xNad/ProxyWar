@@ -27,6 +27,7 @@ import {
 } from "./CoworldLeagueArtifactRetention";
 import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import type { CoworldRoundIntegrityState } from "./CoworldLeagueRoundIntegrity";
+import type { CoworldLeagueSchedulerHealth } from "./CoworldLeagueSchedulerHealth";
 import {
   appendStandingsHistorySnapshot,
   EMPTY_STANDINGS_HISTORY_STORE,
@@ -79,6 +80,16 @@ export interface CoworldLeagueEpisodePlayerRow {
   isAlive: boolean;
   isWinner: boolean;
   color: string;
+  /** Exact cycle-level fallback attribution from the public match summary. */
+  reliability?: CoworldLeaguePlayerReliability;
+}
+
+export interface CoworldLeaguePlayerReliability {
+  brainDecisionCount: number;
+  brainFallbackCount: number;
+  fallbackRate: number;
+  degradedDecisionCount: number;
+  degradedCauseCounts: Record<string, number>;
 }
 
 export interface CoworldLeagueEpisodeRow {
@@ -197,6 +208,8 @@ export interface CoworldLeagueMirrorData {
   roundIntegrityFeedStale?: boolean;
   /** Last verified/persisted score-bearing round assessment. */
   roundIntegrity?: CoworldRoundIntegrityState;
+  /** Read-only hosted round cadence and recent scheduler-gap evidence. */
+  schedulerHealth?: CoworldLeagueSchedulerHealth;
   league: {
     id: string;
     name: string;
@@ -874,6 +887,18 @@ export function coworldLeagueIndexHtml(
         translateText("coworld_league.scheduling_paused"),
       )}</div>`
     : "";
+  const schedulerHealthBanner =
+    !data.stale && data.schedulerHealth?.status === "delayed"
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.scheduler_delayed"),
+        )}</div>`
+      : !data.stale &&
+          data.schedulerHealth?.status === "healthy" &&
+          data.schedulerHealth.latestObservedGap !== null
+        ? `<div class="stale-banner">${escapeHtml(
+            translateText("coworld_league.scheduler_recovered"),
+          )}</div>`
+        : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   // The LIVE premiere card always takes precedence; the compact latest-revealed
   // card fills the same slot ONLY when nothing is currently premiering, so the
@@ -1006,6 +1031,7 @@ ${leagueSocialMetaHtml(schedulingPaused)}
     .combatant .name.dead { color:var(--muted); text-decoration:line-through; }
     .combatant .name .win { color:var(--good); }
     .tiles { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align:right; }
+    .player-reliability { grid-column:2 / 4; color:var(--amber); font:700 10px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:-5px; }
     .bar { grid-column:2 / 4; height:4px; background:var(--surface2); border-radius:2px; overflow:hidden; }
     .bar i { display:block; height:100%; }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
@@ -1073,6 +1099,7 @@ ${leagueSocialMetaHtml(schedulingPaused)}
     </header>
     ${staleBanner}
     ${schedulingPausedBanner}
+    ${schedulerHealthBanner}
     ${roundIntegrityBanner}
     ${roundIntegrityFeedBanner}
     ${championFeedBanner}
@@ -1790,6 +1817,27 @@ function battleCard(
       view.agent === null
         ? (provisionalIdentities.get(player.name) ?? null)
         : null;
+    const reliability = player.reliability;
+    const reliabilityMarkup =
+      reliability !== undefined && reliability.brainFallbackCount > 0
+        ? `<span class="player-reliability" title="${escapeHtml(
+            translateText("coworld_league.player_fallback_tip"),
+          )}">${escapeHtml(
+            translateText("coworld_league.player_fallback_share")
+              .replace(
+                "{fallback}",
+                formatTiles(reliability.brainFallbackCount),
+              )
+              .replace(
+                "{decisions}",
+                formatTiles(reliability.brainDecisionCount),
+              )
+              .replace(
+                "{percent}",
+                String(Math.round(reliability.fallbackRate * 100)),
+              ),
+          )}</span>`
+        : "";
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
@@ -1809,6 +1857,7 @@ function battleCard(
                 )})</span>`
           }</span>
           <span class="tiles">${escapeHtml(formatTiles(player.tilesOwned))}</span>
+          ${reliabilityMarkup}
           <span class="bar" aria-hidden="true"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
             player.color,
           )}"></i></span>

@@ -33,6 +33,7 @@ import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
+  CoworldLeaguePlayerReliability,
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
@@ -611,6 +612,7 @@ export interface ParsedHostedReplay {
   turnCount: number | null;
   decisionCount: number | null;
   degradedCount: number | null;
+  playerReliabilityByName: Map<string, CoworldLeaguePlayerReliability>;
   winnerSlot: number | null;
   players: Array<{
     slot: number;
@@ -841,6 +843,79 @@ function replayUiAggregatesFromMatchSummary(raw: unknown): {
   return { decisionCount, rejectedCount, fallbackCount, actionCounts };
 }
 
+function playerReliabilityFromMatchSummary(
+  raw: unknown,
+): Map<string, CoworldLeaguePlayerReliability> {
+  if (typeof raw !== "string") return new Map();
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return new Map();
+  }
+  const rows = asRecord(value)?.playerReliability;
+  if (!Array.isArray(rows) || rows.length > 256) return new Map();
+  const reliability = new Map<string, CoworldLeaguePlayerReliability>();
+  const ambiguousNames = new Set<string>();
+  for (const value of rows) {
+    const row = asRecord(value);
+    const username = boundedString(row?.username, 160);
+    const brainDecisionCount = asNumber(row?.brainDecisionCount);
+    const brainFallbackCount = asNumber(row?.brainFallbackCount);
+    const degradedDecisionCount = asNumber(row?.degradedDecisionCount);
+    const rawCauseCounts = asRecord(row?.degradedCauseCounts);
+    if (
+      username === null ||
+      brainDecisionCount === null ||
+      !Number.isInteger(brainDecisionCount) ||
+      brainDecisionCount < 0 ||
+      brainFallbackCount === null ||
+      !Number.isInteger(brainFallbackCount) ||
+      brainFallbackCount < 0 ||
+      brainFallbackCount > brainDecisionCount ||
+      degradedDecisionCount === null ||
+      !Number.isInteger(degradedDecisionCount) ||
+      degradedDecisionCount < 0 ||
+      degradedDecisionCount > brainDecisionCount ||
+      rawCauseCounts === null ||
+      Object.keys(rawCauseCounts).length > 32
+    ) {
+      continue;
+    }
+    const degradedCauseCounts: Record<string, number> = {};
+    for (const [cause, rawCount] of Object.entries(rawCauseCounts)) {
+      const count = asNumber(rawCount);
+      if (
+        /^[a-z0-9_-]{1,80}$/.test(cause) &&
+        count !== null &&
+        Number.isInteger(count) &&
+        count >= 0 &&
+        count <= brainDecisionCount
+      ) {
+        degradedCauseCounts[cause] = count;
+      }
+    }
+    if (reliability.has(username)) {
+      reliability.delete(username);
+      ambiguousNames.add(username);
+      continue;
+    }
+    if (ambiguousNames.has(username)) continue;
+    reliability.set(username, {
+      brainDecisionCount,
+      brainFallbackCount,
+      fallbackRate:
+        brainDecisionCount === 0
+          ? 0
+          : Math.round((brainFallbackCount / brainDecisionCount) * 10_000) /
+            10_000,
+      degradedDecisionCount,
+      degradedCauseCounts,
+    });
+  }
+  return reliability;
+}
+
 function projectCoworldReplayUiDecision(
   value: unknown,
 ): CoworldReplayUiDecision | null {
@@ -984,6 +1059,9 @@ export function parseHostedReplayPayload(
     turnCount: asNumber(results?.turn_count),
     decisionCount: asNumber(results?.decision_count),
     degradedCount: asNumber(results?.degraded_count),
+    playerReliabilityByName: playerReliabilityFromMatchSummary(
+      inlineRunArtifacts["match-summary.json"],
+    ),
     winnerSlot: asNumber(results?.winner_slot),
     players,
   };
@@ -1045,20 +1123,25 @@ export function buildEpisodeRow(input: {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
   const players: CoworldLeagueEpisodePlayerRow[] = replay.players
-    .map((player) => ({
-      slot: player.slot,
-      name: player.name,
-      tilesOwned: player.tilesOwned,
-      isAlive: player.isAlive,
-      isWinner: replay.winnerSlot !== null && player.slot === replay.winnerSlot,
-      color:
-        colors.get(player.name) ??
-        fallbackPlayerColors[
-          ((player.slot % fallbackPlayerColors.length) +
-            fallbackPlayerColors.length) %
-            fallbackPlayerColors.length
-        ],
-    }))
+    .map((player) => {
+      const reliability = replay.playerReliabilityByName.get(player.name);
+      return {
+        slot: player.slot,
+        name: player.name,
+        tilesOwned: player.tilesOwned,
+        isAlive: player.isAlive,
+        isWinner:
+          replay.winnerSlot !== null && player.slot === replay.winnerSlot,
+        color:
+          colors.get(player.name) ??
+          fallbackPlayerColors[
+            ((player.slot % fallbackPlayerColors.length) +
+              fallbackPlayerColors.length) %
+              fallbackPlayerColors.length
+          ],
+        ...(reliability !== undefined ? { reliability } : {}),
+      };
+    })
     .sort((a, b) => b.tilesOwned - a.tilesOwned);
   const winner = players.find((player) => player.isWinner);
   return {

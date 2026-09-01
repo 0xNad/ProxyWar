@@ -187,6 +187,26 @@ const replayPayloadFixture = {
       rejectedCount: 4,
       fallbackCount: 33,
       actionCounts: { attack: 140, hold: 96 },
+      playerReliability: [
+        {
+          agentID: "opportunistic-agent-3",
+          username: "daveey",
+          brainDecisionCount: 50,
+          brainFallbackCount: 40,
+          fallbackRate: 0.8,
+          degradedDecisionCount: 38,
+          degradedCauseCounts: { unspecified_policy_degradation: 38 },
+        },
+        {
+          agentID: "opportunistic-agent-4",
+          username: "Auri",
+          brainDecisionCount: 60,
+          brainFallbackCount: 1,
+          fallbackRate: 0.0167,
+          degradedDecisionCount: 0,
+          degradedCauseCounts: { unspecified_fallback: 1 },
+        },
+      ],
     }),
     "spectator-telemetry.json": JSON.stringify({
       version: 1,
@@ -939,6 +959,15 @@ describe("CoworldLeagueMirrorCore", () => {
     // Map size comes from the authoritative replay config.
     expect(row.mapSize).toBe("Normal");
     expect(row).not.toHaveProperty("difficulty");
+    expect(
+      row.players.find((player) => player.name === "daveey")?.reliability,
+    ).toEqual({
+      brainDecisionCount: 50,
+      brainFallbackCount: 40,
+      fallbackRate: 0.8,
+      degradedDecisionCount: 38,
+      degradedCauseCounts: { unspecified_policy_degradation: 38 },
+    });
   });
 
   test("buildEpisodeRow recovers the map from the replay config when the list has none", () => {

@@ -540,6 +540,67 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).not.toContain("Live sync degraded");
   });
 
+  test("attributes fallback cycles to the participant that produced them", () => {
+    const data = sampleData();
+    data.episodes[0].players[0].reliability = {
+      brainDecisionCount: 254,
+      brainFallbackCount: 195,
+      fallbackRate: 0.7677,
+      degradedDecisionCount: 190,
+      degradedCauseCounts: { unspecified_policy_degradation: 190 },
+    };
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain("195/254 fallback cycles (77%)");
+    expect(html).toContain(
+      "Cycle-level attribution for this participant, derived from the server-authored public match summary.",
+    );
+  });
+
+  test("surfaces current scheduler delay separately from a hosted pause", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      schedulerHealth: {
+        status: "delayed",
+        checkedAt: "2026-09-01T10:00:01.000Z",
+        roundIntervalMinutes: 25,
+        delayThresholdSeconds: 7_200,
+        latestRoundNumber: 2120,
+        latestActivityAt: "2026-09-01T07:20:00.000Z",
+        secondsSinceLatestActivity: 9_601,
+        latestObservedGap: null,
+      },
+    });
+    expect(html).toContain(
+      "Round scheduler delayed — no hosted round activity arrived within the expected cadence.",
+    );
+    expect(html).not.toContain("Round scheduling is paused");
+  });
+
+  test("keeps a visible recovery marker for a recently observed scheduler gap", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      schedulerHealth: {
+        status: "healthy",
+        checkedAt: "2026-09-01T15:41:00.000Z",
+        roundIntervalMinutes: 25,
+        delayThresholdSeconds: 7_200,
+        latestRoundNumber: 2131,
+        latestActivityAt: "2026-09-01T15:30:00.000Z",
+        secondsSinceLatestActivity: 660,
+        latestObservedGap: {
+          fromRoundNumber: 2119,
+          toRoundNumber: 2120,
+          fromCompletedAt: "2026-08-31T17:04:23.000Z",
+          toCreatedAt: "2026-09-01T07:00:06.000Z",
+          gapSeconds: 50_143,
+        },
+      },
+    });
+    expect(html).toContain(
+      "Round scheduler recovered after a prolonged gap; current cadence is healthy.",
+    );
+  });
+
   test("qualifies rating rows when current champion status is unavailable", () => {
     const data = sampleData();
     const html = coworldLeagueIndexHtml({

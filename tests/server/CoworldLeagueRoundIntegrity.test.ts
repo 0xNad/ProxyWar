@@ -4,6 +4,7 @@ import {
   evaluateCoworldRoundIntegrity,
   isCoworldPhantomCompletedEpisode,
   isCoworldScoreBearingEpisode,
+  needsCoworldEpisodeIntegrityDetail,
   parseCoworldLadderIntegritySettings,
   reconcileCoworldRoundIntegrity,
   retainCoworldRoundIntegrityOnIncompleteProbe,
@@ -253,6 +254,31 @@ describe("Coworld ladder round integrity", () => {
     ).toMatchObject({
       kind: "incomplete",
       reason: "episode_still_in_progress",
+    });
+  });
+
+  test("completed list summaries are incomplete evidence, not failures", () => {
+    const summaries = rows(25, 0).map(
+      ({
+        episode_id: _episodeId,
+        running_at: _runningAt,
+        error: _error,
+        policy_version_ids: _policyVersionIds,
+        scores: _scores,
+        ...summary
+      }) => summary,
+    );
+    expect(summaries.every(needsCoworldEpisodeIntegrityDetail)).toBe(true);
+    expect(
+      evaluateCoworldRoundIntegrity({
+        round: completedRound,
+        episodeRows: summaries,
+        settings,
+      }),
+    ).toMatchObject({
+      kind: "incomplete",
+      reason: "episode_detail_incomplete",
+      observedEpisodeCount: 25,
     });
   });
 

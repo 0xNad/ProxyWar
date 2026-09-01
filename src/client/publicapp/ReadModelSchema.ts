@@ -90,6 +90,16 @@ const PublicMatchParticipantSchema = z.object({
   isAlive: z.boolean(),
   isWinner: z.boolean(),
   color: z.string(),
+  reliability: z
+    .object({
+      brainDecisionCount: z.number(),
+      brainFallbackCount: z.number(),
+      fallbackRate: z.number(),
+      degradedDecisionCount: z.number(),
+      degradedCauseCounts: z.record(z.string(), z.number()),
+    })
+    .nullable()
+    .optional(),
 });
 
 export const PublicMatchSchema = z.object({
@@ -253,6 +263,25 @@ const RoundIntegrityStateSchema = z.object({
   ),
 });
 
+const SchedulerHealthSchema = z.object({
+  status: z.enum(["healthy", "delayed", "paused", "unavailable"]),
+  checkedAt: z.string(),
+  roundIntervalMinutes: z.number().nullable(),
+  delayThresholdSeconds: z.number().nullable(),
+  latestRoundNumber: z.number().nullable(),
+  latestActivityAt: z.string().nullable(),
+  secondsSinceLatestActivity: z.number().nullable(),
+  latestObservedGap: z
+    .object({
+      fromRoundNumber: z.number(),
+      toRoundNumber: z.number(),
+      fromCompletedAt: z.string(),
+      toCreatedAt: z.string(),
+      gapSeconds: z.number(),
+    })
+    .nullable(),
+});
+
 export const ReadModelSchema = z.object({
   schemaVersion: z.literal(1),
   generatedAt: z.string(),
@@ -266,6 +295,7 @@ export const ReadModelSchema = z.object({
     roundIntegrityFeedStale: z.boolean().optional(),
   }),
   roundIntegrity: RoundIntegrityStateSchema.nullable().optional(),
+  schedulerHealth: SchedulerHealthSchema.nullable().optional(),
   league: z.object({
     id: z.string(),
     name: z.string(),
