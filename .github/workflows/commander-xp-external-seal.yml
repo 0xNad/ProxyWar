@@ -40,7 +40,7 @@ jobs:
       seal_request_sha256: ${{ steps.request.outputs.seal_request_sha256 }}
     steps:
       - name: Checkout exact protected source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -90,7 +90,7 @@ jobs:
           echo "handoff_artifact_id=$HANDOFF_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download exact collector artifact by ID
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.resolve.outputs.evidence_artifact_id }}
           path: ${{ runner.temp }}/commander-xp-envelope/evidence
@@ -99,7 +99,7 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
 
       - name: Download exact post-evidence authority request by ID
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.resolve.outputs.authority_artifact_id }}
           path: ${{ runner.temp }}/commander-xp-envelope/authority
@@ -108,7 +108,7 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
 
       - name: Download exact completion-trigger handoff by ID
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.resolve.outputs.handoff_artifact_id }}
           path: ${{ runner.temp }}/commander-xp-handoff
@@ -207,7 +207,7 @@ jobs:
           echo "seal_request_sha256=$SEAL_REQUEST_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Setup exact Node runtime
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
 
@@ -386,7 +386,7 @@ jobs:
 
       - name: Upload unique immutable seal bundle
         id: upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.identity.outputs.artifact_name }}
           path: ${{ runner.temp }}/sealed-upload/
@@ -422,7 +422,7 @@ jobs:
       SEAL_REQUEST_SHA256: ${{ needs.normalize.outputs.seal_request_sha256 }}
     steps:
       - name: Checkout exact protected verifier source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -445,7 +445,7 @@ jobs:
             > "$RUNNER_TEMP/external-workflow-authorization.json"
 
       - name: Download immutable bundle by artifact ID
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.normalize.outputs.artifact_id }}
           path: ${{ runner.temp }}/sealed-download
@@ -483,12 +483,12 @@ jobs:
           PY
 
       - name: Setup exact Node runtime
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
 
       - name: Setup exact uv for independent Coworld reads
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.8.12"
           enable-cache: false
@@ -599,7 +599,7 @@ jobs:
 
       - name: Upload unique immutable receipt subject
         id: receipt-upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -664,7 +664,7 @@ jobs:
 
       - name: Upload unique immutable phase ledger
         id: ledger-upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commander-xp-phase-ledger-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-external-phase-ledger-v2.json
@@ -759,7 +759,7 @@ jobs:
 
       - name: Upload unique immutable final authority package
         id: authority-upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commander-xp-authority-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-authority-package/
@@ -817,7 +817,7 @@ jobs:
 
       - name: Upload unique immutable terminal authority index
         id: terminal-upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commander-xp-terminal-authority-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-terminal-authority-envelope-v2.json
@@ -903,7 +903,7 @@ jobs:
       - name: Upload immutable next-phase receipt binding
         if: needs.normalize.outputs.phase != 'confirmatory'
         id: phase-binding-upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commander-xp-phase-binding-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-phase-receipt-binding-v2.json
