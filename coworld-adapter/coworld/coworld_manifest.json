@@ -309,7 +309,8 @@
       ]
     },
     "replay_viewer": {
-      "bundle": "build/static-replay-viewer"
+      "bundle": "build/static-replay-viewer",
+      "replay_compression": "gzip"
     }
   },
   "player": [

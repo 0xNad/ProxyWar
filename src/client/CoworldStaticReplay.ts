@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { GameRecord, GameRecordSchema } from "../core/Schemas";
+import { postToReplayHost } from "./CoworldReplayHost";
 import { publishSpectatorReplay } from "./SpectatorReplayStore";
 
 const CoworldStaticReplayEnvelopeSchema = z
@@ -86,14 +87,55 @@ export function isCoworldStaticReplayViewer(): boolean {
   return window.__PROXYWAR_STATIC_REPLAY__ === true;
 }
 
+export interface CoworldStaticReplayLocation {
+  hash: string;
+  search: string;
+}
+
+/**
+ * Observatory hands the viewer its replay URL in the fragment
+ * (`index.html#replay=<url>`) so the immutable bundle URL stays cacheable;
+ * `?replay=` is the legacy form local viewers and older hosts still use.
+ */
 export function coworldStaticReplayUrl(
-  search = window.location.search,
+  location: CoworldStaticReplayLocation = window.location,
 ): string {
-  const replayUrl = new URLSearchParams(search).get("replay")?.trim();
-  if (!replayUrl) {
-    throw new Error("Missing required replay URL in the ?replay= parameter");
+  for (const params of [location.hash.slice(1), location.search]) {
+    const replayUrl = new URLSearchParams(params).get("replay")?.trim();
+    if (replayUrl) return replayUrl;
   }
-  return replayUrl;
+  throw new Error(
+    "Missing required replay URL in the #replay= fragment or ?replay= query",
+  );
+}
+
+/**
+ * The public replay copy may be gzip (platform opt-in via the manifest's
+ * `replay_compression`) or zlib bytes served with no Content-Encoding and an
+ * unchanged URL, so compression is detected from the bytes themselves — never
+ * from the URL suffix or response headers.
+ */
+export function sniffReplayCompression(
+  bytes: Uint8Array,
+): CompressionFormat | null {
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) return "gzip";
+  if (bytes[0] === 0x78) return "deflate";
+  return null;
+}
+
+export async function inflateReplayBytes(
+  bytes: Uint8Array<ArrayBuffer>,
+  format: CompressionFormat,
+): Promise<ArrayBuffer> {
+  const source = new ReadableStream<BufferSource>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  return new Response(
+    source.pipeThrough(new DecompressionStream(format)),
+  ).arrayBuffer();
 }
 
 export function parseCoworldStaticReplay(
@@ -149,7 +191,10 @@ export function parseCoworldStaticReplay(
     runID: envelope.data.runID,
     gameRecord: gameRecord.data,
     sourceUrl,
-    spectatorTelemetry: optionalInlineJson(artifacts, "spectator-telemetry.json"),
+    spectatorTelemetry: optionalInlineJson(
+      artifacts,
+      "spectator-telemetry.json",
+    ),
     matchSummary: optionalInlineJson(artifacts, "match-summary.json"),
     spectatorReplay,
     runResults: envelope.data.results ?? null,
@@ -158,12 +203,13 @@ export function parseCoworldStaticReplay(
 
 export async function loadCoworldStaticReplay(
   options: {
-    search?: string;
+    location?: CoworldStaticReplayLocation;
     fetchImpl?: typeof fetch;
     signal?: AbortSignal;
   } = {},
 ): Promise<CoworldStaticReplay> {
-  const sourceUrl = coworldStaticReplayUrl(options.search);
+  const sourceUrl = coworldStaticReplayUrl(options.location);
+  postToReplayHost({ type: "phase", phase: "replay_fetch_start" });
   const response = await (options.fetchImpl ?? fetch)(sourceUrl, {
     cache: "no-store",
     credentials: "omit",
@@ -172,7 +218,20 @@ export async function loadCoworldStaticReplay(
   if (!response.ok) {
     throw new Error(`Coworld replay returned HTTP ${response.status}`);
   }
-  return parseCoworldStaticReplay(await response.arrayBuffer(), sourceUrl);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const compression = sniffReplayCompression(bytes);
+  postToReplayHost({
+    type: "phase",
+    phase: "replay_fetch_end",
+    bytes: bytes.byteLength,
+    compressed: compression !== null,
+  });
+  const replay = parseCoworldStaticReplay(
+    compression === null ? bytes : await inflateReplayBytes(bytes, compression),
+    sourceUrl,
+  );
+  postToReplayHost({ type: "phase", phase: "replay_parsed" });
+  return replay;
 }
 
 declare global {

@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { deflateSync, gzipSync } from "node:zlib";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   coworldStaticReplayUrl,
   loadCoworldStaticReplay,
   parseCoworldStaticReplay,
+  sniffReplayCompression,
 } from "../../src/client/CoworldStaticReplay";
 import {
   clearSpectatorReplay,
@@ -21,7 +23,31 @@ function replayBytes(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
+const REPLAY_LOCATION = {
+  hash: "",
+  search: "?replay=https%3A%2F%2Freplays.example%2Fmatch.replay",
+};
+
+/** Stand in as the embedding Observatory window so host posts are observable. */
+function embedInHost(): ReturnType<typeof vi.fn> {
+  const postMessage = vi.fn();
+  Object.defineProperty(window, "parent", {
+    value: { postMessage },
+    configurable: true,
+    writable: true,
+  });
+  return postMessage;
+}
+
 describe("CoworldStaticReplay", () => {
+  afterEach(() => {
+    Object.defineProperty(window, "parent", {
+      value: window,
+      configurable: true,
+      writable: true,
+    });
+  });
+
   it.each([
     "coworld_manifest.json",
     "coworld_manifest_template.json",
@@ -36,6 +62,7 @@ describe("CoworldStaticReplay", () => {
 
     expect(manifest.game.replay_viewer).toEqual({
       bundle: "build/static-replay-viewer",
+      replay_compression: "gzip",
     });
   });
 
@@ -74,26 +101,39 @@ describe("CoworldStaticReplay", () => {
     );
   });
 
-  it("requires Observatory's replay query parameter", () => {
-    expect(() => coworldStaticReplayUrl("?turn=10")).toThrow(
-      "Missing required replay URL",
+  it("reads the replay URL from the fragment first, then the legacy query", () => {
+    expect(() =>
+      coworldStaticReplayUrl({ hash: "#turn=10", search: "?turn=10" }),
+    ).toThrow("Missing required replay URL");
+    expect(coworldStaticReplayUrl(REPLAY_LOCATION)).toBe(
+      "https://replays.example/match.replay",
     );
     expect(
-      coworldStaticReplayUrl(
-        "?replay=https%3A%2F%2Freplays.example%2Fmatch.replay",
-      ),
-    ).toBe("https://replays.example/match.replay");
+      coworldStaticReplayUrl({
+        hash: "#replay=https%3A%2F%2Freplays.example%2Ffragment.replay",
+        search: "?replay=https%3A%2F%2Freplays.example%2Fquery.replay",
+      }),
+    ).toBe("https://replays.example/fragment.replay");
   });
 
-  it("fetches the replay as opaque bytes", async () => {
+  it("sniffs compression from the bytes, not the URL", () => {
+    const json = replayBytes({ a: 1 });
+    expect(sniffReplayCompression(json)).toBeNull();
+    expect(sniffReplayCompression(new Uint8Array(gzipSync(json)))).toBe("gzip");
+    expect(sniffReplayCompression(new Uint8Array(deflateSync(json)))).toBe(
+      "deflate",
+    );
+  });
+
+  it("fetches the replay as opaque bytes and reports phases to the host", async () => {
+    const postMessage = embedInHost();
+    const body = JSON.stringify(ratedCoworldRawReplayValue());
     const fetchImpl = vi.fn<typeof fetch>(async () => {
-      return new Response(JSON.stringify(ratedCoworldRawReplayValue()), {
-        status: 200,
-      });
+      return new Response(body, { status: 200 });
     });
 
     const replay = await loadCoworldStaticReplay({
-      search: "?replay=https%3A%2F%2Freplays.example%2Fmatch.replay",
+      location: REPLAY_LOCATION,
       fetchImpl,
     });
 
@@ -102,6 +142,48 @@ describe("CoworldStaticReplay", () => {
       expect.objectContaining({ cache: "no-store", credentials: "omit" }),
     );
     expect(replay.gameRecord).toEqual(ratedCoworldGameRecordValue());
+    expect(postMessage.mock.calls.map((call) => call[0])).toEqual([
+      { src: "coworld-replay", type: "phase", phase: "replay_fetch_start" },
+      {
+        src: "coworld-replay",
+        type: "phase",
+        phase: "replay_fetch_end",
+        bytes: new TextEncoder().encode(body).byteLength,
+        compressed: false,
+      },
+      { src: "coworld-replay", type: "phase", phase: "replay_parsed" },
+    ]);
+    expect(postMessage.mock.calls.every((call) => call[1] === "*")).toBe(true);
+  });
+
+  it.each([
+    ["gzip", gzipSync],
+    ["zlib", deflateSync],
+  ])("inflates a %s public replay copy", async (_name, compress) => {
+    const postMessage = embedInHost();
+    const compressed = new Uint8Array(
+      compress(Buffer.from(JSON.stringify(ratedCoworldRawReplayValue()))),
+    );
+    const fetchImpl = vi.fn<typeof fetch>(
+      async () => new Response(compressed, { status: 200 }),
+    );
+
+    const replay = await loadCoworldStaticReplay({
+      location: REPLAY_LOCATION,
+      fetchImpl,
+    });
+
+    expect(replay.gameRecord).toEqual(ratedCoworldGameRecordValue());
+    expect(postMessage).toHaveBeenCalledWith(
+      {
+        src: "coworld-replay",
+        type: "phase",
+        phase: "replay_fetch_end",
+        bytes: compressed.byteLength,
+        compressed: true,
+      },
+      "*",
+    );
   });
 
   it("surfaces replay HTTP failures", async () => {
@@ -110,7 +192,10 @@ describe("CoworldStaticReplay", () => {
     );
 
     await expect(
-      loadCoworldStaticReplay({ search: "?replay=denied", fetchImpl }),
+      loadCoworldStaticReplay({
+        location: { hash: "", search: "?replay=denied" },
+        fetchImpl,
+      }),
     ).rejects.toThrow("Coworld replay returned HTTP 403");
   });
 });
