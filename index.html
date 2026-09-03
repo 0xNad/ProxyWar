@@ -324,6 +324,12 @@
           "proxywar-replay-booting",
         );
       }
+      // Coworld readiness protocol (src/client/CoworldReplayHost.ts): tell the
+      // embedding Observatory the bundle's script is running before `load`,
+      // so it keeps its overlay up until the viewer posts `ready`.
+      if (window.__PROXYWAR_STATIC_REPLAY__ && window.parent !== window) {
+        window.parent.postMessage({ src: "coworld-replay", type: "loading" }, "*");
+      }
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
       window.CDN_BASE = window.__PROXYWAR_STATIC_REPLAY__
