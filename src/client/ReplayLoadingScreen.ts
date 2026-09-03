@@ -276,9 +276,9 @@ export function finishReplayLoadingScreen(): void {
   document.documentElement.classList.remove(REPLAY_BOOTING_CLASS);
   document.getElementById(REPLAY_LOADING_ID)?.remove();
   document.getElementById("proxywar-coworld-splash")?.remove();
-  // The first frame is on screen by the time this runs; the embedding host
-  // lifts its own overlay one paint later so it never uncovers a blank board.
-  requestAnimationFrame(() => postToReplayHost({ type: "ready" }));
+  // The first frame is on screen by the time this runs. Yield once without
+  // relying on animation frames in a lazy offscreen iframe.
+  setTimeout(() => postToReplayHost({ type: "ready" }), 0);
 }
 
 function ensureReplayLoadingScreen(): HTMLElement {

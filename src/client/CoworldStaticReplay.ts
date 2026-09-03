@@ -119,7 +119,14 @@ export function sniffReplayCompression(
   bytes: Uint8Array,
 ): CompressionFormat | null {
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) return "gzip";
-  if (bytes[0] === 0x78) return "deflate";
+  if (
+    bytes.length >= 2 &&
+    (bytes[0] & 0x0f) === 8 &&
+    bytes[0] >> 4 <= 7 &&
+    ((bytes[0] << 8) | bytes[1]) % 31 === 0
+  ) {
+    return "deflate";
+  }
   return null;
 }
 

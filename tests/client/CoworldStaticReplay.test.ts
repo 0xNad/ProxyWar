@@ -123,6 +123,12 @@ describe("CoworldStaticReplay", () => {
     expect(sniffReplayCompression(new Uint8Array(deflateSync(json)))).toBe(
       "deflate",
     );
+    expect(
+      sniffReplayCompression(
+        new Uint8Array(deflateSync(json, { windowBits: 9 })),
+      ),
+    ).toBe("deflate");
+    expect(sniffReplayCompression(new Uint8Array([0x78, 0x00]))).toBeNull();
   });
 
   it("fetches the replay as opaque bytes and reports phases to the host", async () => {
