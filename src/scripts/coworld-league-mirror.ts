@@ -1,12 +1,11 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
   spectatorHtml,
   type AgentSpectatorReplay,
 } from "../server/agents/AgentSpectatorReplay";
+import { readCoworldJson as coworldJson } from "../server/agents/CoworldCliRead";
 import {
   CoworldLeagueDiskReserveError,
   coworldLeagueReplayCachePath,
@@ -115,7 +114,6 @@ import {
  * mirror output is unchanged.
  */
 
-const execFileAsync = promisify(execFile);
 const maximumReplayBytes = 512 * 1024 * 1024;
 
 interface MirrorOptions {
@@ -379,28 +377,6 @@ function parseOptions(argv: string[]): MirrorOptions {
     );
   }
   return options;
-}
-
-const readVerbs = new Set([
-  "leagues",
-  "results",
-  "memberships",
-  "rounds",
-  "episodes",
-  "replays",
-]);
-
-async function coworldJson(args: string[]): Promise<unknown> {
-  const verb = args[0];
-  if (!readVerbs.has(verb)) {
-    throw new Error(`Refusing non-read coworld verb: ${verb}`);
-  }
-  const { stdout } = await execFileAsync(
-    "uvx",
-    ["coworld", ...args, "--json"],
-    { timeout: 180_000, maxBuffer: 128 * 1024 * 1024 },
-  );
-  return JSON.parse(stdout) as unknown;
 }
 
 function unknownRecord(value: unknown): Record<string, unknown> | null {
