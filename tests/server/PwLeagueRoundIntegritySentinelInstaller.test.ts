@@ -20,7 +20,7 @@ import { buildPwLeagueRoundIntegrityArtifact } from "../../scripts/build-pw-leag
 // @ts-expect-error The host installer is intentionally plain Node ESM.
 import * as sentinelInstaller from "../../scripts/install-pw-league-round-integrity-sentinel.mjs";
 // @ts-expect-error The installed dependency-free adapter is intentionally plain Node ESM.
-import { collectConfirmedCoworldRoundIntegrity } from "../../scripts/pw-league-round-integrity-sentinel-adapter.mjs";
+import * as sentinelAdapter from "../../scripts/pw-league-round-integrity-sentinel-adapter.mjs";
 import {
   COWORLD_ROUND_INTEGRITY_CONFIRMATION_MS,
   coworldRoundIntegrityCriticalSignal,
@@ -41,6 +41,8 @@ const {
   transformPwLeagueSentinelSource,
   verifyPwLeagueSentinelRoundIntegrity,
 } = sentinelInstaller;
+const { collectConfirmedCoworldRoundIntegrity, readCoworldRoundsWithFallback } =
+  sentinelAdapter;
 
 const temporaryDirectories: string[] = [];
 const repositoryHead = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -222,6 +224,41 @@ test("a failed detail hydration stays indeterminate instead of becoming a breach
   });
 });
 
+test("round reads fall back only for Coworld's missing pagination response fields", async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ entries: [fixtureRound()] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const shapeError = Object.assign(new Error("Command failed"), {
+    stderr: [
+      "ValidationError for RoundListPublic",
+      "total_count Field required",
+      "limit Field required",
+      "offset Field required",
+    ].join("\n"),
+  });
+  await expect(
+    readCoworldRoundsWithFallback({
+      coworld: async () => {
+        throw shapeError;
+      },
+      leagueId: "league_test",
+      fetchImpl,
+      server: "https://example.test/api",
+    }),
+  ).resolves.toEqual({ entries: [fixtureRound()] });
+  await expect(
+    readCoworldRoundsWithFallback({
+      coworld: async () => {
+        throw new Error("network timeout");
+      },
+      leagueId: "league_test",
+      fetchImpl,
+    }),
+  ).rejects.toThrow("network timeout");
+});
+
 test("emits round_incomplete_execution only after identical evidence persists for 60 seconds", async () => {
   const hosted = fixtureCoworld([fixtureEpisodes(), fixtureEpisodes()]);
   let clock = 0;
@@ -308,7 +345,13 @@ function sentinelFixtureSource(): string {
     "  const signals = [];",
     "  const evidence = {};",
     "  try {",
-    "    const roundsRaw = [];",
+    "    const roundsRaw = await coworld([",
+    '      "rounds",',
+    '      "-l",',
+    "      LEAGUE_ID,",
+    '      "--limit",',
+    '      "10",',
+    "    ]);",
     "    const rounds = [];",
     "    evidence.rounds = rounds;",
     "  } catch (error) {",
@@ -415,6 +458,7 @@ test("building and copying the detector is explicitly insufficient until the sen
     issues: [],
     importWired: true,
     callWired: true,
+    roundReadFallbackWired: true,
   });
 });
 
