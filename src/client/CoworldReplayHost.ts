@@ -24,5 +24,15 @@ export type CoworldReplayHostMessage =
 
 export function postToReplayHost(message: CoworldReplayHostMessage): void {
   if (window.parent === window) return;
+  if (message.type === "ready" || message.type === "error") {
+    window.__PROXYWAR_COWORLD_REPLAY_BOOT_ERRORS__?.abort();
+    delete window.__PROXYWAR_COWORLD_REPLAY_BOOT_ERRORS__;
+  }
   window.parent.postMessage({ src: "coworld-replay", ...message }, "*");
+}
+
+declare global {
+  interface Window {
+    __PROXYWAR_COWORLD_REPLAY_BOOT_ERRORS__?: AbortController;
+  }
 }
