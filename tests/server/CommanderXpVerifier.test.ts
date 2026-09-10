@@ -42,6 +42,8 @@ import {
 
 const temporaryRoots: string[] = [];
 const { scanPrivacyAndInventory, verifyExternalPhaseLedger } = externalSealLib;
+const policyArms = ["A", "B", "C"] as const;
+type PolicyArm = (typeof policyArms)[number];
 
 afterEach(async () => {
   await Promise.all(
@@ -166,6 +168,130 @@ describe("Commander XP evidence verifier v2", () => {
         phase: "preregistration",
       }),
     );
+  });
+
+  it("accepts distinct GHCR OCI, Coworld client, and Coworld image digests", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const summary = JSON.parse(
+      await fs.readFile(
+        path.join(fixture.evidenceRoot, "policy-identities-v2.json"),
+        "utf8",
+      ),
+    );
+    const inspect = JSON.parse(
+      await fs.readFile(
+        path.join(fixture.evidenceRoot, "policy-inspect/A.json"),
+        "utf8",
+      ),
+    );
+
+    expect(
+      new Set([
+        summary.ociDigest,
+        inspect.imageUpload.requestPayload.client_hash,
+        inspect.containerImage.image_digest,
+      ]).size,
+    ).toBe(3);
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({ integrityVerified: true });
+  });
+
+  it("rejects crossed Coworld request and response digest authorities", async () => {
+    const fixture = await buildPreregistrationFixture();
+    await rewritePolicyEvidence(fixture, (_summary, inspects) => {
+      const inspect = inspects.A;
+      inspect.imageUpload.requestPayload.client_hash =
+        inspect.containerImage.image_digest;
+      inspect.imageUpload.requestPayloadSha256 = sha256Canonical(
+        inspect.imageUpload.requestPayload,
+      );
+    });
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "POLICY_UPLOAD_A_MISMATCH" }],
+    });
+  });
+
+  it("rejects a malformed Coworld client hash even when every retained surface agrees", async () => {
+    const fixture = await buildPreregistrationFixture();
+    await rewritePolicyEvidence(fixture, (_summary, inspects) => {
+      for (const arm of policyArms) {
+        const inspect = inspects[arm];
+        const malformed = "sha256:not-a-client-hash";
+        inspect.containerImage.client_hash = malformed;
+        inspect.imageUpload.requestPayload.client_hash = malformed;
+        inspect.imageUpload.requestPayloadSha256 = sha256Canonical(
+          inspect.imageUpload.requestPayload,
+        );
+        inspect.imageUpload.responseProjection.image.client_hash = malformed;
+        inspect.imageUpload.image.client_hash = malformed;
+      }
+    });
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "POLICY_UPLOAD_A_MISMATCH" }],
+    });
+  });
+
+  it("rejects a malformed Coworld image digest even when every retained surface agrees", async () => {
+    const fixture = await buildPreregistrationFixture();
+    await rewritePolicyEvidence(fixture, (_summary, inspects) => {
+      for (const arm of policyArms) {
+        const inspect = inspects[arm];
+        const malformed = "sha256:not-an-image-digest";
+        inspect.containerImage.image_digest = malformed;
+        inspect.imageUpload.responseProjection.image.image_digest = malformed;
+        inspect.imageUpload.image.image_digest = malformed;
+      }
+    });
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "POLICY_UPLOAD_A_MISMATCH" }],
+    });
+  });
+
+  it("rejects a completed-image digest substituted after the Coworld response", async () => {
+    const fixture = await buildPreregistrationFixture();
+    await rewritePolicyEvidence(fixture, (_summary, inspects) => {
+      inspects.A.imageUpload.image.image_digest = `sha256:${"a".repeat(64)}`;
+    });
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "POLICY_UPLOAD_A_MISMATCH" }],
+    });
+  });
+
+  it("rejects a self-consistent Coworld image substitution in only one policy arm", async () => {
+    const fixture = await buildPreregistrationFixture();
+    await rewritePolicyEvidence(fixture, (_summary, inspects) => {
+      const substitutedDigest = `sha256:${"a".repeat(64)}`;
+      inspects.B.containerImage.image_digest = substitutedDigest;
+      inspects.B.imageUpload.responseProjection.image.image_digest =
+        substitutedDigest;
+      inspects.B.imageUpload.image.image_digest = substitutedDigest;
+    });
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [
+        { code: "POLICY_IMAGE_AUTHORITY_CROSS_ARM_MISMATCH" },
+      ],
+    });
   });
 
   it("rejects a self-consistent Coworld runtime receipt for the wrong locked graph", async () => {
@@ -1526,10 +1652,10 @@ async function buildPreregistrationFixture(
     id: "img_policy_fixture",
     name: "proxywar-commander-xp-policy-fixture",
     version: 1,
-    client_hash: "fixture-client-hash",
+    client_hash: `sha256:${"5".repeat(64)}`,
     status: "ready",
     image_uri: "registry.example/policy@fixture",
-    image_digest: planInput.imageDigest,
+    image_digest: `sha256:${"9".repeat(64)}`,
     public_image_uri: "registry.example/public/policy@fixture",
   };
   const policyInspects = Object.fromEntries(
@@ -2499,6 +2625,73 @@ async function writeJson(target: string, value: unknown): Promise<string> {
   const text = `${JSON.stringify(value)}\n`;
   await fs.writeFile(target, text);
   return text;
+}
+
+async function rewritePolicyEvidence(
+  fixture: { evidenceRoot: string },
+  mutate: (
+    summary: Record<string, any>,
+    inspects: Record<PolicyArm, Record<string, any>>,
+  ) => void,
+): Promise<void> {
+  const summaryPath = path.join(
+    fixture.evidenceRoot,
+    "policy-identities-v2.json",
+  );
+  const summary = JSON.parse(await fs.readFile(summaryPath, "utf8"));
+  const inspectEntries = await Promise.all(
+    policyArms.map(async (arm) => {
+      const relativePath = `policy-inspect/${arm}.json`;
+      const inspect = JSON.parse(
+        await fs.readFile(path.join(fixture.evidenceRoot, relativePath), "utf8"),
+      );
+      return [arm, inspect] as const;
+    }),
+  );
+  const inspects = Object.fromEntries(inspectEntries) as Record<
+    PolicyArm,
+    Record<string, any>
+  >;
+  mutate(summary, inspects);
+
+  const rewrittenArtifacts = new Map<string, string>();
+  for (const arm of policyArms) {
+    const inspect = inspects[arm];
+    delete inspect.receiptSha256;
+    inspect.receiptSha256 = sha256Canonical(inspect);
+    const text = JSON.stringify(inspect);
+    const relativePath = `policy-inspect/${arm}.json`;
+    await fs.writeFile(path.join(fixture.evidenceRoot, relativePath), text);
+    rewrittenArtifacts.set(relativePath, text);
+    summary.arms[arm].inspectResponseSha256 = sha256(text);
+  }
+
+  delete summary.receiptSha256;
+  summary.receiptSha256 = sha256Canonical(summary);
+  const summaryText = JSON.stringify(summary);
+  await fs.writeFile(summaryPath, summaryText);
+  rewrittenArtifacts.set("policy-identities-v2.json", summaryText);
+
+  const indexPath = path.join(
+    fixture.evidenceRoot,
+    "commander-xp-evidence-index-v2.json",
+  );
+  const index = JSON.parse(await fs.readFile(indexPath, "utf8"));
+  for (const artifact of index.artifacts) {
+    const rewritten = rewrittenArtifacts.get(artifact.path);
+    if (rewritten !== undefined) artifact.sha256 = sha256(rewritten);
+  }
+  await fs.writeFile(indexPath, JSON.stringify(index));
+
+  const sealPath = path.join(
+    fixture.evidenceRoot,
+    "commander-xp-evidence-seal-v2.json",
+  );
+  const seal = JSON.parse(await fs.readFile(sealPath, "utf8"));
+  seal.indexSha256 = sha256Canonical(index);
+  delete seal.sealSha256;
+  seal.sealSha256 = sha256Canonical(seal);
+  await fs.writeFile(sealPath, JSON.stringify(seal));
 }
 
 function sha256(value: string | Uint8Array): string {
