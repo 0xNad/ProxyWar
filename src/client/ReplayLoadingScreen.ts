@@ -1,4 +1,5 @@
 import { analytics } from "./analytics/AnalyticsClient";
+import { postToReplayHost } from "./CoworldReplayHost";
 import { translateText } from "./Utils";
 
 const REPLAY_LOADING_ID = "proxywar-replay-loading";
@@ -197,7 +198,10 @@ export function holdReplayLoadingScreenUntilFirstFrame(
   matchId?: string,
 ): () => void {
   showReplayLoadingScreen(messageKey);
-  analytics.track("replay_load_started", matchId !== undefined ? { matchId } : undefined);
+  analytics.track(
+    "replay_load_started",
+    matchId !== undefined ? { matchId } : undefined,
+  );
 
   let active = true;
   let slowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -215,7 +219,10 @@ export function holdReplayLoadingScreenUntilFirstFrame(
 
   const onFirstFrame = () => {
     cleanup();
-    analytics.track("replay_load_succeeded", matchId !== undefined ? { matchId } : undefined);
+    analytics.track(
+      "replay_load_succeeded",
+      matchId !== undefined ? { matchId } : undefined,
+    );
     finishReplayLoadingScreen();
   };
 
@@ -225,7 +232,7 @@ export function holdReplayLoadingScreenUntilFirstFrame(
       reason: "load_error",
       ...(matchId !== undefined ? { matchId } : {}),
     });
-    showReplayLoadingFailure();
+    showReplayLoadingFailure("Replay load error before first frame");
   };
 
   document.addEventListener(REPLAY_FRAME_EVENT, onFirstFrame, { once: true });
@@ -250,7 +257,9 @@ export async function runReplayStartup(
   }
 }
 
-export function showReplayLoadingFailure(): HTMLElement {
+export function showReplayLoadingFailure(
+  message = "Replay failed to load",
+): HTMLElement {
   const screen = showReplayLoadingScreen(
     "ai_league_replay.loading_failed",
     false,
@@ -259,6 +268,7 @@ export function showReplayLoadingFailure(): HTMLElement {
   screen
     .querySelector<HTMLButtonElement>("[data-replay-loading-retry]")
     ?.focus();
+  postToReplayHost({ type: "error", message });
   return screen;
 }
 
@@ -266,6 +276,9 @@ export function finishReplayLoadingScreen(): void {
   document.documentElement.classList.remove(REPLAY_BOOTING_CLASS);
   document.getElementById(REPLAY_LOADING_ID)?.remove();
   document.getElementById("proxywar-coworld-splash")?.remove();
+  // The first frame is on screen by the time this runs. Yield once without
+  // relying on animation frames in a lazy offscreen iframe.
+  setTimeout(() => postToReplayHost({ type: "ready" }), 0);
 }
 
 function ensureReplayLoadingScreen(): HTMLElement {
