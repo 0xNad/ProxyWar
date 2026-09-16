@@ -55,7 +55,7 @@ jobs:
       batch_merge_shas: ${{ steps.acceptance.outputs.batch_merge_shas || steps.queue.outputs.batch_merge_shas }}
     steps:
       - name: Checkout protected queue code from main
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           persist-credentials: false
@@ -101,7 +101,7 @@ jobs:
     outputs:
       main_ci_run_id: ${{ steps.ci.outputs.main_ci_run_id }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           persist-credentials: false
@@ -134,7 +134,7 @@ jobs:
       version: ${{ steps.state.outputs.version }}
     steps:
       - name: Checkout only protected release control code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.dequeue.outputs.merge_sha }}
           fetch-depth: 1
@@ -142,10 +142,10 @@ jobs:
           sparse-checkout: |
             .github/automation
             .github/scripts
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.8.12"
           enable-cache: false
@@ -272,7 +272,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout exact merged SHA
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.dequeue.outputs.merge_sha }}
           fetch-depth: 0
@@ -286,11 +286,11 @@ jobs:
           git fetch --no-tags origin main
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git merge-base --is-ancestor "$SOURCE_SHA" origin/main
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.8.12"
           enable-cache: false
@@ -375,7 +375,7 @@ jobs:
             --argjson batch_records "$BATCH_RECORDS_JSON" \
             '{source_sha:$source_sha,version:$version,batch_records:$batch_records}' > "$RUNNER_TEMP/coworld-release.json"
       - name: Upload immutable release artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coworld-release-${{ needs.dequeue.outputs.merge_sha }}
           path: |
@@ -414,16 +414,16 @@ jobs:
       PREVIOUS_VERSION: ${{ needs.preflight.outputs.previous_version }}
     steps:
       - name: Checkout only protected deployment control code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.dequeue.outputs.merge_sha }}
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: .github/scripts
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.8.12"
           enable-cache: false
@@ -444,7 +444,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Download exact-source build artifact
         if: ${{ needs.preflight.outputs.idempotent != 'true' }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coworld-release-${{ needs.dequeue.outputs.merge_sha }}
           path: ${{ runner.temp }}/release-artifact
