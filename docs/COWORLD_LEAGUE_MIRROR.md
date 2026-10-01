@@ -176,8 +176,10 @@ Every publish also maintains the persistent world map over the league:
   time). Merged idempotently; a recorded winner is never rewritten. A corrupt
   ledger is left untouched and the last good `world.json` stays published.
 - `artifacts/ai-league-runs/league/world.json` — the public read model the
-  `/world` page fetches (allowlisted beside `read-model.json`). It is rebuilt
-  from the whole ledger on every publish, so it never drifts from it.
+  `/world` page and the front page (`/`) fetch (allowlisted beside
+  `read-model.json`). It is rebuilt from the whole ledger on every publish, so
+  it never drifts from it. Its `links` carry the read model's account and
+  starter URLs, so the front page never has to load the read model.
 
 Each battle's map is one front of an Earth map
 (`src/server/agents/CoworldLeagueWorld.ts`, `WORLD_THEATRES`). A front belongs
@@ -210,9 +212,28 @@ npm run league:world-backfill -- \
   --archive artifacts/coworld-league-mirror/summaries
 ```
 
-The page's Earth (`src/client/publicapp/WorldMapGrid.ts`) is generated from the
-game's own World map; rerun `npx tsx src/scripts/generate-world-map-grid.ts`
-only if the region rules in that script change.
+The pages' Earth (`src/client/publicapp/WorldMapGrid.ts`) is generated from the
+game's own World map: every land tile joins the front of its nearest nation in
+the World manifest, each nation assigned to the front whose battlefield maps
+contain it. Rerun `npx tsx src/scripts/generate-world-map-grid.ts` only if
+those assignments or the source map change; the output is deterministic.
+
+The front page (`src/client/publicapp/HomePage.ts`) is the same world in one
+screen: who is winning, the map with every holder named, the latest takeovers,
+the rule worked through on a real front's last battles, and a prompt for a
+coding agent to enter the league. It states liveness only from measured data
+(the newest battle's age and battles in the last 24 hours), never from the
+configured round schedule.
+
+`/` serves the front page only once `world.json` exists; until then the league
+host sends `/` to the event lobby (`/lobby`) and the apex keeps its static page.
+Roll it out in this order, so the page never shows a partial history:
+
+1. Deploy the mirror, so it publishes `world.json` with every cycle.
+2. Run the backfill above once.
+3. Rebuild the client (`npx vite build`); an old bundle still mounts the lobby
+   at `/`.
+4. Restart the servers.
 
 When the division-wide replay feed is unavailable, the round-scoped fallback
 reads the latest terminal rounds **including failed ones**: a round that misses

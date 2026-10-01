@@ -9,6 +9,7 @@ import {
 } from "../server/agents/CoworldLeagueSiteWriter";
 import {
   battleFromArchivedReplaySummary,
+  type PublicWorldLinks,
   type WorldLedgerBattle,
 } from "../server/agents/CoworldLeagueWorld";
 
@@ -120,14 +121,16 @@ async function main(): Promise<void> {
   const data = await readJson<CoworldLeagueMirrorData>(
     path.join(options.siteDir, "data.json"),
   );
-  const readModel = await readJson<{ agents?: PublicAgent[] }>(
-    path.join(options.siteDir, "read-model.json"),
-  );
+  const readModel = await readJson<{
+    agents?: PublicAgent[];
+    links?: PublicWorldLinks;
+  }>(path.join(options.siteDir, "read-model.json"));
   const result = await withCoworldLeagueSiteWriteLock(options.siteDir, () =>
     publishCoworldLeagueWorldUnlocked({
       siteDir: options.siteDir,
       data,
       readModelAgents: readModel.agents ?? [],
+      links: readModel.links ?? null,
       extraBattles: archived.battles,
     }),
   );

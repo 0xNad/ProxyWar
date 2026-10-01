@@ -104,11 +104,17 @@ export interface WorldFrame {
   readonly phase: number;
 }
 
-const UNCLAIMED: Rgb = [40, 50, 64];
-const QUIET_MIX: Rgb = [52, 62, 78];
+/** Land no agent holds. Exported so page swatches match the map exactly. */
+export const UNCLAIMED_RGB: Rgb = [40, 50, 64];
+/** A quiet front fades this far towards `QUIET_RGB`. */
+export const QUIET_RGB: Rgb = [52, 62, 78];
+export const QUIET_AMOUNT = 0.62;
+/** A siege stripe is the holder mixed this far towards the challenger. */
+export const STRIPE_AMOUNT = 0.85;
+const UNCLAIMED = UNCLAIMED_RGB;
 const OUTLINE: Rgb = [255, 244, 214];
 
-function mix(a: Rgb, b: Rgb, t: number): [number, number, number] {
+export function mix(a: Rgb, b: Rgb, t: number): [number, number, number] {
   return [
     a[0] + (b[0] - a[0]) * t,
     a[1] + (b[1] - a[1]) * t,
@@ -150,10 +156,10 @@ export function paintWorldFrame(
         // Thin challenger-coloured hatching: a siege should read at a glance
         // without drowning the holder's colour.
         if (paint.stripe !== null && (x + y + stripeShift) % 9 < 2) {
-          base = mix(paint.fill, paint.stripe, 0.85);
+          base = mix(paint.fill, paint.stripe, STRIPE_AMOUNT);
         }
         color = paint.quiet
-          ? mix(base, QUIET_MIX, 0.62)
+          ? mix(base, QUIET_RGB, QUIET_AMOUNT)
           : ([...base] as [number, number, number]);
         const shade = 1 + grain[i] * (paint.quiet ? 0.035 : 0.06);
         color[0] *= shade;

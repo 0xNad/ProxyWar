@@ -15,10 +15,11 @@ import { format, resolveConfig } from "prettier";
  * under 1.5°), full-size pixels are `x = 5.5554·lon + 934.39` and
  * `y = -6.1961·lat + 514.07` (2000×1000), i.e. -168°..192° and 83°N..78°S.
  * Rows south of 58°S are cropped (no Antarctica: no league map is fought
- * there). Every land tile is
- * assigned to one theatre by the longitude/latitude rules below — chosen
- * so each theatre covers roughly the ground its league battlefield shows —
- * and leftovers (small islands the rules miss) join the nearest theatre.
+ * there). Every land tile joins the theatre of its nearest nation seed —
+ * the World manifest's own nations, each assigned to the theatre whose
+ * battlefield maps contain it, plus a few extra seeds — measured from a
+ * noise-warped point so borders meander like real ones. Islands join one
+ * theatre whole, and a majority filter smooths stray tiles.
  *
  *   npx tsx src/scripts/generate-world-map-grid.ts
  *
@@ -76,39 +77,145 @@ const THEATRE_CODES = [
 
 type Code = (typeof THEATRE_CODES)[number][0];
 
-function theatreAt(lon: number, lat: number): Code | null {
-  // The Americas, plus Greenland.
-  if (lon < -30 || (lat > 67 && lon < -10)) {
-    return (lat < 13 && lon > -79) || lat < 7.5 ? "b" : "a";
-  }
-  // The British Isles.
-  if (lon >= -11 && lon < 2.2 && lat >= 49.8 && lat < 61) return "c";
-  // Australia, New Zealand, maritime Southeast Asia and the Philippines.
-  if (lat < -10 && lon > 110) return "j";
-  if (lon >= 94 && lat < 8 && lat >= -11) return "j";
-  if (lon >= 116 && lon < 128 && lat >= 4 && lat < 21) return "j";
-  // Eastern China, Korea, Japan, Taiwan.
-  if (lon >= 108 && lat >= 18 && lat < 46) return "i";
-  // The Black Sea basin: Bulgaria, Romania, Ukraine, Turkey, the Caucasus.
-  if (lon >= 22 && lon < 29 && lat >= 41.2 && lat < 52) return "e";
-  if (lon >= 29 && lon < 46 && lat >= 40 && lat < 52) return "e";
-  if (lon >= 26 && lon < 45 && lat >= 36.8 && lat < 40) return "e";
-  if (lon >= 40 && lon < 50.5 && lat >= 38.8 && lat < 44) return "e";
-  // Europe, Iceland and Svalbard; Crete.
-  if (lon >= -25 && lon < 40 && lat >= 36.5) return "d";
-  if (lon >= 19 && lon < 29 && lat >= 34.5 && lat < 36.5) return "d";
-  // Africa and Arabia split along the Red Sea and Sinai.
-  if (lat < 37.5 && lon >= -25 && lon < 55) {
-    if (lat < 12) return lon < 52 ? "g" : null;
-    if (lat < 22) return lon < 42 ? "g" : "f";
-    if (lat < 31.7) return lon < 35.5 ? "g" : "f";
-    return lon < 32 ? "g" : "f";
-  }
-  // Iraq, Iran and the Gulf.
-  if (lon >= 35 && lon < 63 && lat >= 12 && lat < 40) return "f";
-  // The rest of Asia: Siberia, Central and South Asia, Indochina.
-  if (lon >= 40) return "h";
-  return null;
+/**
+ * Theatre of each nation in the World map's own manifest. Membership follows
+ * the nations each theatre's battlefield maps contain (e.g. the Oceania map
+ * includes Thailand and Indonesia; the Black Sea map Türkiye, Ukraine and
+ * Romania). `null` nations (Antarctica) lie south of the crop.
+ */
+const NATION_THEATRES: Record<string, Code | null> = {
+  "United States": "a",
+  Canada: "a",
+  Mexico: "a",
+  Cuba: "a",
+  Greenland: "a",
+  Alaska: "a",
+  Yukon: "a",
+  California: "a",
+  Texas: "a",
+  Quebec: "a",
+  Nunavut: "a",
+  Colombia: "b",
+  Venezuela: "b",
+  Argentina: "b",
+  Brazil: "b",
+  Peru: "b",
+  Uruguay: "b",
+  Bolivia: "b",
+  "United Kingdom": "c",
+  Ireland: "c",
+  Iceland: "d",
+  Spain: "d",
+  Italy: "d",
+  France: "d",
+  Germany: "d",
+  Sweden: "d",
+  Poland: "d",
+  Norway: "d",
+  Finland: "d",
+  Latvia: "d",
+  Belarus: "d",
+  Romania: "e",
+  Türkiye: "e",
+  Ukraine: "e",
+  Iran: "f",
+  "Saudi Arabia": "f",
+  Oman: "f",
+  Algeria: "g",
+  Libya: "g",
+  Egypt: "g",
+  Niger: "g",
+  Sudan: "g",
+  "DR Congo": "g",
+  Ethiopia: "g",
+  "South Africa": "g",
+  Madagascar: "g",
+  Chad: "g",
+  Namibia: "g",
+  Zambia: "g",
+  Morocco: "g",
+  Benin: "g",
+  Senegal: "g",
+  Kenya: "g",
+  Russia: "h",
+  Siberia: "h",
+  Mongolia: "h",
+  Kazakhstan: "h",
+  India: "h",
+  Bhutan: "h",
+  Pakistan: "h",
+  "Sri Lanka": "h",
+  China: "i",
+  Japan: "i",
+  Taiwan: "i",
+  Australia: "j",
+  "New Zealand": "j",
+  Indonesia: "j",
+  Philippines: "j",
+  Thailand: "j",
+  Antarctica: null,
+  "West Antarctica": null,
+  "East Antarctica": null,
+};
+
+/**
+ * Extra seeds (longitude, latitude) where the manifest's nations alone would
+ * draw a border through the wrong country: the Levant, Mesopotamia and
+ * Yemen; Somalia; Korea and Manchuria; Russia's Pacific coast; the Caucasus
+ * and Bulgaria; European Russia and the Balkans.
+ */
+const EXTRA_SEEDS: ReadonlyArray<readonly [number, number, Code]> = [
+  [44, 33, "f"],
+  [38, 34.5, "f"],
+  [48.5, 16.5, "f"],
+  [46, 6, "g"],
+  [140, 60, "h"],
+  [158, 59, "h"],
+  [172, 66, "h"],
+  [127.5, 37.5, "i"],
+  [126, 45, "i"],
+  [114, 24, "i"],
+  [44, 42, "e"],
+  [25.5, 42.7, "e"],
+  [40, 56, "d"],
+  [50, 58, "d"],
+  [20.5, 44, "d"],
+  [22, 39.5, "d"],
+];
+
+/** Seeds that claim only the island they stand on (no mainland Brittany). */
+const ISLAND_ONLY = new Set(["United Kingdom", "Ireland"]);
+
+/** Smooth, deterministic value noise in [-1, 1]. */
+function noise(x: number, y: number, scale: number, salt: number): number {
+  const hash = (ix: number, iy: number) => {
+    let h =
+      Math.imul(ix, 374761393) +
+      Math.imul(iy, 668265263) +
+      Math.imul(salt, 362437);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  };
+  const gx = x / scale;
+  const gy = y / scale;
+  const ix = Math.floor(gx);
+  const iy = Math.floor(gy);
+  const fx = gx - ix;
+  const fy = gy - iy;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const top = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * sx;
+  const bottom =
+    hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * sx;
+  return (top + (bottom - top) * sy) * 2 - 1;
+}
+
+/** Warped sample point, so borders between seeds meander like real ones. */
+function warp(x: number, y: number): readonly [number, number] {
+  return [
+    x + 4.5 * noise(x, y, 14, 1) + 1.8 * noise(x, y, 5, 2),
+    y + 4.5 * noise(x, y, 14, 3) + 1.8 * noise(x, y, 5, 4),
+  ];
 }
 
 async function main(): Promise<void> {
@@ -122,7 +229,6 @@ async function main(): Promise<void> {
   if (bytes.length !== SOURCE_WIDTH * SOURCE_HEIGHT) {
     throw new Error(`unexpected map16x size ${bytes.length}`);
   }
-  const lonOf = (x: number) => lonOfPixel((x + 0.5) * SOURCE_SCALE);
   const latOf = (y: number) => latOfPixel((y + 0.5) * SOURCE_SCALE);
   const rows: number[] = [];
   for (let y = 0; y < SOURCE_HEIGHT; y++) {
@@ -130,45 +236,154 @@ async function main(): Promise<void> {
   }
   const width = SOURCE_WIDTH;
   const height = rows.length;
-  const grid: (Code | "." | "?")[][] = rows.map((y) =>
+  const isLand = (x: number, y: number) =>
+    (bytes[rows[y] * SOURCE_WIDTH + x] & 0x80) !== 0;
+
+  // Land masses (4-connected), so island-only seeds stay on their islands.
+  const component = new Int32Array(width * height).fill(-1);
+  const componentSize: number[] = [];
+  for (let start = 0; start < width * height; start++) {
+    if (component[start] !== -1) continue;
+    if (!isLand(start % width, Math.floor(start / width))) continue;
+    const id = componentSize.length;
+    const stack = [start];
+    component[start] = id;
+    let size = 0;
+    while (stack.length > 0) {
+      const i = stack.pop() as number;
+      size++;
+      const x = i % width;
+      const y = Math.floor(i / width);
+      for (const [nx, ny] of [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ]) {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const n = ny * width + nx;
+        if (component[n] !== -1 || !isLand(nx, ny)) continue;
+        component[n] = id;
+        stack.push(n);
+      }
+    }
+    componentSize.push(size);
+  }
+  /** Islands only: Great Britain and Ireland, never the continents. */
+  const ISLAND_MAX_TILES = 2500;
+
+  const manifest = JSON.parse(
+    readFileSync(path.join(root, "resources/maps/world/manifest.json"), "utf8"),
+  ) as { nations: { name: string; coordinates: [number, number] }[] };
+  interface Seed {
+    readonly x: number;
+    readonly y: number;
+    readonly code: Code;
+    readonly islandOnly: boolean;
+  }
+  const seeds: Seed[] = [];
+  for (const nation of manifest.nations) {
+    if (!(nation.name in NATION_THEATRES)) {
+      throw new Error(`nation ${nation.name} has no theatre assignment`);
+    }
+    const code = NATION_THEATRES[nation.name];
+    if (code === null) continue;
+    seeds.push({
+      x: nation.coordinates[0] / SOURCE_SCALE,
+      y: nation.coordinates[1] / SOURCE_SCALE,
+      code,
+      islandOnly: ISLAND_ONLY.has(nation.name),
+    });
+  }
+  for (const [lon, lat, code] of EXTRA_SEEDS) {
+    seeds.push({
+      x: (PROJECTION.ax * lon + PROJECTION.bx) / SOURCE_SCALE,
+      y: (PROJECTION.ay * lat + PROJECTION.by) / SOURCE_SCALE,
+      code,
+      islandOnly: false,
+    });
+  }
+
+  // Every land tile joins its nearest seed, measured from a warped point so
+  // borders meander instead of running as straight Voronoi edges.
+  let grid: (Code | ".")[][] = Array.from({ length: height }, (_, y) =>
     Array.from({ length: width }, (_, x) => {
-      const land = (bytes[y * SOURCE_WIDTH + x] & 0x80) !== 0;
-      if (!land) return ".";
-      return theatreAt(lonOf(x), latOf(y)) ?? "?";
+      if (!isLand(x, y)) return ".";
+      const onIsland =
+        componentSize[component[y * width + x]] <= ISLAND_MAX_TILES;
+      const [wx, wy] = warp(x + 0.5, rows[y] + 0.5);
+      let best: Seed | null = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const seed of seeds) {
+        if (seed.islandOnly && !onIsland) continue;
+        const distance = (seed.x - wx) ** 2 + (seed.y - wy) ** 2;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = seed;
+        }
+      }
+      return (best as Seed).code;
     }),
   );
-  // Leftover land joins the nearest assigned tile (breadth-first, wrapping
-  // east-west like the map itself).
-  const queue: [number, number][] = [];
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const cell = grid[y][x];
-      if (cell !== "." && cell !== "?") queue.push([x, y]);
-    }
+  // An island belongs to one front: the theatre most of its tiles chose.
+  const islandVotes = new Map<number, Map<Code, number>>();
+  grid.forEach((row, y) =>
+    row.forEach((cell, x) => {
+      const id = component[y * width + x];
+      if (cell === "." || componentSize[id] > ISLAND_MAX_TILES) return;
+      const votes = islandVotes.get(id) ?? new Map<Code, number>();
+      votes.set(cell, (votes.get(cell) ?? 0) + 1);
+      islandVotes.set(id, votes);
+    }),
+  );
+  const islandCode = new Map<number, Code>();
+  for (const [id, votes] of islandVotes) {
+    const ranked = [...votes].sort(
+      (a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1),
+    );
+    islandCode.set(id, ranked[0][0]);
   }
-  for (let head = 0; head < queue.length; head++) {
-    const [x, y] = queue[head];
-    for (const [dx, dy] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ]) {
-      const nx = (x + dx + width) % width;
-      const ny = y + dy;
-      if (ny < 0 || ny >= height || grid[ny][nx] !== "?") continue;
-      grid[ny][nx] = grid[y][x];
-      queue.push([nx, ny]);
-    }
+  grid = grid.map((row, y) =>
+    row.map((cell, x) =>
+      cell === "." ? cell : (islandCode.get(component[y * width + x]) ?? cell),
+    ),
+  );
+  // Two majority passes smooth single-tile speckles out of the borders.
+  for (let pass = 0; pass < 2; pass++) {
+    grid = grid.map((row, y) =>
+      row.map((cell, x) => {
+        if (cell === ".") return cell;
+        const votes = new Map<Code, number>();
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const ny = y + dy;
+            const nx = x + dx;
+            if (ny < 0 || nx < 0 || ny >= height || nx >= width) continue;
+            const neighbour = grid[ny][nx];
+            if (neighbour === ".") continue;
+            if (component[ny * width + nx] !== component[y * width + x])
+              continue;
+            votes.set(neighbour, (votes.get(neighbour) ?? 0) + 1);
+          }
+        }
+        let winner: Code = cell;
+        let most = votes.get(cell) ?? 0;
+        for (const [code, count] of votes) {
+          if (count > most + 2) {
+            winner = code;
+            most = count;
+          }
+        }
+        return winner;
+      }),
+    );
   }
   const encodedRows = grid.map((row) => {
     let out = "";
     for (let x = 0; x < row.length; ) {
       let run = 1;
       while (x + run < row.length && row[x + run] === row[x]) run++;
-      // A tile still "?" here is isolated from every theatre; draw it as sea.
-      const cell = row[x] === "?" ? "." : row[x];
-      out += (run > 1 ? String(run) : "") + cell;
+      out += (run > 1 ? String(run) : "") + row[x];
       x += run;
     }
     return out;

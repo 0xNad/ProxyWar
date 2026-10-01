@@ -114,6 +114,11 @@ export const WorldModelSchema = z.object({
   events: z.array(WorldEventSchema),
   timeline: z.array(WorldDaySchema),
   agents: z.array(WorldAgentSchema),
+  /** Absent from a world.json published before the front page existed. */
+  links: z
+    .object({ accountUrl: z.string(), enterTheLeagueUrl: z.string() })
+    .nullable()
+    .optional(),
 });
 export type WorldModel = z.infer<typeof WorldModelSchema>;
 

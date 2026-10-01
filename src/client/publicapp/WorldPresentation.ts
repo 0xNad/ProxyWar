@@ -1,3 +1,4 @@
+import type { FrontPaint } from "./WorldMapRenderer";
 import type {
   WorldAgent,
   WorldModel,
@@ -150,6 +151,53 @@ export function frontDisplayState(
   if (Number.isFinite(last) && now - last > WORLD_QUIET_AFTER_MS)
     return "quiet";
   return theatre.status === "contested" ? "contested" : "held";
+}
+
+/** An agent's map colour: its banner, else its identity colour. */
+export function bannerColorOf(
+  name: string | null,
+  colors: ReadonlyMap<string, string>,
+  model: WorldModel,
+): string {
+  if (name === null) return "#64748b";
+  return (
+    colors.get(name) ??
+    model.agents.find((agent) => agent.name === name)?.color ??
+    "#94a3b8"
+  );
+}
+
+/**
+ * How each front is painted in one map frame: the holder's banner, the
+ * challenger's hatching while under siege, muted once quiet. `revealed`
+ * lets a page bring fronts in one by one; `changed` outlines the fronts
+ * that changed hands since the visitor's last visit.
+ */
+export function frontPaints(
+  model: WorldModel,
+  colors: ReadonlyMap<string, string>,
+  now: number,
+  options: {
+    readonly revealed?: (id: WorldTheatreId) => boolean;
+    readonly changed?: readonly WorldTheatreId[];
+  } = {},
+): Partial<Record<WorldTheatreId, FrontPaint>> {
+  const rgb = (name: string | null) =>
+    name === null ? null : hexToRgb(bannerColorOf(name, colors, model));
+  const paints: Partial<Record<WorldTheatreId, FrontPaint>> = {};
+  for (const theatre of model.theatres) {
+    if (theatre.id === "crown") continue;
+    const display = frontDisplayState(theatre, now);
+    const revealed = options.revealed?.(theatre.id) ?? true;
+    paints[theatre.id] = {
+      fill: display === "unclaimed" || !revealed ? null : rgb(theatre.holder),
+      stripe:
+        display === "contested" && revealed ? rgb(theatre.challenger) : null,
+      quiet: display === "quiet",
+      changed: options.changed?.includes(theatre.id) ?? false,
+    };
+  }
+  return paints;
 }
 
 export type FeedState =

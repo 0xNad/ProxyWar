@@ -2,25 +2,21 @@ import { html, LitElement, nothing, svg, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { assetUrl } from "../../core/AssetUrls";
-import { getMapName, translateText } from "../Utils";
+import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
+import { ensurePublicFonts } from "./PublicFonts";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_GRATICULE,
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
-import {
-  paintWorldFrame,
-  theatreAtPoint,
-  type FrontPaint,
-  type Rgb,
-} from "./WorldMapRenderer";
+import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
@@ -36,7 +32,7 @@ import {
   changedSinceVisit,
   feedState,
   frontDisplayState,
-  hexToRgb,
+  frontPaints,
   parseVisitSnapshot,
   relativeAge,
   visitSnapshot,
@@ -44,6 +40,7 @@ import {
   worldVerdict,
   type FrontDisplayState,
 } from "./WorldPresentation";
+import { battlefieldName } from "./WorldText";
 
 /**
  * `/world` — the persistent world map over the league. Every league battle
@@ -136,24 +133,11 @@ function storageSet(key: string, value: string): void {
 /** Overpass ships with the game (`resources/fonts`); the highway-sign face suits map labels. */
 function ensureWorldStyles(): void {
   if (typeof document === "undefined") return;
+  ensurePublicFonts();
   if (document.getElementById(STYLE_ELEMENT_ID) !== null) return;
   const style = document.createElement("style");
   style.id = STYLE_ELEMENT_ID;
-  let regular = "";
-  let bold = "";
-  try {
-    regular = assetUrl("fonts/overpass.woff");
-    bold = assetUrl("fonts/overpass-bold.woff");
-  } catch {
-    // No asset manifest (tests): fall back to the system stack.
-  }
-  style.textContent = `${
-    regular !== ""
-      ? `@font-face{font-family:"PW Overpass";src:url("${regular}") format("woff");font-weight:400;font-display:swap}
-@font-face{font-family:"PW Overpass";src:url("${bold}") format("woff");font-weight:700;font-display:swap}`
-      : ""
-  }
-${WORLD_PAGE_CSS}`;
+  style.textContent = WORLD_PAGE_CSS;
   document.head.appendChild(style);
 }
 
@@ -292,28 +276,14 @@ export class WorldPage extends LitElement {
     this.image ??= context.createImageData(WORLD_GRID_WIDTH, WORLD_GRID_HEIGHT);
     const reveal = this.revealProgress(time);
     this.paintedReveal = reveal;
-    const fronts: Partial<Record<WorldTheatreId, FrontPaint>> = {};
+    // Fronts come in west to east.
     const order = [...WORLD_REGION_IDS].sort(
       (a, b) => WORLD_GRID_ANCHORS[a].x - WORLD_GRID_ANCHORS[b].x,
     );
-    for (const theatre of model.theatres) {
-      if (theatre.id === "crown") continue;
-      const display = frontDisplayState(theatre, this.now);
-      const revealed = reveal >= (order.indexOf(theatre.id) + 1) / order.length;
-      const fill =
-        display === "unclaimed" || !revealed
-          ? null
-          : this.rgbFor(theatre.holder);
-      fronts[theatre.id] = {
-        fill,
-        stripe:
-          display === "contested" && revealed
-            ? this.rgbFor(theatre.challenger)
-            : null,
-        quiet: display === "quiet",
-        changed: this.changed.includes(theatre.id) && reveal >= 1,
-      };
-    }
+    const fronts = frontPaints(model, this.colors, this.now, {
+      revealed: (id) => reveal >= (order.indexOf(id) + 1) / order.length,
+      changed: reveal >= 1 ? this.changed : [],
+    });
     const phase = reducedMotion()
       ? 0
       : (time % STRIPE_CYCLE_MS) / STRIPE_CYCLE_MS;
@@ -325,11 +295,6 @@ export class WorldPage extends LitElement {
       const glow = this.querySelector<HTMLCanvasElement>("canvas.wp-glow");
       glow?.getContext("2d")?.putImageData(this.image, 0, 0);
     }
-  }
-
-  private rgbFor(name: string | null): Rgb | null {
-    if (name === null) return null;
-    return hexToRgb(this.bannerColor(name));
   }
 
   private revealProgress(time: number): number {
@@ -452,11 +417,7 @@ export class WorldPage extends LitElement {
   }
 
   private battlefieldName(map: string): string {
-    const key = battlefieldKey(map);
-    const translated = getMapName(map);
-    return translated === null || translated === `map.${key}`
-      ? map
-      : translated;
+    return battlefieldName(map);
   }
 
   private age(iso: string | null): string {

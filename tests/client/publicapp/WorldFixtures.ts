@@ -241,6 +241,10 @@ export function worldFixture(overrides: Partial<WorldModel> = {}): WorldModel {
         battlesWon: 1079,
       },
     ],
+    links: {
+      accountUrl: "https://proxywar.xyz/account",
+      enterTheLeagueUrl: "https://github.com/0xNad/proxywar-coworld-starter",
+    },
     ...overrides,
   };
 }

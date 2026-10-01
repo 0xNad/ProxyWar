@@ -1177,19 +1177,7 @@ async function sendPublicAppShellPage(
   status = 200,
 ): Promise<void> {
   try {
-    const appShell = await getAppShellContent(
-      path.resolve(staticRootDir, "public.html"),
-    );
-    const scriptNonce = randomBytes(24).toString("base64");
-    res.setHeader(
-      "Content-Security-Policy",
-      pageContentSecurityPolicyWithNonce(
-        leagueContentSecurityPolicy(),
-        scriptNonce,
-      ),
-    );
-    setHtmlNoCacheHeaders(res);
-    res.status(status).send(nonceInlineScripts(appShell, scriptNonce));
+    await writePublicAppShellPage(res, status);
   } catch (error) {
     console.error(
       `Failed to serve ${failureLabel}: ${
@@ -1200,6 +1188,59 @@ async function sendPublicAppShellPage(
       .status(503)
       .send(`Proxy War ${failureLabel} is not built for this server.`);
   }
+}
+
+let frontPageFallbackLogged = false;
+
+/** Like `sendPublicAppShellPage`, but reports a missing build instead of answering 503. */
+async function trySendPublicAppShellPage(res: Response): Promise<boolean> {
+  try {
+    await writePublicAppShellPage(res, 200);
+    return true;
+  } catch (error) {
+    if (!frontPageFallbackLogged) {
+      frontPageFallbackLogged = true;
+      console.error(
+        `Failed to serve the front page, falling back: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return false;
+  }
+}
+
+/**
+ * The front page reads the mirror-published `world.json`. Until the mirror
+ * has published one, "/" keeps serving what it served before (the static
+ * apex page, or the event lobby on the league host) instead of an error.
+ */
+async function frontPageDataReady(): Promise<boolean> {
+  try {
+    await fs.access(path.join(runsRootDir, "league", "world.json"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writePublicAppShellPage(
+  res: Response,
+  status: number,
+): Promise<void> {
+  const appShell = await getAppShellContent(
+    path.resolve(staticRootDir, "public.html"),
+  );
+  const scriptNonce = randomBytes(24).toString("base64");
+  res.setHeader(
+    "Content-Security-Policy",
+    pageContentSecurityPolicyWithNonce(
+      leagueContentSecurityPolicy(),
+      scriptNonce,
+    ),
+  );
+  setHtmlNoCacheHeaders(res);
+  res.status(status).send(nonceInlineScripts(appShell, scriptNonce));
 }
 /**
  * P0 fix (found live 2026-08-02): `/ai-league-replay/<bad-id>` rendered a
@@ -1537,23 +1578,40 @@ async function sendMatchDetailPageShell(
       .send("Proxy War the match detail page is not built for this server.");
   }
 }
-// The event lobby (spec Stage 2 item 4) — replaces the bare
-// `leagueWrapperOnly` gate's `res.redirect("/league")` fallback for "/"
-// that the live beta.proxywar.xyz process has served until now. Only takes
-// over in that exact mode: `leagueWrapperOnly && !platformEnabled` is
-// precisely the condition under which the later gate middleware (below)
-// would otherwise have redirected "/" to `/league`. Every other mode falls
-// through via `next()` to the existing conditional handler further down
-// this file (`platformEnabled` -> platform root page;
-// `betaAccess.enabled` -> `/public`; else -> the internal demo hub) —
-// unchanged, untouched, never intercepted.
+// The front page (`HomePage.ts`): who holds the world right now, read from
+// the mirror-published `world.json`. It is "/" on both public hosts — the
+// league host (`leagueWrapperOnly`, where the later gate middleware would
+// otherwise redirect "/" to `/league`) and the platform apex
+// (`platformEnabled`) — once `world.json` exists. Before that, the league
+// host sends "/" to the event lobby it used to show there, and the apex
+// falls through via `next()` to the static `renderPlatformRootHtml` page
+// further down (as it also does when the app isn't built), so the front
+// door never shows an error. Every other mode falls through unchanged
+// (`betaAccess.enabled` -> `/public`; else -> the internal demo hub).
 //
 app.get("/", async (_req, res, next) => {
   if (leagueWrapperOnly && !platformEnabled) {
-    await sendPublicAppShellPage(res, "the event lobby");
+    if (await frontPageDataReady()) {
+      await sendPublicAppShellPage(res, "the front page");
+    } else {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      res.redirect(302, "/lobby");
+    }
+    return;
+  }
+  if (
+    platformEnabled &&
+    (await frontPageDataReady()) &&
+    (await trySendPublicAppShellPage(res))
+  ) {
     return;
   }
   next();
+});
+// The event lobby (spec Stage 2 item 4) — the premiere countdown/live page
+// that was "/" on the league host before the front page.
+app.get("/lobby", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the event lobby");
 });
 app.get("/watch", async (_req, res) => {
   await sendPublicAppShellPage(res, "the watch page");

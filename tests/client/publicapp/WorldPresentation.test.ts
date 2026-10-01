@@ -4,6 +4,7 @@ import {
   changedSinceVisit,
   feedState,
   frontDisplayState,
+  frontPaints,
   hueOf,
   parseVisitSnapshot,
   relativeAge,
@@ -108,6 +109,42 @@ describe("front states and verdict", () => {
       value: 3,
     });
     expect(relativeAge("2026-08-01T00:00:00.000Z", NOW).unit).toBe("date");
+  });
+});
+
+describe("frontPaints", () => {
+  it("fills held fronts, hatches sieges with the challenger, mutes quiet ones and skips the Crown", () => {
+    const model = worldFixture();
+    const colors = assignBannerColors(model);
+    const rgb = (name: string) => {
+      const hex = colors.get(name) ?? "";
+      const n = parseInt(hex.slice(1), 16);
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    };
+    const paints = frontPaints(model, colors, NOW, { changed: ["oceania"] });
+    expect(paints.asia).toEqual({
+      fill: rgb("Matt Van"),
+      stripe: rgb("relh"),
+      quiet: false,
+      changed: false,
+    });
+    expect(paints.oceania).toMatchObject({
+      fill: rgb("Alpha"),
+      stripe: null,
+      changed: true,
+    });
+    expect(paints.africa).toMatchObject({ fill: null, stripe: null });
+    expect(paints.crown).toBeUndefined();
+
+    const later = frontPaints(
+      model,
+      colors,
+      Date.parse("2026-10-20T00:00:00.000Z"),
+    );
+    expect(later.asia).toMatchObject({ quiet: true, stripe: null });
+
+    const hidden = frontPaints(model, colors, NOW, { revealed: () => false });
+    expect(hidden.asia).toMatchObject({ fill: null, stripe: null });
   });
 });
 

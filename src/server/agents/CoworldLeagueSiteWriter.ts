@@ -43,6 +43,7 @@ import {
   readWorldLedgerStore,
   reduceWorld,
   serialiseWorldLedgerStore,
+  type PublicWorldLinks,
   type WorldLedgerBattle,
 } from "./CoworldLeagueWorld";
 import {
@@ -608,6 +609,8 @@ export async function publishCoworldLeagueWorldUnlocked(args: {
   siteDir: string;
   data: CoworldLeagueMirrorData;
   readModelAgents: readonly PublicAgent[];
+  /** The read model's account and starter links, for the front page. */
+  links?: PublicWorldLinks | null;
   extraBattles?: readonly WorldLedgerBattle[];
 }): Promise<CoworldLeagueWorldPublication> {
   const worldPath = path.join(args.siteDir, COWORLD_LEAGUE_WORLD_FILE);
@@ -637,6 +640,7 @@ export async function publishCoworldLeagueWorldUnlocked(args: {
       ledger,
       data: args.data,
       readModelAgents: args.readModelAgents,
+      links: args.links ?? null,
     });
     await writeFileAtomic(worldPath, `${JSON.stringify(world)}\n`);
     return { worldPath, worldLedgerPath, battlesAdded, published: true };
@@ -870,6 +874,7 @@ async function writeCoworldLeagueSiteUnlocked(
     siteDir,
     data,
     readModelAgents: readModel.agents,
+    links: readModel.links,
   });
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));

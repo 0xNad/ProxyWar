@@ -125,6 +125,14 @@ describe("world map publication", () => {
     expect(
       world.agents.find((agent: { name: string }) => agent.name === "Matt Van"),
     ).toMatchObject({ theatres: ["oceania"] });
+    // The front page's entry points come from the same publish's read model.
+    const readModel = JSON.parse(
+      await readFile(path.join(siteDir, "read-model.json"), "utf8"),
+    );
+    expect(world.links).toEqual({
+      accountUrl: readModel.links.accountUrl,
+      enterTheLeagueUrl: readModel.links.enterTheLeagueUrl,
+    });
 
     // The next cycle sees one old battle again plus one new one.
     const ledgerBefore = await readFile(paths.worldLedgerPath, "utf8");

@@ -13,6 +13,7 @@ import "./publicapp/BuilderDashboardPage";
 import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
 import "./publicapp/BuildPage";
+import "./publicapp/HomePage";
 import "./publicapp/LegalInfoPage";
 import "./publicapp/LobbyPage";
 import "./publicapp/MatchDetailPage";
@@ -58,6 +59,10 @@ document.head.appendChild(document.createElement("lang-selector"));
 
 function mount(pathname: string): boolean {
   if (pathname === "/") {
+    document.body.replaceChildren(document.createElement("home-page"));
+    return true;
+  }
+  if (pathname === "/lobby") {
     document.body.replaceChildren(document.createElement("lobby-page"));
     return true;
   }

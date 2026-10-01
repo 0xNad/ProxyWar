@@ -210,6 +210,32 @@ describe("GET / (real servers)", () => {
     expect(response.body).not.toContain("Proxy War Demo");
   });
 
+  test("PROXYWAR_PLATFORM_ENABLED serves the front page at / only once world.json is published and the app is built", async () => {
+    const worldPath = path.join(
+      platformFixture,
+      "artifacts",
+      "ai-league-runs",
+      "league",
+      "world.json",
+    );
+    const appShellPath = path.join(platformFixture, "static", "public.html");
+    // world.json alone, with no app build: still the static page.
+    await writeFile(worldPath, "{}", "utf8");
+    let response = await rawRequest(platformOrigin, "/");
+    expect(response.status).toBe(200);
+    expect(response.body).toContain("<h2>League</h2>");
+    // Both: the app shell, where the front page mounts.
+    await writeFile(
+      appShellPath,
+      '<!doctype html><html><head><title>Proxy War</title><script>window.publicApp = true;</script></head><body data-shell="public-app"></body></html>',
+      "utf8",
+    );
+    response = await rawRequest(platformOrigin, "/");
+    expect(response.status).toBe(200);
+    expect(response.body).toContain('data-shell="public-app"');
+    expect(response.body).not.toContain("<h2>League</h2>");
+  });
+
   test("without PROXYWAR_PLATFORM_ENABLED, / renders the byte-identical internal demo hub", async () => {
     const response = await rawRequest(hubOrigin, "/");
     expect(response.status).toBe(200);

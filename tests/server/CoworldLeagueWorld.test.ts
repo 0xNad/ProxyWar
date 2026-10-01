@@ -548,5 +548,24 @@ describe("buildPublicWorldModel", () => {
       currentRoundNumber: 2353,
       roundIntervalMinutes: 40,
     });
+    expect(model.links).toBeNull();
+  });
+
+  test("carries the read model's account and starter links for the front page", () => {
+    const store = ledger(series("Oceania", ["Alpha"]));
+    const model = buildPublicWorldModel({
+      state: reduceWorld(store, 4),
+      ledger: store,
+      data: mirrorData(),
+      readModelAgents: [],
+      links: {
+        accountUrl: "https://proxywar.xyz/account",
+        enterTheLeagueUrl: "https://github.com/0xNad/proxywar-coworld-starter",
+      },
+    });
+    expect(model.links).toEqual({
+      accountUrl: "https://proxywar.xyz/account",
+      enterTheLeagueUrl: "https://github.com/0xNad/proxywar-coworld-starter",
+    });
   });
 });

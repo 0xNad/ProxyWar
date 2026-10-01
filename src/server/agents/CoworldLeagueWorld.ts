@@ -879,6 +879,16 @@ export interface PublicWorldModel {
   readonly events: readonly PublicWorldEvent[];
   readonly timeline: readonly WorldDaySnapshot[];
   readonly agents: readonly PublicWorldAgent[];
+  /**
+   * The read model's entry points, so the front page can link to accounts
+   * and the starter without fetching the whole read model.
+   */
+  readonly links: PublicWorldLinks | null;
+}
+
+export interface PublicWorldLinks {
+  readonly accountUrl: string;
+  readonly enterTheLeagueUrl: string;
 }
 
 const FALLBACK_AGENT_COLOR = "#94a3b8";
@@ -972,6 +982,7 @@ export function buildPublicWorldModel(args: {
   readonly ledger: WorldLedgerStore;
   readonly data: CoworldLeagueMirrorData;
   readonly readModelAgents: readonly PublicAgent[];
+  readonly links?: PublicWorldLinks | null;
   readonly generatedAt?: string;
 }): PublicWorldModel {
   const { state, ledger, data } = args;
@@ -1078,5 +1089,12 @@ export function buildPublicWorldModel(args: {
     events,
     timeline,
     agents,
+    links:
+      args.links === undefined || args.links === null
+        ? null
+        : {
+            accountUrl: args.links.accountUrl,
+            enterTheLeagueUrl: args.links.enterTheLeagueUrl,
+          },
   };
 }
