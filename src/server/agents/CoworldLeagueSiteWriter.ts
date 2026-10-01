@@ -19,6 +19,7 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import type { PublicAgent } from "../ProxyWarPublicReadModel";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import { readAgentStatsArtifact } from "./AgentStatsArtifact";
 import {
@@ -35,6 +36,15 @@ import {
   snapshotFromMirrorData,
   type StandingsHistoryStore,
 } from "./CoworldLeagueStandingsHistory";
+import {
+  battlesFromMirrorData,
+  buildPublicWorldModel,
+  mergeWorldLedger,
+  readWorldLedgerStore,
+  reduceWorld,
+  serialiseWorldLedgerStore,
+  type WorldLedgerBattle,
+} from "./CoworldLeagueWorld";
 import {
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
@@ -253,7 +263,14 @@ export interface CoworldLeagueSitePaths {
   dataPath: string;
   readModelPath: string;
   standingsHistoryPath: string;
+  /** Public `/world` read model (`world.json`). */
+  worldPath: string;
+  /** Private append-only battle ledger the world is reduced from. */
+  worldLedgerPath: string;
 }
+
+export const COWORLD_LEAGUE_WORLD_FILE = "world.json";
+export const COWORLD_LEAGUE_WORLD_LEDGER_FILE = "world-ledger.json";
 
 /**
  * Share of a match's decisions that must fall back before the card shows a
@@ -568,6 +585,71 @@ async function copySocialImage(siteDir: string): Promise<void> {
   }
 }
 
+export interface CoworldLeagueWorldPublication {
+  worldPath: string;
+  worldLedgerPath: string;
+  /** Battles the ledger did not have before this publication. */
+  battlesAdded: number;
+  /** `false` when the ledger was unreadable and nothing was written. */
+  published: boolean;
+}
+
+/**
+ * Appends this publish's battles (plus any `extraBattles`, e.g. the archive
+ * backfill) to `world-ledger.json` and republishes `world.json` from the
+ * whole ledger. Caller must hold the site write lock.
+ *
+ * Same last-good discipline as `standings-history.json`: a corrupt ledger is
+ * never overwritten (and `world.json` keeps its last good version), and any
+ * failure here is logged and swallowed — the world map is a derived
+ * surface, so it must never fail a league publish.
+ */
+export async function publishCoworldLeagueWorldUnlocked(args: {
+  siteDir: string;
+  data: CoworldLeagueMirrorData;
+  readModelAgents: readonly PublicAgent[];
+  extraBattles?: readonly WorldLedgerBattle[];
+}): Promise<CoworldLeagueWorldPublication> {
+  const worldPath = path.join(args.siteDir, COWORLD_LEAGUE_WORLD_FILE);
+  const worldLedgerPath = path.join(
+    args.siteDir,
+    COWORLD_LEAGUE_WORLD_LEDGER_FILE,
+  );
+  try {
+    const existing = await readWorldLedgerStore(worldLedgerPath);
+    if (existing === "corrupt") {
+      console.warn(
+        `coworld-league-mirror: ${COWORLD_LEAGUE_WORLD_LEDGER_FILE} is corrupt, leaving it untouched and keeping the last published world: ${worldLedgerPath}`,
+      );
+      return { worldPath, worldLedgerPath, battlesAdded: 0, published: false };
+    }
+    const incoming = [
+      ...(args.extraBattles ?? []),
+      ...battlesFromMirrorData(args.data),
+    ];
+    const ledger = mergeWorldLedger(existing, incoming);
+    const battlesAdded = ledger.battles.length - existing.battles.length;
+    if (ledger !== existing) {
+      await writeFileAtomic(worldLedgerPath, serialiseWorldLedgerStore(ledger));
+    }
+    const world = buildPublicWorldModel({
+      state: reduceWorld(ledger),
+      ledger,
+      data: args.data,
+      readModelAgents: args.readModelAgents,
+    });
+    await writeFileAtomic(worldPath, `${JSON.stringify(world)}\n`);
+    return { worldPath, worldLedgerPath, battlesAdded, published: true };
+  } catch (error) {
+    console.warn(
+      `coworld-league-mirror: world map publish failed, keeping the last published world: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return { worldPath, worldLedgerPath, battlesAdded: 0, published: false };
+  }
+}
+
 async function writeCoworldLeagueSiteUnlocked(
   siteDir: string,
   data: CoworldLeagueMirrorData,
@@ -781,6 +863,14 @@ async function writeCoworldLeagueSiteUnlocked(
     seasonRegistry,
     archivedFeaturedMatchReplayHrefs,
   );
+  // The persistent world map (`/world`) — built from the same `data` and
+  // identity resolution as the read model, before data.json/read-model.json
+  // so a page that sees the new snapshot never sees an older world.
+  const world = await publishCoworldLeagueWorldUnlocked({
+    siteDir,
+    data,
+    readModelAgents: readModel.agents,
+  });
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
   await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
@@ -794,6 +884,8 @@ async function writeCoworldLeagueSiteUnlocked(
     dataPath,
     readModelPath,
     standingsHistoryPath,
+    worldPath: world.worldPath,
+    worldLedgerPath: world.worldLedgerPath,
   };
 }
 

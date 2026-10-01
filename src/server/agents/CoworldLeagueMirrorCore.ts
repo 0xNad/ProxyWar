@@ -507,13 +507,27 @@ export interface CoworldRecentRoundEpisodeRead {
  * The latest completed round must itself be readable before this result can
  * count as fresh. Older successful round reads may fill the display window,
  * but they cannot make an unreadable latest round look healthy.
+ *
+ * `includeFailedRounds` is for the REPLAY feed only. A round that fails the
+ * ladder's integrity threshold still contains episodes that finished and
+ * published replays — real battles the division-wide replay feed used to
+ * return. The hosted API no longer accepts a division filter for episode
+ * requests (HTTP 422 since late 2026-09), so this fallback is now the only
+ * replay path; without failed rounds, a run of failed rounds froze every
+ * battle surface on the last round that happened to pass. With the flag,
+ * "latest round" means the latest terminal round (completed or failed), and
+ * only completed episodes count toward `minimumRows`, so the window fills
+ * with watchable battles rather than failed requests. Round integrity keeps
+ * calling this without the flag: its verdict is about rated rounds only.
  */
 export async function readRecentRoundEpisodeRows(args: {
   roundsRaw: unknown;
   readCoworldJson: (args: string[]) => Promise<unknown>;
   minimumRows: number;
   maximumRounds?: number;
+  includeFailedRounds?: boolean;
 }): Promise<CoworldRecentRoundEpisodeRead> {
+  const includeFailedRounds = args.includeFailedRounds === true;
   const maximumRounds = args.maximumRounds ?? 10;
   if (
     !Number.isInteger(args.minimumRows) ||
@@ -528,7 +542,8 @@ export async function readRecentRoundEpisodeRows(args: {
     .filter(
       (round): round is Record<string, unknown> =>
         round !== null &&
-        round.status === "completed" &&
+        (round.status === "completed" ||
+          (includeFailedRounds && round.status === "failed")) &&
         asString(round.completed_at) !== null &&
         coworldRoundIdPattern.test(asString(round.id) ?? ""),
     )
@@ -544,6 +559,7 @@ export async function readRecentRoundEpisodeRows(args: {
   const successfulRoundIds: string[] = [];
   const failedRoundIds: string[] = [];
   const seenEpisodeRequestIds = new Set<string>();
+  let countedRows = 0;
   for (const round of rounds) {
     const roundId = asString(round.id);
     if (roundId === null) continue;
@@ -585,11 +601,15 @@ export async function readRecentRoundEpisodeRows(args: {
           seenEpisodeRequestIds.add(episodeRequestId);
         }
         rows.push(...roundRows);
+        countedRows += includeFailedRounds
+          ? roundRows.filter((entry) => asRecord(entry)?.status === "completed")
+              .length
+          : roundRows.length;
       }
     } catch {
       failedRoundIds.push(roundId);
     }
-    if (rows.length >= args.minimumRows) break;
+    if (countedRows >= args.minimumRows) break;
   }
   return {
     rows,

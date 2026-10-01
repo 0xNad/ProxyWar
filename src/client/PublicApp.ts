@@ -13,10 +13,11 @@ import "./publicapp/BuilderDashboardPage";
 import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
 import "./publicapp/BuildPage";
-import "./publicapp/LobbyPage";
 import "./publicapp/LegalInfoPage";
+import "./publicapp/LobbyPage";
 import "./publicapp/MatchDetailPage";
 import "./publicapp/WatchPage";
+import "./publicapp/WorldPage";
 import "./styles.css";
 
 /**
@@ -62,6 +63,10 @@ function mount(pathname: string): boolean {
   }
   if (pathname === "/watch") {
     document.body.replaceChildren(document.createElement("watch-page"));
+    return true;
+  }
+  if (pathname === "/world") {
+    document.body.replaceChildren(document.createElement("world-page"));
     return true;
   }
   if (pathname === "/agents") {

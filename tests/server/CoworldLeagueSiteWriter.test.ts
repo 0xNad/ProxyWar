@@ -908,6 +908,8 @@ describe("writeCoworldLeagueSite", () => {
       "read-model.json",
       "social.png",
       "standings-history.json",
+      "world-ledger.json",
+      "world.json",
     ]);
   });
 

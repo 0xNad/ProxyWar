@@ -27,6 +27,7 @@ import { translateText } from "../Utils";
 export type AppShellRoute =
   | "/"
   | "/watch"
+  | "/world"
   | "/league"
   | "/agents"
   | "/builders"
@@ -39,6 +40,7 @@ const NAV_ITEMS: ReadonlyArray<{
   href: string;
 }> = [
   { route: "/watch", labelKey: "app_shell.nav_watch", href: "/watch" },
+  { route: "/world", labelKey: "app_shell.nav_world", href: "/world" },
   { route: "/league", labelKey: "app_shell.nav_league", href: "/league" },
   { route: "/agents", labelKey: "app_shell.nav_agents", href: "/agents" },
   {

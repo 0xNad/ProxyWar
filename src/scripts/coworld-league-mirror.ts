@@ -994,33 +994,52 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
 
   let replayRead = divisionReplayRead;
   let roundIntegrityRead = divisionRoundIntegrityRead;
-  if (!replayRead.ok || !roundIntegrityRead.ok) {
+  const roundScopedMinimumRows = Math.max(
+    options.episodeMetaLimit,
+    league.episodesPerRound ?? 1,
+  );
+  // Separate reads on purpose: battles that finished inside a round that
+  // later failed its integrity threshold are still real, replayable battles
+  // (the replay feed and the world map want them), while the integrity
+  // verdict must only ever be judged on rated rounds. See
+  // `readRecentRoundEpisodeRows`'s `includeFailedRounds` doc.
+  if (!replayRead.ok) {
     const fallback = await readRecentRoundEpisodeRows({
       roundsRaw,
       readCoworldJson: coworldJson,
-      minimumRows: Math.max(
-        options.episodeMetaLimit,
-        league.episodesPerRound ?? 1,
-      ),
+      minimumRows: roundScopedMinimumRows,
+      maximumRounds: options.roundsShown,
+      includeFailedRounds: true,
+    });
+    if (fallback.latestRoundReadable && fallback.rows.length > 0) {
+      replayRead = { ok: true as const, value: { entries: fallback.rows } };
+      log(
+        `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s) after the division-wide feed failed`,
+      );
+    } else {
+      log(
+        `round-scoped replay fallback could not read the latest terminal round; retaining last published battles (${fallback.failedRoundIds.length} failed round read(s))`,
+      );
+    }
+  }
+  if (!roundIntegrityRead.ok) {
+    const fallback = await readRecentRoundEpisodeRows({
+      roundsRaw,
+      readCoworldJson: coworldJson,
+      minimumRows: roundScopedMinimumRows,
       maximumRounds: options.roundsShown,
     });
     if (fallback.latestRoundReadable && fallback.rows.length > 0) {
-      const value = { entries: fallback.rows };
-      if (!replayRead.ok) {
-        replayRead = { ok: true as const, value };
-        log(
-          `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s) after the division-wide feed failed`,
-        );
-      }
-      if (!roundIntegrityRead.ok) {
-        roundIntegrityRead = { ok: true as const, value };
-        log(
-          `round-integrity feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
-        );
-      }
+      roundIntegrityRead = {
+        ok: true as const,
+        value: { entries: fallback.rows },
+      };
+      log(
+        `round-integrity feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
+      );
     } else {
       log(
-        `round-scoped episode fallback could not read the latest completed round; retaining old replay and integrity evidence (${fallback.failedRoundIds.length} failed round read(s))`,
+        `round-scoped episode fallback could not read the latest completed round; retaining old integrity evidence (${fallback.failedRoundIds.length} failed round read(s))`,
       );
     }
   }

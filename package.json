@@ -69,6 +69,7 @@
     "league:mirror": "tsx src/scripts/coworld-league-mirror.ts",
     "league:mirror:watch": "tsx src/scripts/coworld-league-mirror.ts --watch",
     "league:prune": "tsx src/scripts/coworld-league-prune.ts",
+    "league:world-backfill": "tsx src/scripts/coworld-league-world-backfill.ts",
     "storage:runs-retention": "tsx src/scripts/ai-league-runs-retention.ts",
     "identity:validate": "tsx src/scripts/identity-validate.ts",
     "identity:list-unmapped": "tsx src/scripts/identity-list-unmapped.ts",

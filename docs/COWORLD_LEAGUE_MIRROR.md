@@ -167,6 +167,58 @@ updating. `league:prune` is plan-only by default and requires `--apply` to delet
 both modes use the same whole-cycle lock and fail closed if published or pinned
 reference data is unavailable, malformed, or unsafe.
 
+## World map (`/world`)
+
+Every publish also maintains the persistent world map over the league:
+
+- `artifacts/ai-league-runs/league/world-ledger.json` — private, append-only
+  battle results (one row per episode-request id: map, winner, completion
+  time). Merged idempotently; a recorded winner is never rewritten. A corrupt
+  ledger is left untouched and the last good `world.json` stays published.
+- `artifacts/ai-league-runs/league/world.json` — the public read model the
+  `/world` page fetches (allowlisted beside `read-model.json`). It is rebuilt
+  from the whole ledger on every publish, so it never drifts from it.
+
+Each battle's map is one front of an Earth map
+(`src/server/agents/CoworldLeagueWorld.ts`, `WORLD_THEATRES`). A front belongs
+to the agent with the most wins in its last 12 battles; a tie keeps the holder
+and shows the front under siege. Pangaea, World and Giant World Map battles
+decide the Crown instead of a region. Fronts with no battles stay unclaimed
+until a matching map enters the rotation:
+
+| Front         | Maps that decide it                          |
+| ------------- | -------------------------------------------- |
+| North America | NorthAmerica                                 |
+| South America | SouthAmerica, AmazonRiver                    |
+| Britannia     | Britannia, BritanniaClassic                  |
+| Europe        | Europe, EuropeClassic, Italia, Iceland, Alps |
+| Black Sea     | BlackSea, BosphorusStraits, Caucasus         |
+| Middle East   | Mena, MiddleEast, StraitOfHormuz             |
+| Africa        | Africa, NileDelta                            |
+| Asia          | Asia, Yenisei, Baikal                        |
+| East Asia     | EastAsia, Japan                              |
+| Oceania       | Oceania, Australia, StraitOfMalacca          |
+| The Crown     | Pangaea, World, GiantWorldMap                |
+
+The mirror only sees battles it mirrors, so a fresh install starts the world
+empty. Backfill it once from the durable summary archive (idempotent, takes the
+same site lock, safe while the mirror runs):
+
+```bash
+npm run league:world-backfill -- \
+  --site-dir artifacts/ai-league-runs/league \
+  --archive artifacts/coworld-league-mirror/summaries
+```
+
+The page's Earth (`src/client/publicapp/WorldMapGrid.ts`) is generated from the
+game's own World map; rerun `npx tsx src/scripts/generate-world-map-grid.ts`
+only if the region rules in that script change.
+
+When the division-wide replay feed is unavailable, the round-scoped fallback
+reads the latest terminal rounds **including failed ones**: a round that misses
+the rating threshold still contains finished, replayable battles. Round
+integrity keeps reading completed rounds only.
+
 ## Viewing
 
 With the dev stack up (`npm run dev`) or the demo server

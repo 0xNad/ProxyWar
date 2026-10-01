@@ -1558,6 +1558,12 @@ app.get("/", async (_req, res, next) => {
 app.get("/watch", async (_req, res) => {
   await sendPublicAppShellPage(res, "the watch page");
 });
+// The persistent world map over the league (`WorldPage.ts`), read from the
+// mirror-published `world.json` — same always-reachable app-shell document
+// as `/watch`.
+app.get("/world", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the world map");
+});
 app.get("/agents", async (_req, res) => {
   await sendPublicAppShellPage(res, "the agents directory");
 });
