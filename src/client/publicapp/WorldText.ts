@@ -219,3 +219,13 @@ export function splice(
     index % 2 === 0 ? piece : (parts[Number(piece)] ?? nothing),
   )}`;
 }
+
+/** A list in the page's language whose items are templates (bold names, links). */
+export function spliceList(items: readonly TemplateResult[]): TemplateResult {
+  const pieces = formatList(items.map((_, index) => nameMarker(index))).split(
+    NAME_MARKER_PATTERN,
+  );
+  return html`${pieces.map((piece, index) =>
+    index % 2 === 0 ? piece : (items[Number(piece)] ?? nothing),
+  )}`;
+}

@@ -18,6 +18,7 @@ import {
   it,
   vi,
 } from "vitest";
+import "../../../src/client/publicapp/HomePage";
 import type { WorldModel } from "../../../src/client/publicapp/WorldModelSchema";
 import "../../../src/client/publicapp/WorldPage";
 import type { WorldPage } from "../../../src/client/publicapp/WorldPage";
@@ -70,7 +71,9 @@ function serve(model: unknown) {
   );
 }
 
-async function settle(el: WorldPage): Promise<void> {
+async function settle(el: {
+  readonly updateComplete: Promise<unknown>;
+}): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
   await el.updateComplete;
   for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -435,9 +438,67 @@ describe("world-page", () => {
       "Crown: relh, under siege",
     );
     expect(text(el.querySelector("h1"))).toBe(
-      "Alpha and Matt Van share the lead",
+      "Alpha and Matt Van share the lead.",
+    );
+    expect(text(el.querySelector(".wp-support"))).toBe(
+      "Each holds 2 of the 10 fronts, and every other agent holds fewer.",
     );
     expect(document.title).toBe("The World · Proxy War");
+  });
+
+  it("words the state of the war exactly as the front page does", async () => {
+    const leader = worldFixture();
+    for (const theatre of leader.theatres) {
+      if (theatre.id === "europe") {
+        Object.assign(theatre, {
+          status: "held",
+          holder: "Matt Van",
+          lastBattleAt: "2026-09-29T10:00:00.000Z",
+        });
+      }
+    }
+    const single = worldFixture();
+    for (const theatre of single.theatres) {
+      if (theatre.id === "asia") {
+        Object.assign(theatre, { status: "unclaimed", holder: null });
+      }
+    }
+    const cases: Array<[WorldModel, string, string]> = [
+      [
+        leader,
+        "Matt Van is winning.",
+        "It holds 2 of the 10 fronts: Europe and Asia. In Asia, relh has drawn level at 2 wins each.",
+      ],
+      // One front to none is a lead on both pages.
+      [single, "Alpha is winning.", "It holds 1 of the 10 fronts: Oceania."],
+      [
+        worldFixture(),
+        "No agent is ahead.",
+        "2 agents hold one front each. The first to hold two takes the lead.",
+      ],
+    ];
+    for (const [model, verdict, support] of cases) {
+      serve(model);
+      const world = mount();
+      const home = document.createElement("home-page") as HTMLElement & {
+        readonly updateComplete: Promise<unknown>;
+      };
+      document.body.append(home);
+      await settle(world);
+      await settle(home);
+      expect(text(world.querySelector("h1"))).toBe(verdict);
+      expect(text(home.querySelector("h1"))).toBe(verdict);
+      expect(text(world.querySelector(".wp-support"))).toBe(support);
+      expect(text(home.querySelector(".hp-support"))).toBe(support);
+      world.remove();
+      home.remove();
+    }
+    serve(leader);
+    const el = mount();
+    await settle(el);
+    expect(
+      el.querySelector("h1 a.wp-headline-name")?.getAttribute("href"),
+    ).toBe("/agent/matt-van");
   });
 
   it("says a front whose battles all ended without a winner has no winner yet", async () => {

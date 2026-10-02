@@ -216,6 +216,7 @@
   "src/client/publicapp/WorldPresentation.ts",
   "src/client/publicapp/WorldRules.ts",
   "src/client/publicapp/WorldText.ts",
+  "src/client/publicapp/WorldVerdict.ts",
   "src/client/publicapp/WorldView.ts",
   "src/core/Schemas.ts",
   "src/core/WorkerSchemas.ts",

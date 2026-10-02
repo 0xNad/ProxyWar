@@ -262,7 +262,11 @@ export type WorldVerdict =
   | { kind: "tied"; names: string[]; fronts: number; claimed: number }
   | { kind: "scattered"; claimed: number };
 
-/** Region fronts only — the Crown is its own title, not territory. */
+/**
+ * Who is winning, counting region fronts only (the Crown is its own title,
+ * not territory). The most fronts leads; a single claimed front is a lead
+ * too, one front to none.
+ */
 export function worldVerdict(model: WorldModel): WorldVerdict {
   const counts = new Map<string, number>();
   let claimed = 0;
@@ -276,6 +280,9 @@ export function worldVerdict(model: WorldModel): WorldVerdict {
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
   );
   const [topName, topCount] = ranked[0];
+  if (claimed === 1) {
+    return { kind: "leader", name: topName, fronts: 1, claimed };
+  }
   if (topCount <= 1) return { kind: "scattered", claimed };
   const tied = ranked.filter(([, count]) => count === topCount);
   if (tied.length > 1) {

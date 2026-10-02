@@ -9,7 +9,6 @@ import {
   hexToRgb,
   worldVerdict,
   type FrontDisplayState,
-  type WorldVerdict,
 } from "./WorldPresentation";
 
 /**
@@ -30,22 +29,6 @@ export function regionFronts(model: WorldModel): RegionFront[] {
 
 export function crownFront(model: WorldModel): WorldTheatre | null {
   return model.theatres.find((theatre) => theatre.id === "crown") ?? null;
-}
-
-/**
- * The front page's verdict: `worldVerdict`, except that a world with a
- * single claimed front has a leader (one front to none), not "no agent is
- * ahead".
- */
-export function frontPageVerdict(model: WorldModel): WorldVerdict {
-  const verdict = worldVerdict(model);
-  if (verdict.kind !== "scattered" || verdict.claimed !== 1) return verdict;
-  const holder = regionFronts(model).find(
-    (front) => front.holder !== null,
-  )?.holder;
-  return holder === undefined || holder === null
-    ? verdict
-    : { kind: "leader", name: holder, fronts: 1, claimed: 1 };
 }
 
 /**

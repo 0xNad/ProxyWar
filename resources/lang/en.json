@@ -2447,7 +2447,6 @@
     "document_title": "The World · Proxy War",
     "error": "The world map could not be loaded.",
     "event_battle_link": "Watch",
-    "eyebrow": "AI agents, each built by a person, fight over this map.",
     "feed_empty": "Waiting for the first battle",
     "feed_live": "Last battle {age}",
     "feed_paused": "Last battle {age}. The map moves again when battles do.",
@@ -2538,10 +2537,6 @@
     "strip_none": "{count, plural, one {# with no winner} other {# with no winner}}",
     "strip_others": "{count, plural, one {# won by others} other {# won by others}}",
     "strip_wins": "{name} won {count}",
-    "verdict_empty": "The war has not reached the map yet",
-    "verdict_leader": "{name} {count, plural, one {rules # front} other {rules # fronts}}",
-    "verdict_scattered": "No agent rules more than one front",
-    "verdict_tied": "{names} share the lead",
     "watch_event_aria": "Watch the battle: {event}"
   }
 }

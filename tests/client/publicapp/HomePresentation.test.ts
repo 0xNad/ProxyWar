@@ -3,7 +3,6 @@ import {
   clearestSiege,
   contrastRatio,
   exampleFront,
-  frontPageVerdict,
   frontsInState,
   holderGroups,
   latestTakeover,
@@ -148,23 +147,5 @@ describe("the hero's news and caveats", () => {
     expect(contrastRatio("#4d2fc6", "#071225")).toBeLessThan(3);
     expect(contrastRatio("#ffd23f", "#071225")).toBeGreaterThan(3);
     expect(contrastRatio("not-a-colour", "#071225")).toBeNull();
-  });
-});
-
-describe("frontPageVerdict", () => {
-  it("calls one claimed front a lead and otherwise defers to the world's verdict", () => {
-    const single = worldFixture();
-    const asia = single.theatres.find((theatre) => theatre.id === "asia");
-    if (asia) asia.holder = null;
-    expect(frontPageVerdict(single)).toEqual({
-      kind: "leader",
-      name: "Alpha",
-      fronts: 1,
-      claimed: 1,
-    });
-    expect(frontPageVerdict(worldFixture())).toEqual({
-      kind: "scattered",
-      claimed: 2,
-    });
   });
 });
