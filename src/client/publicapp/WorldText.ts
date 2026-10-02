@@ -11,15 +11,44 @@ export function pageLocale(): string | undefined {
     : document.documentElement.lang || undefined;
 }
 
+/**
+ * One `Intl.DateTimeFormat` per language and option set: building one is
+ * far slower than using one, and a render formats hundreds of dates.
+ */
+const dateFormats = new Map<string, Intl.DateTimeFormat>();
+function dateFormat(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const locale = pageLocale();
+  const key = `${locale ?? ""}|${JSON.stringify(options)}`;
+  let format = dateFormats.get(key);
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat(locale, options);
+    dateFormats.set(key, format);
+  }
+  return format;
+}
+
 /** "Sep 28", or "Sep 28, 09:37 PM" with the time, in the page's language. */
 export function formatDate(iso: string, withTime = false): string {
   const time = Date.parse(iso);
   if (!Number.isFinite(time)) return "—";
-  return new Intl.DateTimeFormat(pageLocale(), {
+  return dateFormat({
     month: "short",
     day: "numeric",
     ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
   }).format(new Date(time));
+}
+
+/**
+ * A league day ("2026-10-01", a UTC date) as "Oct 1" in any time zone:
+ * formatting it as a moment in the visitor's zone would call it Oct 2 in
+ * Auckland.
+ */
+export function formatLeagueDay(day: string): string {
+  const time = Date.parse(`${day}T12:00:00Z`);
+  if (!Number.isFinite(time)) return "—";
+  return dateFormat({ month: "short", day: "numeric", timeZone: "UTC" }).format(
+    new Date(time),
+  );
 }
 
 /**
@@ -51,10 +80,9 @@ export function formatAge(iso: string, now: number): string {
 export function formatTime(iso: string): string {
   const time = Date.parse(iso);
   if (!Number.isFinite(time)) return "—";
-  return new Intl.DateTimeFormat(pageLocale(), {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(time));
+  return dateFormat({ hour: "numeric", minute: "2-digit" }).format(
+    new Date(time),
+  );
 }
 
 /** The visitor's calendar day of a moment, for grouping. */
@@ -74,16 +102,21 @@ export function formatDayHeading(iso: string, now: number): string {
   if (day === localDay(yesterday.getTime())) {
     return translateText("world_page.day_yesterday");
   }
-  return new Intl.DateTimeFormat(pageLocale(), {
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(time));
+  return dateFormat({ weekday: "long", month: "short", day: "numeric" }).format(
+    new Date(time),
+  );
 }
 
 /** A count in the page's language: "1,564". */
+const numberFormats = new Map<string, Intl.NumberFormat>();
 export function formatNumber(value: number): string {
-  return new Intl.NumberFormat(pageLocale()).format(value);
+  const locale = pageLocale() ?? "";
+  let format = numberFormats.get(locale);
+  if (format === undefined) {
+    format = new Intl.NumberFormat(locale === "" ? undefined : locale);
+    numberFormats.set(locale, format);
+  }
+  return format.format(value);
 }
 
 /** A list in the page's language: "Asia, Europe and Africa". */

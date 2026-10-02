@@ -8,7 +8,16 @@
  * hands. Follows the mount-into-jsdom convention of the other public page
  * tests, with the real English strings and a pinned clock.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { WorldModel } from "../../../src/client/publicapp/WorldModelSchema";
 import "../../../src/client/publicapp/WorldPage";
 import type { WorldPage } from "../../../src/client/publicapp/WorldPage";
@@ -17,6 +26,17 @@ import { worldFixture } from "./WorldFixtures";
 
 /** The fixture's moment: 23 minutes after its newest battle. */
 const NOW = new Date("2026-09-29T22:10:00.000Z");
+
+// Days, dates and times are the visitor's; pin the visitor to UTC so the
+// assertions hold on any machine (each test file runs in its own process).
+const ZONE = process.env.TZ;
+beforeAll(() => {
+  process.env.TZ = "UTC";
+});
+afterAll(() => {
+  if (ZONE === undefined) delete process.env.TZ;
+  else process.env.TZ = ZONE;
+});
 
 function mount(): WorldPage {
   const el = document.createElement("world-page") as WorldPage;
@@ -521,6 +541,72 @@ describe("world-page", () => {
     );
     await settle(el);
     expect(grid?.getAttribute("aria-valuenow")).toBe("1");
+  });
+
+  it("labels league days by their UTC date in any time zone, and a front never held as such", async () => {
+    process.env.TZ = "Pacific/Auckland";
+    try {
+      const el = mount();
+      await settle(el);
+      const grid = el.querySelector<HTMLElement>('.wp-tl [role="slider"]');
+      // Sep 29 is the league's day even where it is already Sep 30.
+      expect(grid?.getAttribute("aria-valuetext")).toMatch(/^Sep 29: /);
+      const africa = el.querySelector<HTMLElement>(
+        '.wp-tl-bar[data-front="africa"]',
+      );
+      if (africa === null) throw new Error("no Africa bar");
+      africa.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 300, height: 22 }) as DOMRect;
+      africa
+        .querySelector(".wp-tl-run")
+        ?.dispatchEvent(
+          new MouseEvent("pointermove", { clientX: 150, bubbles: true }),
+        );
+      await settle(el);
+      expect(text(africa.querySelector(".wp-tl-tip"))).toBe(
+        "No one has held Africa yet",
+      );
+    } finally {
+      process.env.TZ = "UTC";
+    }
+  });
+
+  it("keeps a pointed placard's own front lit, not the land under it", async () => {
+    const el = mount();
+    await settle(el);
+    const page = el as unknown as { hoverFront: string | null };
+    const asia = find<HTMLButtonElement>(el, ".hp-mark", "Asia");
+    asia?.dispatchEvent(new MouseEvent("pointerenter"));
+    asia?.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 1, clientY: 1, bubbles: true }),
+    );
+    await settle(el);
+    expect(page.hoverFront).toBe("asia");
+  });
+
+  it("names the Crown's siege for screen readers", async () => {
+    const base = worldFixture();
+    serve({
+      ...base,
+      theatres: base.theatres.map((theatre) =>
+        theatre.id === "crown"
+          ? {
+              ...theatre,
+              status: "contested" as const,
+              challenger: "Andre von Houck",
+              challengerWins: 4,
+            }
+          : theatre,
+      ),
+    } satisfies WorldModel);
+    const el = mount();
+    await settle(el);
+    expect(el.querySelector(".hp-seal")?.getAttribute("aria-label")).toBe(
+      "The Crown, held by relh, under siege by Andre von Houck. Open its history.",
+    );
+    expect(text(el.querySelector(".hp-seal .hp-mark-siege"))).toBe(
+      "Andre von Houck drew level, 4–4",
+    );
   });
 
   it("names the reign under the pointer", async () => {

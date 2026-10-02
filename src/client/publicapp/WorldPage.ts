@@ -371,6 +371,8 @@ export class WorldPage extends LitElement {
   };
 
   private onStagePointer(event: PointerEvent): void {
+    // Over a placard, the placard's own front stays lit, not the land below.
+    if ((event.target as Element).closest(".hp-marks") !== null) return;
     const stage = event.currentTarget as HTMLElement;
     const rect = stage.getBoundingClientRect();
     const next = theatreAtPoint(
@@ -573,6 +575,11 @@ export class WorldPage extends LitElement {
           ${renderPowers(view)}
         </div>
         ${renderHistory(view, this.historyFocus, (focus) => {
+          // A pointer moving within one reign's day changes nothing.
+          const current = this.historyFocus;
+          if (focus?.day === current?.day && focus?.front === current?.front) {
+            return;
+          }
           this.historyFocus = focus;
         })}
         ${renderRules(view)}
@@ -825,12 +832,22 @@ export class WorldPage extends LitElement {
           front: this.frontName(front.id),
         }),
       openLine: (front) => unclaimedLine(front),
-      sealAria: (holder) =>
-        holder === null
-          ? translateText("world_page.crown_aria_vacant")
+      sealAria: (crown) => {
+        const holder = crown?.holder ?? null;
+        if (holder === null) {
+          return translateText("world_page.crown_aria_vacant");
+        }
+        return crown !== null &&
+          crown.challenger !== null &&
+          frontDisplayState(crown, this.now) === "contested"
+          ? translateText("world_page.crown_aria_siege", {
+              holder: this.label(holder),
+              challenger: this.label(crown.challenger),
+            })
           : translateText("world_page.crown_aria", {
               holder: this.label(holder),
-            }),
+            });
+      },
       // The Crown holds no land: there is nothing on the map to light up.
       focusFront: (id) => {
         this.hoverFront = id === "crown" ? null : id;

@@ -2417,10 +2417,12 @@
     "in_text_asia": "Asia",
     "in_text_east_asia": "East Asia",
     "in_text_oceania": "Oceania",
-    "in_text_crown": "the Crown"
+    "in_text_crown": "the Crown",
+    "crown_aria_siege": "The Crown: held by {holder}, with {challenger} level at {wins} wins each. It holds no land and is decided on whole-world maps."
   },
   "world_page": {
     "crown_aria": "The Crown, held by {holder}. Open its history.",
+    "crown_aria_siege": "The Crown, held by {holder}, under siege by {challenger}. Open its history.",
     "crown_aria_vacant": "The Crown is vacant. Open its history.",
     "crown_vacant": "Vacant",
     "data_note": "Built from {count, plural, one {# league battle} other {# league battles}} recorded since {date}. A battle that ends without a winner still takes its place in a front's window.",
@@ -2488,6 +2490,7 @@
     "history_intro": "Who held each front at the end of each day, the Crown first. A change of colour along a row is a front changing hands.",
     "history_open": "No one held {front} from {from} to {to}",
     "history_open_day": "No one held {front} on {date}",
+    "history_open_never": "No one has held {front} yet",
     "history_open_since": "No one has held {front} since {from}",
     "history_title": "The war so far",
     "key_aria": "How to read the map",

@@ -73,8 +73,8 @@ export interface PlacardView {
   openAria(front: RegionFront): string;
   /** What an unclaimed front's lettering says under its name. */
   openLine(front: RegionFront): string;
-  /** Accessible name of the Crown's seal. */
-  sealAria(holder: string | null): string;
+  /** Accessible name of the Crown's seal (its siege included). */
+  sealAria(crown: WorldTheatre | null): string;
   /** Pointing at or focusing a placard (and leaving it), for map highlights. */
   focusFront?(id: WorldTheatreId | null): void;
   /** Fronts to mark as changed since the visitor's last visit. */
@@ -199,7 +199,7 @@ function renderSeal(view: PlacardView, model: WorldModel): TemplateResult {
         style: `left:${anchor.x}%;top:${anchor.y}%;--ring:${
           holder === null ? VACANT_RING : view.colorOf(holder)
         }`,
-        label: view.sealAria(holder),
+        label: view.sealAria(crown),
       },
       html`<span
           class="hp-seal-disc ${view.lowContrast(holder) ? "hp-low" : ""}"
@@ -322,7 +322,9 @@ const PLACARD_CSS = `
 .hp-mark{position:absolute;display:flex;align-items:flex-start;gap:8px;width:max-content;max-width:256px;padding:4px 10px 5px 4px;background:var(--hp-plate);color:var(--hp-ink);text-decoration:none;transform:translate(-50%,-50%)}
 .hp-mark[data-align="left"]{transform:translate(calc(-100% - 4px),-50%)}
 .hp-mark[data-align="right"]{transform:translate(4px,-50%)}
-.hp-mark[data-changed],.hp-open[data-changed]{outline:2px solid var(--hp-ink);outline-offset:2px}
+.hp-mark[data-changed]{box-shadow:0 0 0 2px var(--hp-ink)}
+.hp-seal[data-changed] .hp-seal-disc{box-shadow:inset 0 0 0 3px var(--ring),0 0 0 2px var(--hp-ink)}
+.hp-marks :focus-visible{outline:2px solid var(--hp-ink);outline-offset:2px;box-shadow:0 0 0 5px var(--hp-sea)}
 .hp-flag{flex:none;display:block;width:32px;height:32px;padding:3px;background:var(--frame)}
 .hp-flag img{display:block;width:26px;height:26px;image-rendering:pixelated}
 .hp-low{box-shadow:inset 0 0 0 1px var(--hp-ink,#edf1f7)}

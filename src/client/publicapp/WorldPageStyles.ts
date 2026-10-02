@@ -157,7 +157,7 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-tl-name{padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @container (max-width:72px){.wp-tl-name{display:none}}
 .wp-tl-cursor{position:absolute;top:-4px;bottom:-4px;left:calc(var(--at) * 100%);width:2px;margin-left:-1px;background:var(--wp-ink);pointer-events:none}
-.wp-tl-tip{position:absolute;z-index:2;bottom:calc(100% + 8px);left:calc(var(--at) * 100%);transform:translateX(-50%);width:max-content;max-width:min(320px,80vw);padding:.45rem .65rem;border-radius:4px;background:rgb(4 10 23/.95);border:1px solid var(--wp-line);color:var(--wp-ink);font-size:12.5px;line-height:1.35;pointer-events:none}
+.wp-tl-tip{position:absolute;z-index:2;bottom:calc(100% + 8px);left:calc(var(--at) * 100%);transform:translateX(calc(var(--at) * -100%));width:max-content;max-width:min(320px,100%);padding:.45rem .65rem;border-radius:4px;background:rgb(4 10 23/.95);border:1px solid var(--wp-line);color:var(--wp-ink);font-size:12.5px;line-height:1.35;pointer-events:none}
 .wp-tl-axis{grid-column:2;position:relative;height:20px;margin-top:6px;font-size:11.5px;color:var(--wp-faint)}
 .wp-tl-axis span{position:absolute;left:calc(var(--at) * 100%);top:0;padding-left:3px;border-left:1px solid rgba(148,170,200,.3);white-space:nowrap}
 .wp-tl-readout{grid-column:2;margin:.5rem 0 0;font-size:13px;line-height:1.45;color:var(--wp-dim)}

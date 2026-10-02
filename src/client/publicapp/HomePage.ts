@@ -825,12 +825,23 @@ export class HomePage extends LitElement {
           front: this.frontName(front.id),
         }),
       openLine: () => translateText("home_page.never_fought"),
-      sealAria: (holder) =>
-        holder === null
-          ? translateText("home_page.crown_aria_vacant")
+      sealAria: (crown) => {
+        const holder = crown?.holder ?? null;
+        if (holder === null) {
+          return translateText("home_page.crown_aria_vacant");
+        }
+        return crown !== null &&
+          crown.challenger !== null &&
+          frontDisplayState(crown, this.now) === "contested"
+          ? translateText("home_page.crown_aria_siege", {
+              holder: this.label(holder),
+              challenger: this.label(crown.challenger),
+              wins: crown.holderWins,
+            })
           : translateText("home_page.crown_aria", {
               holder: this.label(holder),
-            }),
+            });
+      },
     };
   }
 

@@ -4,7 +4,7 @@ import { contrastRatio } from "./HomePresentation";
 import { CROWN_GLYPH } from "./WorldGlyphs";
 import type { WorldDay, WorldTheatreId } from "./WorldModelSchema";
 import { WORLD_REGION_IDS } from "./WorldPresentation";
-import { frontInText, pageLocale } from "./WorldText";
+import { formatLeagueDay, frontInText, pageLocale } from "./WorldText";
 import type { WorldView } from "./WorldView";
 
 /**
@@ -66,7 +66,7 @@ export function renderHistory(
   const n = days.length;
   if (n < 2) return nothing;
   const rows = historyRows(days);
-  const dateOf = (index: number) => view.date(`${days[index].day}T12:00:00Z`);
+  const dateOf = (index: number) => formatLeagueDay(days[index].day);
   // Without a pointer or focus on it, the history reads as its latest day.
   const current = focus?.day ?? n - 1;
   const step = (day: number) =>
@@ -217,7 +217,7 @@ function renderBar(
     ${pointed !== undefined && focus !== null
       ? html`<span
           class="wp-tl-tip"
-          style="--at:${Math.min(0.85, Math.max(0.15, position(focus.day)))}"
+          style="--at:${position(focus.day)}"
           aria-hidden="true"
           >${reignSentence(view, row.id, pointed, n, dateOf)}</span
         >`
@@ -241,7 +241,16 @@ function reignSentence(
   };
   const ongoing = reign.to === n - 1;
   if (reign.holder === null) {
-    if (ongoing) return translateText("world_page.history_open_since", params);
+    if (ongoing) {
+      // Held fronts never fall back to no one, so an empty stretch that
+      // started the history and is still going is a front never held.
+      return translateText(
+        reign.from === 0
+          ? "world_page.history_open_never"
+          : "world_page.history_open_since",
+        params,
+      );
+    }
     return translateText(
       reign.from === reign.to
         ? "world_page.history_open_day"
@@ -300,8 +309,11 @@ function monthTicks(
       });
     }
   });
-  // A first month with only a few days would collide with the next.
+  // A month with only a few days in range has no room for its name: at the
+  // start it would collide with the next, at the end run off the page.
   if (ticks.length > 1 && ticks[1].index - ticks[0].index < 5) ticks.shift();
+  const last = ticks[ticks.length - 1];
+  if (ticks.length > 1 && days.length - last.index < 5) ticks.pop();
   return ticks;
 }
 
