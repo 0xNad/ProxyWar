@@ -47,7 +47,6 @@ import {
   parseVisitSnapshot,
   visitSnapshot,
   WORLD_REGION_IDS,
-  worldVerdict,
 } from "./WorldPresentation";
 import { renderRules } from "./WorldRules";
 import {
@@ -55,9 +54,14 @@ import {
   formatAge,
   formatDate,
   formatList,
-  nameMarker,
-  splice,
 } from "./WorldText";
+import {
+  leadUnderline,
+  renderSupport,
+  renderVerdict,
+  verdictLength,
+  type VerdictView,
+} from "./WorldVerdict";
 import { ICONS, type WorldView } from "./WorldView";
 
 /**
@@ -629,44 +633,18 @@ export class WorldPage extends LitElement {
 
   private renderHero(model: WorldModel) {
     const feed = feedState(model, this.now);
-    const verdict = worldVerdict(model);
+    const verdictView = this.verdictView();
     const crown = this.theatre("crown");
     const regions = model.theatres.filter((theatre) => theatre.id !== "crown");
     const claimed = regions.filter((theatre) => theatre.holder !== null).length;
     const contested = regions.filter(
       (theatre) => frontDisplayState(theatre, this.now) === "contested",
     ).length;
-    let headline: TemplateResult;
-    switch (verdict.kind) {
-      case "leader":
-        headline = this.withNames(
-          "world_page.verdict_leader",
-          { name: nameMarker(0), count: verdict.fronts },
-          [verdict.name],
-        );
-        break;
-      case "tied":
-        headline = this.withNames(
-          "world_page.verdict_tied",
-          {
-            names: this.list(
-              verdict.names.map((_, index) => nameMarker(index)),
-            ),
-          },
-          verdict.names,
-        );
-        break;
-      case "scattered":
-        headline = html`${translateText("world_page.verdict_scattered")}`;
-        break;
-      default:
-        headline = html`${translateText("world_page.verdict_empty")}`;
-    }
     return html`
       <section class="wp-hero" aria-labelledby="wp-headline">
         <div class="wp-wrap wp-hero-head">
           <div class="wp-eyebrow">
-            <span>${translateText("world_page.eyebrow")}</span>
+            <span>${translateText("home_page.context")}</span>
             ${feed.kind === "empty"
               ? html`<span class="wp-feed"
                   >${translateText("world_page.feed_empty")}</span
@@ -692,7 +670,14 @@ export class WorldPage extends LitElement {
                   ></span
                 >`}
           </div>
-          <h1 id="wp-headline" class="wp-headline">${headline}</h1>
+          <h1
+            id="wp-headline"
+            class="wp-headline"
+            data-length=${verdictLength(verdictView, model)}
+          >
+            ${renderVerdict(verdictView, model)}
+          </h1>
+          <p class="wp-support">${renderSupport(verdictView, model)}</p>
           <ul class="wp-stats" role="list">
             <li>
               ${translateText("world_page.stat_fronts", {
@@ -734,29 +719,33 @@ export class WorldPage extends LitElement {
     `;
   }
 
+  /** The verdict's names, dates and clock, as this page draws them. */
+  private verdictView(): VerdictView {
+    return {
+      now: this.now,
+      label: (name) => this.label(name),
+      frontName: (id) => this.frontName(id),
+      date: (iso) => this.date(iso),
+      leadName: (name) => this.leadName(name),
+    };
+  }
+
   /**
-   * Renders a translated sentence with each agent name in its banner colour.
-   * The names go through `translateText` as invisible markers and are
-   * swapped for styled spans afterwards, so translations keep full control of
-   * word order.
+   * A leader's name in the headline, underlined in its banner colour and
+   * linked to its agent's page, as on the front page.
    */
-  private withNames(
-    key: string,
-    params: Record<string, string | number>,
-    names: readonly string[],
-  ): TemplateResult {
-    return splice(
-      key,
-      params,
-      names.map(
-        (name) =>
-          html`<span
-            class="wp-headline-name"
-            style="--banner:${this.bannerColor(name)}"
-            >${this.label(name)}</span
-          >`,
-      ),
-    );
+  private leadName(name: string): TemplateResult {
+    const agent = this.agents.get(name);
+    const label = this.label(name);
+    const style = `--banner:${leadUnderline(this.bannerColor(name), this.lowContrast(name))}`;
+    return agent?.slug
+      ? html`<a
+          class="wp-headline-name"
+          href="/agent/${encodeURIComponent(agent.slug)}"
+          style=${style}
+          >${label}</a
+        >`
+      : html`<span class="wp-headline-name" style=${style}>${label}</span>`;
   }
 
   private list(items: readonly string[]): string {

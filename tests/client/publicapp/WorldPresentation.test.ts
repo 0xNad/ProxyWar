@@ -84,6 +84,18 @@ describe("front states and verdict", () => {
     expect(worldVerdict(empty)).toEqual({ kind: "empty" });
   });
 
+  it("calls a single claimed front a lead, one front to none", () => {
+    const single = worldFixture();
+    const asia = single.theatres.find((theatre) => theatre.id === "asia");
+    if (asia) asia.holder = null;
+    expect(worldVerdict(single)).toEqual({
+      kind: "leader",
+      name: "Alpha",
+      fronts: 1,
+      claimed: 1,
+    });
+  });
+
   it("calls the feed paused when the newest battle is hours old", () => {
     const model = worldFixture();
     expect(feedState(model, NOW).kind).toBe("live");

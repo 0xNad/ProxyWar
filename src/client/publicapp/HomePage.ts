@@ -14,10 +14,8 @@ import {
   contrastRatio,
   crownFront,
   exampleFront,
-  frontPageVerdict,
   frontsInState,
   holderGroups,
-  leaderCaveats,
   regionFronts,
   warDay,
   watchEvent,
@@ -30,7 +28,7 @@ import {
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
 import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
-import { mix, paintWorldFrame, SEA, worldGrid } from "./WorldMapRenderer";
+import { paintWorldFrame, SEA, worldGrid } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
@@ -53,9 +51,7 @@ import {
   frontDisplayState,
   frontPaints,
   frontSwatch,
-  hexToRgb,
   parseVisitSnapshot,
-  rgbHex,
   UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
@@ -65,8 +61,18 @@ import {
   formatDate,
   formatList,
   frontInText,
+  nameMarker,
   pageLocale,
+  splice,
 } from "./WorldText";
+import {
+  CAVEAT_MORE_CLASS,
+  leadUnderline,
+  renderSupport,
+  renderVerdict,
+  verdictLength,
+  type VerdictView,
+} from "./WorldVerdict";
 
 /**
  * The front page: the war table. The first screen answers the one question
@@ -101,12 +107,6 @@ const STARTER_REPOSITORY_URL =
   "https://github.com/0xNad/proxywar-coworld-starter";
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
-
-/** Invisible-separator markers for templates spliced into translated sentences. */
-const MARK_PATTERN = /⁣(\d+)⁣/;
-function mark(index: number): string {
-  return `⁣${index}⁣`;
-}
 
 function reducedMotion(): boolean {
   return (
@@ -407,11 +407,7 @@ export class HomePage extends LitElement {
 
   /** The leader's underline: their banner, lifted when too dark to see. */
   private underlineColor(name: string): string {
-    const rgb = hexToRgb(this.colorOf(name));
-    if (rgb === null) return "#a4afbf";
-    return this.lowContrast(name)
-      ? rgbHex(mix(rgb, [255, 255, 255], 0.45))
-      : rgbHex(rgb);
+    return leadUnderline(this.colorOf(name), this.lowContrast(name));
   }
 
   /** CSS paint for a swatch, computed with the renderer's own maths. */
@@ -435,34 +431,12 @@ export class HomePage extends LitElement {
     return formatList(items);
   }
 
-  /** A list whose items are templates (bold front names, linked agents). */
-  private listOf(items: readonly TemplateResult[]): TemplateResult {
-    const joined = this.list(items.map((_, index) => mark(index))).split(
-      MARK_PATTERN,
-    );
-    return html`${joined.map((piece, index) =>
-      index % 2 === 0 ? piece : (items[Number(piece)] ?? nothing),
-    )}`;
-  }
-
   private date(iso: string): string {
     return formatDate(iso);
   }
 
   private age(iso: string): string {
     return formatAge(iso, this.now);
-  }
-
-  /** A translated sentence with templates (names, links) spliced in. */
-  private spliced(
-    key: string,
-    params: Record<string, string | number>,
-    parts: readonly TemplateResult[],
-  ): TemplateResult {
-    const pieces = translateText(key, params).split(MARK_PATTERN);
-    return html`${pieces.map((piece, index) =>
-      index % 2 === 0 ? piece : (parts[Number(piece)] ?? nothing),
-    )}`;
   }
 
   private leadName(name: string): TemplateResult {
@@ -587,33 +561,17 @@ export class HomePage extends LitElement {
   // ---------------------------------------------------------- the verdict
 
   private renderHud(model: WorldModel) {
-    const verdict = frontPageVerdict(model);
-    const names =
-      verdict.kind === "leader"
-        ? [verdict.name]
-        : verdict.kind === "tied" && verdict.names.length === 2
-          ? verdict.names
-          : [];
-    const longest = Math.max(
-      0,
-      ...names.map((name) => this.label(name).length),
-    );
+    const view = this.verdictView();
     return html`<div class="hp-hud">
       <p class="hp-context">${translateText("home_page.context")}</p>
       <h1
         class="hp-verdict"
         id="hp-verdict"
-        data-length=${longest > 40
-          ? "xl"
-          : longest > 28
-            ? "l"
-            : longest > 16
-              ? "m"
-              : "s"}
+        data-length=${verdictLength(view, model)}
       >
-        ${this.verdict(model)}
+        ${renderVerdict(view, model)}
       </h1>
-      <p class="hp-support">${this.support(model)}</p>
+      <p class="hp-support">${renderSupport(view, model)}</p>
       <p class="hp-clock hp-clock-phone">${this.clock(model, true)}</p>
       <div class="hp-row">
         <div class="hp-actions">${this.renderActions(model)}</div>
@@ -622,88 +580,15 @@ export class HomePage extends LitElement {
     </div>`;
   }
 
-  private verdict(model: WorldModel): TemplateResult | string {
-    const verdict = frontPageVerdict(model);
-    switch (verdict.kind) {
-      case "leader":
-        return this.spliced("home_page.verdict_leader", { name: mark(0) }, [
-          this.leadName(verdict.name),
-        ]);
-      case "tied":
-        return verdict.names.length === 2
-          ? this.spliced(
-              "home_page.verdict_tied_two",
-              { first: mark(0), second: mark(1) },
-              verdict.names.map((name) => this.leadName(name)),
-            )
-          : translateText("home_page.verdict_tied_many", {
-              count: verdict.names.length,
-            });
-      case "scattered":
-        return translateText("home_page.verdict_scattered");
-      case "empty":
-        return translateText("home_page.verdict_empty");
-    }
-  }
-
-  private support(model: WorldModel): TemplateResult | string {
-    const verdict = frontPageVerdict(model);
-    const total = regionFronts(model).length;
-    const holding = (count: number) =>
-      html`<b
-        >${translateText("home_page.support_holding", { count, total })}</b
-      >`;
-    switch (verdict.kind) {
-      case "leader": {
-        const held = regionFronts(model).filter(
-          (front) => front.holder === verdict.name,
-        );
-        const caveats = leaderCaveats(model, verdict.name, this.now).map(
-          (caveat, index) =>
-            html` <span class=${index > 0 ? "hp-caveat-more" : ""}
-              >${caveat.kind === "siege"
-                ? translateText("home_page.caveat_siege", {
-                    front: frontInText(caveat.front.id),
-                    challenger: this.label(caveat.front.challenger ?? ""),
-                    wins: caveat.front.holderWins,
-                  })
-                : translateText("home_page.caveat_quiet", {
-                    front: frontInText(caveat.front.id),
-                    date: this.date(caveat.front.lastBattleAt ?? ""),
-                  })}</span
-            >`,
-        );
-        return html`${this.spliced(
-          "home_page.support_leader",
-          { holding: mark(0), fronts: mark(1) },
-          [
-            holding(verdict.fronts),
-            this.listOf(
-              held.map((front) => html`<b>${this.frontName(front.id)}</b>`),
-            ),
-          ],
-        )}${caveats}`;
-      }
-      case "tied":
-        return verdict.names.length === 2
-          ? this.spliced("home_page.support_tied", { holding: mark(0) }, [
-              holding(verdict.fronts),
-            ])
-          : this.spliced(
-              "home_page.support_tied_many",
-              {
-                names: this.list(verdict.names.map((name) => this.label(name))),
-                holding: mark(0),
-              },
-              [holding(verdict.fronts)],
-            );
-      case "scattered":
-        return translateText("home_page.support_scattered", {
-          count: verdict.claimed,
-        });
-      case "empty":
-        return translateText("home_page.support_empty");
-    }
+  /** The verdict's names, dates and clock, as this page draws them. */
+  private verdictView(): VerdictView {
+    return {
+      now: this.now,
+      label: (name) => this.label(name),
+      frontName: (id) => this.frontName(id),
+      date: (iso) => this.date(iso),
+      leadName: (name) => this.leadName(name),
+    };
   }
 
   /** Measured liveness only: the newest battle's age, battles in the last day. */
@@ -1028,7 +913,7 @@ export class HomePage extends LitElement {
             class=${this.lowContrast(event.agent) ? "hp-low" : ""}
             aria-hidden="true"
           ></i
-          >${this.spliced(key, { ...params, agent: mark(0) }, [
+          >${splice(key, { ...params, agent: nameMarker(0) }, [
             html`<b>${this.label(event.agent)}</b>`,
           ])}</span
         >
@@ -1110,7 +995,7 @@ export class HomePage extends LitElement {
         )}
       </dl>
       <p class="hp-rules-stats">
-        ${this.spliced(
+        ${splice(
           "home_page.rules_stats",
           {
             count: model.battleCount,
@@ -1118,7 +1003,7 @@ export class HomePage extends LitElement {
               model.firstBattleAt === null
                 ? "—"
                 : this.date(model.firstBattleAt),
-            league: mark(0),
+            league: nameMarker(0),
           },
           [
             html`<a href="/league"
@@ -1319,7 +1204,7 @@ const HOME_PAGE_CSS = `
 .hp-verdict[data-length="xl"]{font-size:36px}
 .hp-verdict[data-length="s"] .hp-lead,.hp-verdict[data-length="m"] .hp-lead{white-space:nowrap}
 .hp-lead{text-decoration:underline;text-decoration-color:var(--lead,var(--hp-ink-2));text-decoration-thickness:.075em;text-underline-offset:.13em;text-decoration-skip-ink:none}
-.hp-support{margin:8px 0 0;max-width:75ch;font-size:18px;line-height:1.45;color:var(--hp-ink-2)}
+.hp-support{margin:8px 0 0;max-width:75ch;font-size:18px;line-height:1.45;color:var(--hp-ink-2);overflow-wrap:anywhere}
 .hp-support b{color:var(--hp-ink);font-weight:700}
 .hp-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px 28px;margin-top:16px}
 .hp-actions{display:flex;flex-wrap:wrap;gap:12px}
@@ -1420,7 +1305,7 @@ const HOME_PAGE_CSS = `
   .hp-verdict[data-length="l"],.hp-verdict[data-length="xl"]{font-size:30px}
   .hp-verdict[data-length="m"] .hp-lead{white-space:normal}
   .hp-support{font-size:16px}
-  .hp-caveat-more{display:none}
+  .${CAVEAT_MORE_CLASS}{display:none}
   .hp-hud .hp-row{display:none}
   .hp-clock-phone{display:flex;gap:4px 12px;margin-top:10px}
   .hp-phone-actions{display:flex;flex-direction:column;gap:10px;padding:14px var(--hp-gutter) 0}

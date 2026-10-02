@@ -6,7 +6,7 @@ import { contestLine, renderStrip } from "./WorldFronts";
 import { renderFrontTimeline } from "./WorldHistory";
 import type { WorldTheatre, WorldTheatreId } from "./WorldModelSchema";
 import { battlefieldKey, frontDisplayState } from "./WorldPresentation";
-import { battlefieldName } from "./WorldText";
+import { battlefieldName, formatDateRange } from "./WorldText";
 import { ICONS, STATUS_KEYS, type WorldView } from "./WorldView";
 
 /**
@@ -28,6 +28,8 @@ export function renderDrawer(
   const maxTally = Math.max(1, ...theatre.tallies.map((tally) => tally.wins));
   const reign = theatre.reigns.find((entry) => entry.to === null);
   const timeline = renderFrontTimeline(view, id);
+  // The tally and the battle list below say what the strip shows.
+  const strip = renderStrip(view, theatre, model);
   // A front fought on one map would repeat its name on every battle.
   const mapped = new Set(theatre.window.map((battle) => battle.map)).size > 1;
   return html`<div
@@ -114,7 +116,9 @@ export function renderDrawer(
                 </div>
               </div>
               <p class="wp-front-line">${contestLine(view, theatre)}</p>`}
-        ${renderStrip(view, theatre, model)}
+        ${strip !== nothing
+          ? html`<div aria-hidden="true">${strip}</div>`
+          : nothing}
         ${theatre.tallies.length > 0
           ? html`<h3 class="wp-drawer-sub">
                 ${translateText("world_page.detail_tally", {
@@ -177,26 +181,30 @@ export function renderDrawer(
                 ${translateText("world_page.detail_reigns")}
               </h3>
               ${timeline}
-              <ol class="wp-reigns" role="list">
-                ${theatre.reigns.map(
-                  (entry) =>
-                    html`<li style="--banner:${view.bannerColor(entry.holder)}">
-                      ${view.emblem(entry.holder, 20)}
-                      <span class="wp-reign-name"
-                        >${view.label(entry.holder)}</span
-                      >
-                      <span class="wp-reign-span"
-                        >${reignSpan(view, entry.from, entry.to)}</span
-                      >
-                      <span class="wp-reign-record"
-                        >${translateText("world_page.detail_reign", {
-                          wins: entry.wins,
-                          battles: entry.battles,
-                        })}</span
-                      >
-                    </li>`,
-                )}
-              </ol>`
+              ${theatre.reigns.length > 0
+                ? html`<ol class="wp-reigns" role="list">
+                    ${theatre.reigns.map(
+                      (entry) =>
+                        html`<li
+                          style="--banner:${view.bannerColor(entry.holder)}"
+                        >
+                          ${view.emblem(entry.holder, 20)}
+                          <span class="wp-reign-name"
+                            >${view.label(entry.holder)}</span
+                          >
+                          <span class="wp-reign-span"
+                            >${reignSpan(view, entry.from, entry.to)}</span
+                          >
+                          <span class="wp-reign-record"
+                            >${translateText("world_page.detail_reign", {
+                              wins: entry.wins,
+                              battles: entry.battles,
+                            })}</span
+                          >
+                        </li>`,
+                    )}
+                  </ol>`
+                : nothing}`
           : nothing}
         ${theatre.maps.length > 0
           ? html`<p class="wp-drawer-maps">
@@ -216,14 +224,14 @@ export function renderDrawer(
     </aside>`;
 }
 
-/** "Sep 24 – Sep 27", "Oct 2 – now", or one date for a reign within a day. */
+/**
+ * "Sep 24 – 27", "Oct 2 – now", one date for a reign within a day, and
+ * years when it spans two: the page's language decides the form.
+ */
 function reignSpan(view: WorldView, from: string, to: string | null): string {
-  const start = view.date(from);
-  if (to === null) {
-    return `${start} – ${translateText("world_page.detail_reign_now")}`;
-  }
-  const end = view.date(to);
-  return start === end ? start : `${start} – ${end}`;
+  return to === null
+    ? translateText("world_page.detail_reign_since", { date: view.date(from) })
+    : formatDateRange(from, to);
 }
 
 /** Tab and Shift+Tab cycle inside the open sheet, as in any modal dialog. */
