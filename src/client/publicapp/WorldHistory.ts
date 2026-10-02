@@ -196,13 +196,17 @@ function renderBar(
     ${row.reigns.map((reign) => {
       const color =
         reign.holder === null ? null : view.bannerColor(reign.holder);
+      const ink = color === null ? null : bannerInk(color);
       return html`<span
         class="wp-tl-run ${reign.holder === null
           ? "wp-tl-open"
-          : ""} ${reign === pointed ? "wp-tl-pointed" : ""}"
-        style="flex-grow:${reign.to - reign.from + 1}${color === null
+          : ""} ${reign === pointed ? "wp-tl-pointed" : ""} ${ink?.plated
+          ? "wp-tl-plated"
+          : ""}"
+        style="flex-grow:${reign.to - reign.from + 1}${color === null ||
+        ink === null
           ? ""
-          : `;--c:${color};--t:${inkOn(color)}`}"
+          : `;--c:${color};--t:${ink.ink}`}"
         ><span class="wp-tl-name"
           >${reign.holder !== null
             ? view.label(reign.holder)
@@ -317,9 +321,20 @@ function monthTicks(
   return ticks;
 }
 
-function inkOn(color: string): string {
-  const ratio = contrastRatio(color, DARK_INK);
-  return ratio !== null && ratio >= 4.5 ? DARK_INK : LIGHT_INK;
+/**
+ * A name written on a holder's banner: in whichever ink reads at 4.5:1 or
+ * better, or, on a mid-tone banner where neither does, in light ink on a
+ * small dark plate.
+ */
+export function bannerInk(color: string): {
+  readonly ink: string;
+  readonly plated: boolean;
+} {
+  const dark = contrastRatio(color, DARK_INK) ?? 0;
+  const light = contrastRatio(color, LIGHT_INK) ?? 0;
+  if (dark >= 4.5 && dark >= light) return { ink: DARK_INK, plated: false };
+  if (light >= 4.5) return { ink: LIGHT_INK, plated: false };
+  return { ink: LIGHT_INK, plated: true };
 }
 
 function focusVisible(element: Element): boolean {
