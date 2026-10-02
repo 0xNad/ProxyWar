@@ -61,7 +61,11 @@ import {
   eventSentence,
   formatAge,
   formatDate,
+  formatDayHeading,
   formatList,
+  formatNumber,
+  formatTime,
+  localDay,
 } from "./WorldText";
 import { ICONS, type WorldView } from "./WorldView";
 
@@ -1055,9 +1059,15 @@ export class WorldPage extends LitElement {
         ? html`<p class="wp-muted">
             ${translateText("world_page.dispatches_empty")}
           </p>`
-        : html`<ol class="wp-dispatches" role="list">
-            ${events.map((event) => this.renderDispatch(event))}
-          </ol>`}
+        : this.dayGroups(events).map(
+            (group) =>
+              html`<h3 class="wp-dispatch-day">
+                  ${formatDayHeading(group.events[0].at, this.now)}
+                </h3>
+                <ol class="wp-dispatches" role="list">
+                  ${group.events.map((event) => this.renderDispatch(event))}
+                </ol>`,
+          )}
       ${model.events.length > DISPATCHES_COLLAPSED
         ? html`<button
             type="button"
@@ -1076,6 +1086,20 @@ export class WorldPage extends LitElement {
     </section>`;
   }
 
+  /** Events in a row by the visitor's calendar day, newest day first. */
+  private dayGroups(
+    events: readonly WorldEvent[],
+  ): Array<{ day: string; events: WorldEvent[] }> {
+    const groups: Array<{ day: string; events: WorldEvent[] }> = [];
+    for (const event of events) {
+      const day = localDay(Date.parse(event.at));
+      const last = groups[groups.length - 1];
+      if (last !== undefined && last.day === day) last.events.push(event);
+      else groups.push({ day, events: [event] });
+    }
+    return groups;
+  }
+
   /** One event in the front page's words; the whole row watches the battle. */
   private renderDispatch(event: WorldEvent) {
     const { key, params } = eventSentence(event, (name) => this.label(name));
@@ -1091,8 +1115,8 @@ export class WorldPage extends LitElement {
           event: sentence,
         })}
       >
-        <time datetime=${event.at} title=${this.date(event.at, true)}
-          >${this.age(event.at)}</time
+        <time datetime=${event.at} title=${this.age(event.at)}
+          >${formatTime(event.at)}</time
         >
         <span class="wp-dispatch-text"
           ><i
@@ -1139,6 +1163,12 @@ export class WorldPage extends LitElement {
       <h2 id="wp-powers-title" class="wp-section-title">
         ${translateText("world_page.powers_title")}
       </h2>
+      <p class="wp-panel-intro">
+        ${translateText("world_page.powers_intro", {
+          date:
+            model.firstBattleAt === null ? "—" : this.date(model.firstBattleAt),
+        })}
+      </p>
       <table class="wp-powers">
         <thead>
           <tr>
@@ -1154,39 +1184,33 @@ export class WorldPage extends LitElement {
         </thead>
         <tbody>
           ${rows.map((agent) => {
-            const fronts = agent.theatres.filter((id) => id !== "crown");
+            // The Crown last, after the land; the same links as the legend.
+            const holdings = [
+              ...agent.theatres.filter((id) => id !== "crown"),
+              ...(agent.name === crownHolder ? (["crown"] as const) : []),
+            ].flatMap((id) => {
+              const theatre = this.theatre(id);
+              return theatre === undefined ? [] : [theatre];
+            });
             return html`<tr style="--banner:${this.bannerColor(agent.name)}">
               <th scope="row">
                 <span class="wp-power-agent">
                   ${this.emblem(agent.name, 26)} ${this.agentLink(agent.name)}
-                  ${agent.name === crownHolder
-                    ? html`<span
-                        class="wp-power-crown"
-                        title=${translateText("world_page.powers_crown")}
-                        >${CROWN_GLYPH}</span
-                      >`
-                    : nothing}
                 </span>
               </th>
               <td>
-                ${fronts.length === 0
+                ${holdings.length === 0
                   ? html`<span class="wp-muted">—</span>`
-                  : html`<span class="wp-front-chips"
-                      >${fronts.map(
-                        (id) =>
-                          html`<button
-                            type="button"
-                            class="wp-front-chip"
-                            aria-haspopup="dialog"
-                            @click=${() => this.openFront(id)}
-                          >
-                            ${this.frontName(id)}
-                          </button>`,
+                  : html`<span class="wp-power-fronts"
+                      >${holdings.map((theatre) =>
+                        this.legendFront(theatre),
                       )}</span
                     >`}
               </td>
-              <td class="wp-num wp-powers-conquests">${agent.conquests}</td>
-              <td class="wp-num">${agent.battlesWon}</td>
+              <td class="wp-num wp-powers-conquests">
+                ${formatNumber(agent.conquests)}
+              </td>
+              <td class="wp-num">${formatNumber(agent.battlesWon)}</td>
             </tr>`;
           })}
         </tbody>

@@ -122,6 +122,9 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-panel{min-width:0}
 .wp-panel .wp-section-title{margin-bottom:.4rem}
 .wp-panel-intro{margin:0 0 .8rem;font-size:13px;color:var(--wp-dim)}
+.wp-dispatch-day{margin:20px 0 6px;font:700 14px/1.3 var(--wp-display);color:var(--wp-dim)}
+.wp-dispatch-day:first-of-type{margin-top:4px}
+.wp-power-fronts{display:flex;flex-wrap:wrap;gap:12px 16px}
 .wp-dispatches{margin:0;padding:0;list-style:none;border-top:1px solid var(--wp-line)}
 .wp-dispatch{display:grid;grid-template-columns:6.5em minmax(0,1fr) auto;gap:2px 16px;align-items:baseline;min-height:44px;padding:11px 0 12px;border-bottom:1px solid var(--wp-line);color:var(--wp-ink);text-decoration:none}
 .wp-dispatch time{font-size:13px;color:var(--wp-dim);font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -139,11 +142,6 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-powers tbody th{font-weight:700;color:var(--wp-ink);overflow-wrap:anywhere}
 .wp-num{text-align:right!important;font-variant-numeric:tabular-nums;color:var(--wp-dim)}
 .wp-power-agent{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
-.wp-power-crown{display:inline-flex;width:16px;height:9px;color:var(--wp-ink)}
-.wp-front-chips{display:flex;flex-wrap:wrap;gap:12px 6px}
-.wp-front-chip{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0 .45rem;border-radius:2px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
-.wp-front-chip:hover{background:color-mix(in srgb,var(--banner) 24%,transparent)}
-.wp-front-chip::after{content:"";position:absolute;inset:-6px -2px}
 .wp-tl{--label:9.5rem;--gap:14px;--row:22px;display:grid;grid-template-columns:var(--label) minmax(0,1fr);column-gap:var(--gap);padding:0}
 .wp-tl-fronts{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
 .wp-tl-front{display:flex;align-items:center;gap:6px;width:100%;height:var(--row);padding:0;border:0;background:none;color:var(--wp-ink);font:700 13px/1 var(--wp-display);text-align:left;white-space:nowrap;cursor:pointer}

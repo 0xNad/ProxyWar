@@ -194,6 +194,40 @@ describe("world-page", () => {
     expect(text(el.querySelector(".wp-panel-intro"))).toBe(
       "Scores count wins in the front's last 12 battles.",
     );
+    // Grouped by the visitor's day.
+    expect(
+      [...el.querySelectorAll(".wp-dispatch-day")].map((day) => text(day)),
+    ).toEqual(["Today", "Yesterday"]);
+  });
+
+  it("explains the Powers table and links each holding like the legend", async () => {
+    const el = mount();
+    await settle(el);
+    const powers = el.querySelector(".wp-powers")?.closest("section");
+    expect(text(powers?.querySelector(".wp-panel-intro"))).toBe(
+      "Conquests are fronts taken from their holder. Wins are battles won on the world's maps. Both count since Jul 17.",
+    );
+    const row = (name: string) =>
+      [...el.querySelectorAll(".wp-powers tbody tr")].find((tr) =>
+        text(tr.querySelector("th")).includes(name),
+      );
+    expect(text(row("Matt Van")?.querySelector(".wp-power-fronts"))).toBe(
+      "Asia (under siege)",
+    );
+    // The Crown is a holding like any other, not an unlabelled icon.
+    expect(text(row("relh")?.querySelector(".wp-power-fronts"))).toBe(
+      "The Crown",
+    );
+    expect(
+      [...(row("Matt Van")?.querySelectorAll(".wp-num") ?? [])].map((cell) =>
+        text(cell),
+      ),
+    ).toEqual(["250", "1,564"]);
+    row("Matt Van")
+      ?.querySelector<HTMLButtonElement>(".wp-legend-front")
+      ?.click();
+    await settle(el);
+    expect(window.location.hash).toBe("#front-asia");
   });
 
   it("opens a front's history from its label, says how it is held, and closes with Escape", async () => {

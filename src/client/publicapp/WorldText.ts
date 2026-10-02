@@ -46,6 +46,45 @@ export function formatAge(iso: string, now: number): string {
   }
 }
 
+/** The time of day in the visitor's zone: "21:47" or "9:47 PM". */
+export function formatTime(iso: string): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "—";
+  return new Intl.DateTimeFormat(pageLocale(), {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(time));
+}
+
+/** The visitor's calendar day of a moment, for grouping. */
+export function localDay(time: number): string {
+  const date = new Date(time);
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+/** A day heading in the visitor's zone: "Today", "Yesterday", "Tuesday, Sep 30". */
+export function formatDayHeading(iso: string, now: number): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "—";
+  const day = localDay(time);
+  if (day === localDay(now)) return translateText("world_page.day_today");
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (day === localDay(yesterday.getTime())) {
+    return translateText("world_page.day_yesterday");
+  }
+  return new Intl.DateTimeFormat(pageLocale(), {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(time));
+}
+
+/** A count in the page's language: "1,564". */
+export function formatNumber(value: number): string {
+  return new Intl.NumberFormat(pageLocale()).format(value);
+}
+
 /** A list in the page's language: "Asia, Europe and Africa". */
 export function formatList(items: readonly string[]): string {
   try {
