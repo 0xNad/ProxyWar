@@ -179,6 +179,41 @@ describe("ReplayLoadingScreen", () => {
     expect(back?.getAttribute("href")).toBe("/league");
   });
 
+  it("tells the embedding host about first frame and failure", () => {
+    const postMessage = vi.fn();
+    Object.defineProperty(window, "parent", {
+      value: { postMessage },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      holdReplayLoadingScreenUntilFirstFrame();
+      document.dispatchEvent(new CustomEvent("ai-league-replay-frame"));
+      expect(postMessage).not.toHaveBeenCalled();
+      vi.runOnlyPendingTimers();
+      expect(postMessage).toHaveBeenCalledWith(
+        { src: "coworld-replay", type: "ready" },
+        "*",
+      );
+
+      showReplayLoadingFailure("Replay bytes were corrupt");
+      expect(postMessage).toHaveBeenLastCalledWith(
+        {
+          src: "coworld-replay",
+          type: "error",
+          message: "Replay bytes were corrupt",
+        },
+        "*",
+      );
+    } finally {
+      Object.defineProperty(window, "parent", {
+        value: window,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
   it("does not let a cancelled first-frame listener remove a failure screen", () => {
     const cleanup = holdReplayLoadingScreenUntilFirstFrame();
     cleanup();

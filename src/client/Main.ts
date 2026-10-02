@@ -26,6 +26,7 @@ import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
 import { mountCoworldPlayerOverlay } from "./CoworldPlayerOverlay";
+import { postToReplayHost } from "./CoworldReplayHost";
 import {
   isCoworldStaticReplayViewer,
   loadCoworldStaticReplay,
@@ -1211,7 +1212,7 @@ class Client {
     // turn counter kept climbing behind the dishonest error).
     const joinSyncWatchdog = createJoinSyncWatchdog({
       onStalled: () => {
-        if (!veilFinished) showReplayLoadingFailure();
+        if (!veilFinished) showReplayLoadingFailure("Live join stalled");
       },
       onRecovered: () => {
         // The underlying sync recovered after a latched stall notice --
@@ -1226,7 +1227,7 @@ class Client {
       if (veilFinished) return;
       veilFinished = true;
       clearVeilSlowTimer();
-      showReplayLoadingFailure();
+      showReplayLoadingFailure("Replay load error before first frame");
     };
     document.addEventListener(
       "ai-league-replay-load-error",
@@ -2143,7 +2144,7 @@ class Client {
         // path captured when it opened — which predates the `?turn=` just
         // written above and would quietly drop it.
         ...(context.options.coworldReplayPath !== undefined
-          ? { coworldReplayPath: url.pathname + url.search }
+          ? { coworldReplayPath: url.pathname + url.search + url.hash }
           : {}),
         // The curtain raised above IS this attempt's loading treatment;
         // without this, `openAiLeagueReplay` would still raise its own
@@ -2266,11 +2267,18 @@ class Client {
 
   private async openCoworldStaticReplay(): Promise<void> {
     showReplayLoadingScreen("ai_league_replay.loading_replay");
+    postToReplayHost({ type: "phase", phase: "bundle_ready" });
     try {
       const replay = await loadCoworldStaticReplay();
       await this.openAiLeagueReplay(replay.runID, {
         source: "coworld-replay",
-        coworldReplayPath: window.location.pathname + window.location.search,
+        // Keep the fragment: Observatory passes the replay URL as `#replay=`,
+        // and this path is written back with `history.replaceState` on join
+        // and on every in-place rewind.
+        coworldReplayPath:
+          window.location.pathname +
+          window.location.search +
+          window.location.hash,
         artifactBasePath: ".",
         gameRecord: replay.gameRecord,
         inlineSpectatorTelemetry: replay.spectatorTelemetry,
@@ -2350,7 +2358,7 @@ class Client {
     this.replayLoadingCleanup = null;
     this.replayAttemptCleanup?.();
     this.disposeReplaySessionState();
-    showReplayLoadingFailure();
+    showReplayLoadingFailure(message);
     console.error(`${message} for run ${runID}`, error);
   }
 
