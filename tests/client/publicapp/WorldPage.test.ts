@@ -266,12 +266,59 @@ describe("world-page", () => {
     expect(battles).toHaveLength(5);
     // Newest first.
     expect(battles[0].getAttribute("href")).toBe("/match/ereq_asia5");
-    expect(el.querySelectorAll(".wp-reigns li")).toHaveLength(2);
+    // Every battle here was on the Asia map, so no row repeats it.
+    expect(el.querySelector(".wp-battle-map")).toBeNull();
+    expect(
+      [...el.querySelectorAll(".wp-reign-span")].map((span) => text(span)),
+    ).toEqual(["Sep 28 – now", "Sep 25 – Sep 28"]);
+    // The front's own strip and its day-by-day reigns, as on the page.
+    expect(
+      el.querySelector(".wp-drawer .wp-strip")?.getAttribute("aria-label"),
+    ).toBe(
+      "The last 5 battles: Matt Van won 2, relh won 2, and 1 with no winner",
+    );
+    const solo = el.querySelector(".wp-drawer .wp-tl-solo");
+    expect(solo?.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      [...(solo?.querySelectorAll(".wp-tl-run") ?? [])].map((run) => text(run)),
+    ).toEqual(["Alpha", "Matt Van"]);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await settle(el);
     expect(el.querySelector('[role="dialog"]')).toBeNull();
     expect(window.location.hash).toBe("");
+  });
+
+  it("dates a reign within one day once, and names maps only when they differ", async () => {
+    const model = worldFixture();
+    const asia = model.theatres.find((theatre) => theatre.id === "asia")!;
+    serve({
+      ...model,
+      theatres: model.theatres.map((theatre) =>
+        theatre !== asia
+          ? theatre
+          : {
+              ...asia,
+              reigns: asia.reigns.map((reign) =>
+                reign.to === null
+                  ? reign
+                  : { ...reign, from: "2026-09-28T02:00:00.000Z" },
+              ),
+              window: asia.window.map((battle, index) =>
+                index === 0 ? { ...battle, map: "Baikal" } : battle,
+              ),
+            },
+      ),
+    });
+    window.history.replaceState(null, "", "/world#front-asia");
+    const el = mount();
+    await settle(el);
+    expect(
+      [...el.querySelectorAll(".wp-reign-span")].map((span) => text(span)),
+    ).toEqual(["Sep 28 – now", "Sep 28"]);
+    expect(
+      [...el.querySelectorAll(".wp-battle-map")].map((map) => text(map)),
+    ).toEqual(["Asia", "Asia", "Asia", "Asia", "Baikal"]);
   });
 
   it("names every holder under the map, with each front's state in words", async () => {
@@ -676,11 +723,41 @@ describe("world-page", () => {
     expect(document.activeElement).toBe(last);
   });
 
+  it("slides the sheet in only where someone can watch it", async () => {
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+    window.history.replaceState(null, "", "/world#front-asia");
+    let el = mount();
+    await settle(el);
+    // A hidden tab runs no animation clock: the sheet must simply be there.
+    expect(el.querySelector(".wp-drawer")?.classList).not.toContain(
+      "wp-drawer-enter",
+    );
+    el.remove();
+    visibility.mockReturnValue("visible");
+    window.history.replaceState(null, "", "/world");
+    el = mount();
+    await settle(el);
+    find<HTMLButtonElement>(el, ".hp-mark", "Asia")?.click();
+    await settle(el);
+    expect(el.querySelector(".wp-drawer")?.classList).toContain(
+      "wp-drawer-enter",
+    );
+    visibility.mockRestore();
+  });
+
   it("opens the front named in the URL hash", async () => {
     window.history.replaceState(null, "", "/world#front-crown");
     const el = mount();
     await settle(el);
     expect(text(el.querySelector(".wp-drawer-title"))).toBe("The Crown");
+    // No recorded reigns yet, but the day-by-day bar still shows who held it.
+    expect(
+      [...el.querySelectorAll(".wp-drawer .wp-tl-solo .wp-tl-run")].map((run) =>
+        text(run),
+      ),
+    ).toEqual(["Andre von Houck", "relh"]);
     // Focus moves into the sheet, as when it is opened by a click.
     expect(document.activeElement).toBe(el.querySelector(".wp-drawer-close"));
     expect(text(el.querySelector(".wp-drawer-maps"))).toBe(

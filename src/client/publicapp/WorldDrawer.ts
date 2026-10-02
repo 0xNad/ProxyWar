@@ -2,7 +2,8 @@ import { html, nothing } from "lit";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { assetUrl } from "../../core/AssetUrls";
 import { translateText } from "../Utils";
-import { contestLine } from "./WorldFronts";
+import { contestLine, renderStrip } from "./WorldFronts";
+import { renderFrontTimeline } from "./WorldHistory";
 import type { WorldTheatre, WorldTheatreId } from "./WorldModelSchema";
 import { battlefieldKey, frontDisplayState } from "./WorldPresentation";
 import { battlefieldName } from "./WorldText";
@@ -13,7 +14,11 @@ import { ICONS, STATUS_KEYS, type WorldView } from "./WorldView";
  * race is, its last battles, every ruler it has had and the maps it is
  * fought on. Opens from a map label, the legend, a row or `#front-<id>`.
  */
-export function renderDrawer(view: WorldView, id: WorldTheatreId) {
+export function renderDrawer(
+  view: WorldView,
+  id: WorldTheatreId,
+  animate: boolean,
+) {
   const model = view.model;
   const theatre = model.theatres.find((entry) => entry.id === id);
   if (theatre === undefined) return nothing;
@@ -22,12 +27,15 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
   const thumb = thumbnail(theatre);
   const maxTally = Math.max(1, ...theatre.tallies.map((tally) => tally.wins));
   const reign = theatre.reigns.find((entry) => entry.to === null);
+  const timeline = renderFrontTimeline(view, id);
+  // A front fought on one map would repeat its name on every battle.
+  const mapped = new Set(theatre.window.map((battle) => battle.map)).size > 1;
   return html`<div
-      class="wp-drawer-backdrop"
+      class="wp-drawer-backdrop ${animate ? "wp-drawer-enter" : ""}"
       @click=${() => view.closeFront()}
     ></div>
     <aside
-      class="wp-drawer"
+      class="wp-drawer ${animate ? "wp-drawer-enter" : ""}"
       role="dialog"
       aria-modal="true"
       aria-labelledby="wp-drawer-title"
@@ -106,6 +114,7 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                 </div>
               </div>
               <p class="wp-front-line">${contestLine(view, theatre)}</p>`}
+        ${renderStrip(view, theatre, model)}
         ${theatre.tallies.length > 0
           ? html`<h3 class="wp-drawer-sub">
                 ${translateText("world_page.detail_tally", {
@@ -134,7 +143,10 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                   count: theatre.window.length,
                 })}
               </h3>
-              <ol class="wp-battles" role="list">
+              <ol
+                class="wp-battles ${mapped ? "wp-battles-maps" : ""}"
+                role="list"
+              >
                 ${[...theatre.window].reverse().map(
                   (battle) =>
                     html`<li
@@ -144,9 +156,11 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                         <span class="wp-battle-when"
                           >${view.date(battle.at, true)}</span
                         >
-                        <span class="wp-battle-map"
-                          >${battlefieldName(battle.map)}</span
-                        >
+                        ${mapped
+                          ? html`<span class="wp-battle-map"
+                              >${battlefieldName(battle.map)}</span
+                            >`
+                          : nothing}
                         <span class="wp-battle-winner"
                           >${battle.winner !== null
                             ? view.emblem(battle.winner, 16)
@@ -158,10 +172,11 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                 )}
               </ol>`
           : nothing}
-        ${theatre.reigns.length > 0
+        ${theatre.reigns.length > 0 || timeline !== nothing
           ? html`<h3 class="wp-drawer-sub">
                 ${translateText("world_page.detail_reigns")}
               </h3>
+              ${timeline}
               <ol class="wp-reigns" role="list">
                 ${theatre.reigns.map(
                   (entry) =>
@@ -171,10 +186,7 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                         >${view.label(entry.holder)}</span
                       >
                       <span class="wp-reign-span"
-                        >${view.date(entry.from)} –
-                        ${entry.to === null
-                          ? translateText("world_page.detail_reign_now")
-                          : view.date(entry.to)}</span
+                        >${reignSpan(view, entry.from, entry.to)}</span
                       >
                       <span class="wp-reign-record"
                         >${translateText("world_page.detail_reign", {
@@ -202,6 +214,16 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
           : nothing}
       </div>
     </aside>`;
+}
+
+/** "Sep 24 – Sep 27", "Oct 2 – now", or one date for a reign within a day. */
+function reignSpan(view: WorldView, from: string, to: string | null): string {
+  const start = view.date(from);
+  if (to === null) {
+    return `${start} – ${translateText("world_page.detail_reign_now")}`;
+  }
+  const end = view.date(to);
+  return start === end ? start : `${start} – ${end}`;
 }
 
 /** Tab and Shift+Tab cycle inside the open sheet, as in any modal dialog. */

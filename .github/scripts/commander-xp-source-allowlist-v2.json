@@ -309,6 +309,7 @@
   "tests/client/publicapp/HomePresentation.test.ts",
   "tests/client/publicapp/LegalInfoPage.test.ts",
   "tests/client/publicapp/WorldFixtures.ts",
+  "tests/client/publicapp/WorldHistory.test.ts",
   "tests/client/publicapp/WorldMapLayout.test.ts",
   "tests/client/publicapp/WorldPage.test.ts",
   "tests/client/publicapp/WorldPresentation.test.ts",
