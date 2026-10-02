@@ -61,7 +61,8 @@ export type CoworldRoundIntegrityEvaluation =
         | "episode_count_unexpected"
         | "episode_identity_incomplete"
         | "episode_round_mismatch"
-        | "episode_still_in_progress";
+        | "episode_still_in_progress"
+        | "episode_detail_incomplete";
     }
   | {
       kind: "assessed";
@@ -174,6 +175,31 @@ function policyVersionIds(value: unknown): string[] | null {
   if (ids.some((id) => id === null)) return null;
   const strings = ids as string[];
   return new Set(strings).size === strings.length ? strings : null;
+}
+
+const completedEpisodeIntegrityDetailFields = [
+  "episode_id",
+  "running_at",
+  "error",
+  "policy_version_ids",
+  "scores",
+] as const;
+
+/**
+ * Coworld's episode list responses are summaries. In current production they
+ * can say `status=completed` while omitting the execution and score fields
+ * that the episode-detail response carries. Absence is not the same evidence
+ * as an explicit null/empty value: only the latter can prove a phantom or
+ * other effective failure.
+ */
+export function needsCoworldEpisodeIntegrityDetail(value: unknown): boolean {
+  const episode = asRecord(value);
+  return (
+    episode?.status === "completed" &&
+    completedEpisodeIntegrityDetailFields.some(
+      (field) => !Object.hasOwn(episode, field),
+    )
+  );
 }
 
 /**
@@ -321,6 +347,9 @@ export function evaluateCoworldRoundIntegrity(args: {
     })
   ) {
     return { ...baseIncomplete, reason: "episode_still_in_progress" };
+  }
+  if (rows.some(needsCoworldEpisodeIntegrityDetail)) {
+    return { ...baseIncomplete, reason: "episode_detail_incomplete" };
   }
 
   const classified = rows.map((row, index) => ({

@@ -128,6 +128,10 @@ export const proxyWarPublicLeagueArtifacts = [
   // Social preview image published beside the league page. og:image must be
   // fetchable by external scrapers, so it has to be publicly gettable.
   "social.png",
+  // The `/world` page's read model — published by the same writer, under the
+  // same lock and atomic-write discipline. Its source, `world-ledger.json`,
+  // stays private: it is an internal append-only store, not a public API.
+  "world.json",
 ] as const;
 
 /**

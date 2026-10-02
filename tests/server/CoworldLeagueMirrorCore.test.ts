@@ -187,6 +187,26 @@ const replayPayloadFixture = {
       rejectedCount: 4,
       fallbackCount: 33,
       actionCounts: { attack: 140, hold: 96 },
+      playerReliability: [
+        {
+          agentID: "opportunistic-agent-3",
+          username: "daveey",
+          brainDecisionCount: 50,
+          brainFallbackCount: 40,
+          fallbackRate: 0.8,
+          degradedDecisionCount: 38,
+          degradedCauseCounts: { unspecified_policy_degradation: 38 },
+        },
+        {
+          agentID: "opportunistic-agent-4",
+          username: "Auri",
+          brainDecisionCount: 60,
+          brainFallbackCount: 1,
+          fallbackRate: 0.0167,
+          degradedDecisionCount: 0,
+          degradedCauseCounts: { unspecified_fallback: 1 },
+        },
+      ],
     }),
     "spectator-telemetry.json": JSON.stringify({
       version: 1,
@@ -531,6 +551,90 @@ describe("CoworldLeagueMirrorCore", () => {
       attemptedRoundIds: ["round_latest", "round_older"],
       successfulRoundIds: ["round_older"],
       failedRoundIds: ["round_latest"],
+    });
+  });
+
+  function mixedRoundRows(roundId: string, completed: number, failed: number) {
+    return [
+      ...Array.from({ length: completed }, (_, index) => ({
+        id: `ereq_${roundId}_ok${index}`,
+        round_id: roundId,
+        status: "completed",
+        replay_url: `https://replays.test/${roundId}/${index}.replay`,
+      })),
+      ...Array.from({ length: failed }, (_, index) => ({
+        id: `ereq_${roundId}_bad${index}`,
+        round_id: roundId,
+        status: "failed",
+      })),
+    ];
+  }
+
+  const roundsWithFailures = [
+    {
+      id: "round_failed_latest",
+      round_number: 14,
+      status: "failed",
+      completed_at: "2026-10-01T11:45:56Z",
+    },
+    {
+      id: "round_failed_older",
+      round_number: 13,
+      status: "failed",
+      completed_at: "2026-10-01T11:05:21Z",
+    },
+    {
+      id: "round_rated",
+      round_number: 12,
+      status: "completed",
+      completed_at: "2026-09-29T22:00:00Z",
+    },
+    {
+      id: "round_pending",
+      round_number: 15,
+      status: "pending",
+      completed_at: null,
+    },
+  ];
+
+  test("readRecentRoundEpisodeRows with includeFailedRounds reads finished battles inside failed rounds and counts only completed episodes", async () => {
+    const calls: string[] = [];
+    const result = await readRecentRoundEpisodeRows({
+      roundsRaw: roundsWithFailures,
+      minimumRows: 8,
+      includeFailedRounds: true,
+      readCoworldJson: async (args) => {
+        calls.push(args[2]);
+        return { entries: mixedRoundRows(args[2], 4, 21) };
+      },
+    });
+
+    // 4 + 4 completed battles reach the minimum of 8; the 42 failed requests
+    // ride along (the replay parser skips them) but never count toward it.
+    expect(calls).toEqual(["round_failed_latest", "round_failed_older"]);
+    expect(result).toMatchObject({
+      latestRoundReadable: true,
+      successfulRoundIds: ["round_failed_latest", "round_failed_older"],
+      failedRoundIds: [],
+    });
+    expect(result.rows).toHaveLength(50);
+  });
+
+  test("readRecentRoundEpisodeRows without includeFailedRounds keeps failed rounds out of the rated-round view", async () => {
+    const calls: string[] = [];
+    const result = await readRecentRoundEpisodeRows({
+      roundsRaw: roundsWithFailures,
+      minimumRows: 8,
+      readCoworldJson: async (args) => {
+        calls.push(args[2]);
+        return { entries: mixedRoundRows(args[2], 25, 0) };
+      },
+    });
+
+    expect(calls).toEqual(["round_rated"]);
+    expect(result).toMatchObject({
+      latestRoundReadable: true,
+      successfulRoundIds: ["round_rated"],
     });
   });
 
@@ -939,6 +1043,15 @@ describe("CoworldLeagueMirrorCore", () => {
     // Map size comes from the authoritative replay config.
     expect(row.mapSize).toBe("Normal");
     expect(row).not.toHaveProperty("difficulty");
+    expect(
+      row.players.find((player) => player.name === "daveey")?.reliability,
+    ).toEqual({
+      brainDecisionCount: 50,
+      brainFallbackCount: 40,
+      fallbackRate: 0.8,
+      degradedDecisionCount: 38,
+      degradedCauseCounts: { unspecified_policy_degradation: 38 },
+    });
   });
 
   test("buildEpisodeRow recovers the map from the replay config when the list has none", () => {

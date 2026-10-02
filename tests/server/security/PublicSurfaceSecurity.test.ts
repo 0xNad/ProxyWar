@@ -438,3 +438,32 @@ describeWithAppShell(
     });
   },
 );
+
+describeWithAppShell("the front page at /", () => {
+  test("serves the app shell once world.json is published, and sends / to the event lobby before that", async () => {
+    const worldPath = path.join(
+      fixtureRoot,
+      "artifacts",
+      "ai-league-runs",
+      "league",
+      "world.json",
+    );
+    const published = await fetch(`${ORIGIN}/`, { redirect: "manual" });
+    expect(published.status).toBe(200);
+    expect(await published.text()).toContain("window.ASSET_MANIFEST");
+
+    const parked = `${worldPath}.parked`;
+    await fs.rename(worldPath, parked);
+    try {
+      const unpublished = await fetch(`${ORIGIN}/`, { redirect: "manual" });
+      expect(unpublished.status).toBe(302);
+      expect(unpublished.headers.get("location")).toBe("/lobby");
+      // Never cached: the redirect must end the moment world.json appears.
+      expect(unpublished.headers.get("cache-control")).toContain("no-store");
+    } finally {
+      await fs.rename(parked, worldPath);
+    }
+    const lobby = await fetch(`${ORIGIN}/lobby`, { redirect: "manual" });
+    expect(lobby.status).toBe(200);
+  });
+});

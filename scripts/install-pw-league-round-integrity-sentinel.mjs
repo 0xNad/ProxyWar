@@ -34,9 +34,22 @@ export const SENTINEL_INTEGRATION_CALL_BEGIN =
   "    // BEGIN PROXYWAR ROUND INTEGRITY CHECK";
 export const SENTINEL_INTEGRATION_CALL_END =
   "    // END PROXYWAR ROUND INTEGRITY CHECK";
+export const SENTINEL_ROUND_READ_BEGIN =
+  "    // BEGIN PROXYWAR ROUND READ FALLBACK";
+export const SENTINEL_ROUND_READ_END =
+  "    // END PROXYWAR ROUND READ FALLBACK";
 
 const IMPORT_ANCHOR = 'import { promisify } from "node:util";';
 const CALL_ANCHOR = "    evidence.rounds = rounds;";
+const ROUND_READ_ANCHOR = [
+  "    const roundsRaw = await coworld([",
+  '      "rounds",',
+  '      "-l",',
+  "      LEAGUE_ID,",
+  '      "--limit",',
+  '      "10",',
+  "    ]);",
+].join("\n");
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -116,30 +129,28 @@ function countOccurrences(source, value) {
 }
 
 export function transformPwLeagueSentinelSource(source) {
-  const markers = [
+  const integrationMarkers = [
     SENTINEL_INTEGRATION_IMPORT_BEGIN,
     SENTINEL_INTEGRATION_IMPORT_END,
     SENTINEL_INTEGRATION_CALL_BEGIN,
     SENTINEL_INTEGRATION_CALL_END,
   ];
-  const present = markers.filter((marker) => source.includes(marker));
-  if (present.length === markers.length) return source;
-  if (present.length > 0) {
+  const present = integrationMarkers.filter((marker) =>
+    source.includes(marker),
+  );
+  if (present.length > 0 && present.length < integrationMarkers.length) {
     throw new Error(
       `Sentinel contains a partial round-integrity integration: ${present.join(", ")}`,
     );
-  }
-  if (countOccurrences(source, IMPORT_ANCHOR) !== 1) {
-    throw new Error("Expected exactly one sentinel import anchor");
-  }
-  if (countOccurrences(source, CALL_ANCHOR) !== 1) {
-    throw new Error("Expected exactly one sentinel round collection anchor");
   }
 
   const importBlock = [
     IMPORT_ANCHOR,
     SENTINEL_INTEGRATION_IMPORT_BEGIN,
-    `import { collectConfirmedCoworldRoundIntegrity } from "./${INSTALLED_ADAPTER_BASENAME}";`,
+    "import {",
+    "  collectConfirmedCoworldRoundIntegrity,",
+    "  readCoworldRoundsWithFallback,",
+    `} from "./${INSTALLED_ADAPTER_BASENAME}";`,
     SENTINEL_INTEGRATION_IMPORT_END,
   ].join("\n");
   const callBlock = [
@@ -166,9 +177,58 @@ export function transformPwLeagueSentinelSource(source) {
     "    }",
     SENTINEL_INTEGRATION_CALL_END,
   ].join("\n");
-  return source
-    .replace(IMPORT_ANCHOR, importBlock)
-    .replace(CALL_ANCHOR, callBlock);
+  let transformed = source;
+  if (present.length === 0) {
+    if (countOccurrences(transformed, IMPORT_ANCHOR) !== 1) {
+      throw new Error("Expected exactly one sentinel import anchor");
+    }
+    if (countOccurrences(transformed, CALL_ANCHOR) !== 1) {
+      throw new Error("Expected exactly one sentinel round collection anchor");
+    }
+    transformed = transformed
+      .replace(IMPORT_ANCHOR, importBlock)
+      .replace(CALL_ANCHOR, callBlock);
+  } else if (!transformed.includes("readCoworldRoundsWithFallback")) {
+    const oldImport = `import { collectConfirmedCoworldRoundIntegrity } from "./${INSTALLED_ADAPTER_BASENAME}";`;
+    if (countOccurrences(transformed, oldImport) !== 1) {
+      throw new Error("Expected exactly one installed sentinel adapter import");
+    }
+    transformed = transformed.replace(
+      oldImport,
+      importBlock.split("\n").slice(2, -1).join("\n"),
+    );
+  }
+
+  const roundReadMarkers = [SENTINEL_ROUND_READ_BEGIN, SENTINEL_ROUND_READ_END];
+  const roundReadPresent = roundReadMarkers.filter((marker) =>
+    transformed.includes(marker),
+  );
+  if (
+    roundReadPresent.length > 0 &&
+    roundReadPresent.length < roundReadMarkers.length
+  ) {
+    throw new Error(
+      `Sentinel contains a partial round-read fallback: ${roundReadPresent.join(", ")}`,
+    );
+  }
+  if (roundReadPresent.length === 0) {
+    if (countOccurrences(transformed, ROUND_READ_ANCHOR) !== 1) {
+      throw new Error("Expected exactly one sentinel round read anchor");
+    }
+    transformed = transformed.replace(
+      ROUND_READ_ANCHOR,
+      [
+        SENTINEL_ROUND_READ_BEGIN,
+        "    const roundsRaw = await readCoworldRoundsWithFallback({",
+        "      coworld,",
+        "      leagueId: LEAGUE_ID,",
+        '      limit: "10",',
+        "    });",
+        SENTINEL_ROUND_READ_END,
+      ].join("\n"),
+    );
+  }
+  return transformed;
 }
 
 function integrationPaths(sentinelPath) {
@@ -213,10 +273,16 @@ export async function inspectPwLeagueSentinelRoundIntegrity({ sentinelPath }) {
     sentinelSource.includes(SENTINEL_INTEGRATION_CALL_BEGIN) &&
     sentinelSource.includes(SENTINEL_INTEGRATION_CALL_END) &&
     sentinelSource.includes("collectConfirmedCoworldRoundIntegrity({");
+  const roundReadFallbackWired =
+    sentinelSource.includes(SENTINEL_ROUND_READ_BEGIN) &&
+    sentinelSource.includes(SENTINEL_ROUND_READ_END) &&
+    sentinelSource.includes("readCoworldRoundsWithFallback({");
   const issues = [];
   if (!detector.exists) issues.push("detector_artifact_missing");
   if (!adapter.exists) issues.push("sentinel_adapter_missing");
-  if (!importWired || !callWired) issues.push("sentinel_not_wired");
+  if (!importWired || !callWired || !roundReadFallbackWired) {
+    issues.push("sentinel_not_wired");
+  }
   return {
     active: issues.length === 0,
     issues,
@@ -230,6 +296,7 @@ export async function inspectPwLeagueSentinelRoundIntegrity({ sentinelPath }) {
     adapterPresent: adapter.exists,
     importWired,
     callWired,
+    roundReadFallbackWired,
   };
 }
 

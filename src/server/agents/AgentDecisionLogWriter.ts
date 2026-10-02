@@ -1369,6 +1369,18 @@ function decisionLogEntry(
   };
 }
 
+function decisionEntriesByAgent(
+  entries: DecisionLogEntry[],
+): Map<string, DecisionLogEntry[]> {
+  const grouped = new Map<string, DecisionLogEntry[]>();
+  for (const entry of entries) {
+    const agentEntries = grouped.get(entry.agentID) ?? [];
+    agentEntries.push(entry);
+    grouped.set(entry.agentID, agentEntries);
+  }
+  return grouped;
+}
+
 function matchSummary(
   input: WriteAgentLeagueRunArtifactsInput,
   entries: DecisionLogEntry[],
@@ -1417,6 +1429,49 @@ function matchSummary(
   const primaryEntries = entries.filter(
     (entry) => (entry.batchIndex ?? 0) === 0,
   );
+  const playerReliability = [...decisionEntriesByAgent(primaryEntries)]
+    .map(([agentID, agentEntries]) => {
+      const first = agentEntries[0];
+      const brainFallbackCount = agentEntries.filter(
+        (entry) => entry.fallbackUsed,
+      ).length;
+      const degradedCauseCounts = agentEntries.reduce<Record<string, number>>(
+        (counts, entry) => {
+          if (!entry.fallbackUsed && entry.llmPlannerDegraded !== true) {
+            return counts;
+          }
+          const cause =
+            entry.degradedCause ??
+            (entry.llmPlannerDegraded === true
+              ? "unspecified_policy_degradation"
+              : "unspecified_fallback");
+          counts[cause] = (counts[cause] ?? 0) + 1;
+          return counts;
+        },
+        {},
+      );
+      return {
+        agentID,
+        username: first?.username ?? agentID,
+        brainDecisionCount: agentEntries.length,
+        brainFallbackCount,
+        fallbackRate:
+          agentEntries.length === 0
+            ? 0
+            : Math.round((brainFallbackCount / agentEntries.length) * 10_000) /
+              10_000,
+        degradedDecisionCount: agentEntries.filter(
+          (entry) => entry.llmPlannerDegraded === true,
+        ).length,
+        degradedCauseCounts,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.fallbackRate - left.fallbackRate ||
+        left.username.localeCompare(right.username) ||
+        left.agentID.localeCompare(right.agentID),
+    );
   const frontierConversionTiming = frontierConversionTimingSummary(entries);
   const frontierFinishPressure = frontierFinishPressureSummary(entries);
   const openingExpansionTempo = openingExpansionTempoSummary(entries);
@@ -1447,6 +1502,11 @@ function matchSummary(
     brainDecisionCount: primaryEntries.length,
     brainFallbackCount: primaryEntries.filter((entry) => entry.fallbackUsed)
       .length,
+    // Per-seat cycle-level attribution prevents one failing participant from
+    // turning an aggregate match fallback count into an apparent league-wide
+    // platform failure. All fields are bounded counts/vocabulary; no raw
+    // policy output or failure text enters the public match summary.
+    playerReliability,
     acceptedCount: entries.filter((entry) => entry.result.accepted).length,
     rejectedCount: entries.filter((entry) => !entry.result.accepted).length,
     fallbackCount: entries.filter((entry) => entry.fallbackUsed).length,

@@ -1,12 +1,11 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
   spectatorHtml,
   type AgentSpectatorReplay,
 } from "../server/agents/AgentSpectatorReplay";
+import { readCoworldJson as coworldJson } from "../server/agents/CoworldCliRead";
 import {
   CoworldLeagueDiskReserveError,
   coworldLeagueReplayCachePath,
@@ -62,12 +61,14 @@ import {
 import {
   episodeRowsByRoundId,
   evaluateCoworldRoundIntegrity,
+  needsCoworldEpisodeIntegrityDetail,
   parseCoworldLadderIntegritySettings,
   recentTerminalCompletedRounds,
   reconcileCoworldRoundIntegrity,
   retainCoworldRoundIntegrityOnIncompleteProbe,
   type CoworldRoundIntegrityState,
 } from "../server/agents/CoworldLeagueRoundIntegrity";
+import { evaluateCoworldLeagueSchedulerHealth } from "../server/agents/CoworldLeagueSchedulerHealth";
 import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
@@ -113,7 +114,6 @@ import {
  * mirror output is unchanged.
  */
 
-const execFileAsync = promisify(execFile);
 const maximumReplayBytes = 512 * 1024 * 1024;
 
 interface MirrorOptions {
@@ -379,26 +379,60 @@ function parseOptions(argv: string[]): MirrorOptions {
   return options;
 }
 
-const readVerbs = new Set([
-  "leagues",
-  "results",
-  "memberships",
-  "rounds",
-  "episodes",
-  "replays",
-]);
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
-async function coworldJson(args: string[]): Promise<unknown> {
-  const verb = args[0];
-  if (!readVerbs.has(verb)) {
-    throw new Error(`Refusing non-read coworld verb: ${verb}`);
-  }
-  const { stdout } = await execFileAsync(
-    "uvx",
-    ["coworld", ...args, "--json"],
-    { timeout: 180_000, maxBuffer: 128 * 1024 * 1024 },
+async function hydrateRoundIntegrityEpisodeDetails(args: {
+  roundId: string;
+  rows: unknown[];
+  concurrency?: number;
+}): Promise<{ rows: unknown[]; failedDetailReads: number }> {
+  const hydrated = [...args.rows];
+  const indexes = hydrated.flatMap((row, index) => {
+    const id = unknownRecord(row)?.id;
+    return needsCoworldEpisodeIntegrityDetail(row) &&
+      typeof id === "string" &&
+      id.length > 0
+      ? [index]
+      : [];
+  });
+  let cursor = 0;
+  let failedDetailReads = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < indexes.length) {
+      const index = indexes[cursor++];
+      const summary = unknownRecord(hydrated[index]);
+      const id = summary?.id;
+      if (typeof id !== "string") {
+        failedDetailReads += 1;
+        continue;
+      }
+      try {
+        const detail = unknownRecord(await coworldJson(["episodes", id]));
+        if (
+          detail === null ||
+          detail.id !== id ||
+          detail.round_id !== args.roundId ||
+          needsCoworldEpisodeIntegrityDetail(detail)
+        ) {
+          failedDetailReads += 1;
+          continue;
+        }
+        hydrated[index] = detail;
+      } catch {
+        failedDetailReads += 1;
+      }
+    }
+  };
+  const concurrency = Math.max(
+    1,
+    Math.min(args.concurrency ?? 5, indexes.length || 1),
   );
-  return JSON.parse(stdout) as unknown;
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return { rows: hydrated, failedDetailReads };
 }
 
 async function downloadReplay(
@@ -960,33 +994,52 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
 
   let replayRead = divisionReplayRead;
   let roundIntegrityRead = divisionRoundIntegrityRead;
-  if (!replayRead.ok || !roundIntegrityRead.ok) {
+  const roundScopedMinimumRows = Math.max(
+    options.episodeMetaLimit,
+    league.episodesPerRound ?? 1,
+  );
+  // Separate reads on purpose: battles that finished inside a round that
+  // later failed its integrity threshold are still real, replayable battles
+  // (the replay feed and the world map want them), while the integrity
+  // verdict must only ever be judged on rated rounds. See
+  // `readRecentRoundEpisodeRows`'s `includeFailedRounds` doc.
+  if (!replayRead.ok) {
     const fallback = await readRecentRoundEpisodeRows({
       roundsRaw,
       readCoworldJson: coworldJson,
-      minimumRows: Math.max(
-        options.episodeMetaLimit,
-        league.episodesPerRound ?? 1,
-      ),
+      minimumRows: roundScopedMinimumRows,
+      maximumRounds: options.roundsShown,
+      includeFailedRounds: true,
+    });
+    if (fallback.latestRoundReadable && fallback.rows.length > 0) {
+      replayRead = { ok: true as const, value: { entries: fallback.rows } };
+      log(
+        `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s) after the division-wide feed failed`,
+      );
+    } else {
+      log(
+        `round-scoped replay fallback could not read the latest terminal round; retaining last published battles (${fallback.failedRoundIds.length} failed round read(s))`,
+      );
+    }
+  }
+  if (!roundIntegrityRead.ok) {
+    const fallback = await readRecentRoundEpisodeRows({
+      roundsRaw,
+      readCoworldJson: coworldJson,
+      minimumRows: roundScopedMinimumRows,
       maximumRounds: options.roundsShown,
     });
     if (fallback.latestRoundReadable && fallback.rows.length > 0) {
-      const value = { entries: fallback.rows };
-      if (!replayRead.ok) {
-        replayRead = { ok: true as const, value };
-        log(
-          `replay feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s) after the division-wide feed failed`,
-        );
-      }
-      if (!roundIntegrityRead.ok) {
-        roundIntegrityRead = { ok: true as const, value };
-        log(
-          `round-integrity feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
-        );
-      }
+      roundIntegrityRead = {
+        ok: true as const,
+        value: { entries: fallback.rows },
+      };
+      log(
+        `round-integrity feed recovered from ${fallback.successfulRoundIds.length} recent round-scoped read(s)`,
+      );
     } else {
       log(
-        `round-scoped episode fallback could not read the latest completed round; retaining old replay and integrity evidence (${fallback.failedRoundIds.length} failed round read(s))`,
+        `round-scoped episode fallback could not read the latest completed round; retaining old integrity evidence (${fallback.failedRoundIds.length} failed round read(s))`,
       );
     }
   }
@@ -1015,6 +1068,18 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     );
   } else {
     const episodeRows = episodeRowsByRoundId(roundIntegrityRead.value);
+    const latestRoundId = String(terminalRounds[0].id);
+    const latestEpisodeRows = episodeRows.get(latestRoundId) ?? [];
+    const hydratedLatest = await hydrateRoundIntegrityEpisodeDetails({
+      roundId: latestRoundId,
+      rows: latestEpisodeRows,
+    });
+    episodeRows.set(latestRoundId, hydratedLatest.rows);
+    if (hydratedLatest.failedDetailReads > 0) {
+      log(
+        `round-integrity detail hydration incomplete for ${hydratedLatest.failedDetailReads}/${latestEpisodeRows.length} latest-round episode row(s)`,
+      );
+    }
     const evaluations = terminalRounds.map((round) =>
       evaluateCoworldRoundIntegrity({
         round,
@@ -1384,6 +1449,17 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   );
 
   const now = new Date().toISOString();
+  const schedulerHealth = evaluateCoworldLeagueSchedulerHealth({
+    rounds: roundsRaw,
+    roundsPausedAt: league.roundsPausedAt,
+    roundIntervalMinutes: league.roundIntervalMinutes,
+    checkedAt: now,
+  });
+  if (schedulerHealth.status === "delayed") {
+    log(
+      `round scheduler delayed; no hosted round activity for ${schedulerHealth.secondsSinceLatestActivity ?? "unknown"} second(s)`,
+    );
+  }
   const data: CoworldLeagueMirrorData = {
     generatedAt: now,
     lastGoodSyncAt: now,
@@ -1392,6 +1468,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     replayFeedStale,
     roundIntegrityFeedStale,
     ...(roundIntegrity !== undefined ? { roundIntegrity } : {}),
+    schedulerHealth,
     lastGoodReplaySyncAt: replayFeedStale
       ? (previousData?.lastGoodReplaySyncAt ??
         previousData?.lastGoodSyncAt ??

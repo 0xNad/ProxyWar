@@ -7,6 +7,8 @@
 
 const DEFAULT_ROUND_LIMIT = "10";
 const DEFAULT_EPISODE_LIMIT = "100";
+const EPISODE_DETAIL_CONCURRENCY = 5;
+const DEFAULT_COWORLD_SERVER = "https://softmax.com/api";
 
 function asRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -32,6 +34,58 @@ function nonemptyString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function errorText(error) {
+  if (!(error instanceof Error)) return String(error);
+  const stderr = typeof error.stderr === "string" ? error.stderr : "";
+  return `${error.message}\n${stderr}`;
+}
+
+function isRoundListPaginationShapeError(error) {
+  const text = errorText(error);
+  return (
+    text.includes("RoundListPublic") &&
+    text.includes("total_count") &&
+    text.includes("limit") &&
+    text.includes("offset") &&
+    text.includes("Field required")
+  );
+}
+
+export async function readCoworldRoundsWithFallback({
+  coworld,
+  leagueId,
+  limit = DEFAULT_ROUND_LIMIT,
+  fetchImpl = fetch,
+  server = DEFAULT_COWORLD_SERVER,
+}) {
+  const args = ["rounds", "-l", leagueId, "--limit", limit];
+  try {
+    return await coworld(args);
+  } catch (error) {
+    if (!isRoundListPaginationShapeError(error)) throw error;
+    const url = new URL(`${server.replace(/\/$/, "")}/observatory/v2/rounds`);
+    url.searchParams.set("league_id", leagueId);
+    url.searchParams.set("limit", limit);
+    const response = await fetchImpl(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Coworld round-list fallback failed: HTTP ${response.status}`,
+        { cause: error },
+      );
+    }
+    const body = await response.json();
+    if (asRecord(body) === null || !Array.isArray(body.entries)) {
+      throw new Error("Coworld round-list fallback returned an invalid shape", {
+        cause: error,
+      });
+    }
+    return body;
+  }
+}
+
 function pickCompetitionDivision(value) {
   const divisions = asArray(value)
     .map((entry) => {
@@ -55,6 +109,55 @@ function pickCompetitionDivision(value) {
   return candidates[0];
 }
 
+async function hydrateEpisodeIntegrityDetails({
+  coworld,
+  detector,
+  roundId,
+  rows,
+}) {
+  const hydrated = [...rows];
+  const indexes = hydrated.flatMap((row, index) => {
+    const id = nonemptyString(asRecord(row)?.id);
+    return id !== null && detector.needsCoworldEpisodeIntegrityDetail(row)
+      ? [index]
+      : [];
+  });
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < indexes.length) {
+      const index = indexes[cursor++];
+      const id = nonemptyString(asRecord(hydrated[index])?.id);
+      if (id === null) continue;
+      try {
+        const detail = asRecord(await coworld(["episodes", id]));
+        if (
+          detail !== null &&
+          detail.id === id &&
+          detail.round_id === roundId &&
+          !detector.needsCoworldEpisodeIntegrityDetail(detail)
+        ) {
+          hydrated[index] = detail;
+        }
+      } catch {
+        // Preserve the summary. The detector classifies its absent detail as
+        // incomplete evidence, so a failed read can never become a breach.
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      {
+        length: Math.max(
+          1,
+          Math.min(EPISODE_DETAIL_CONCURRENCY, indexes.length || 1),
+        ),
+      },
+      worker,
+    ),
+  );
+  return hydrated;
+}
+
 async function loadInstalledDetector() {
   return import(new URL("./pw-league-round-integrity.mjs", import.meta.url));
 }
@@ -73,8 +176,7 @@ async function readLatestRoundAssessment({
   roundsRaw,
 }) {
   const currentRoundsRaw =
-    roundsRaw ??
-    (await coworld(["rounds", "-l", leagueId, "--limit", DEFAULT_ROUND_LIMIT]));
+    roundsRaw ?? (await readCoworldRoundsWithFallback({ coworld, leagueId }));
   const latestRound = detector.recentTerminalCompletedRounds(
     currentRoundsRaw,
     1,
@@ -128,10 +230,16 @@ async function readLatestRoundAssessment({
     DEFAULT_EPISODE_LIMIT,
   ]);
   const episodeRows = detector.episodeRowsByRoundId(episodeRowsRaw);
+  const hydratedRows = await hydrateEpisodeIntegrityDetails({
+    coworld,
+    detector,
+    roundId,
+    rows: episodeRows.get(roundId) ?? [],
+  });
   return {
     evaluation: detector.evaluateCoworldRoundIntegrity({
       round: latestRound,
-      episodeRows: episodeRows.get(roundId) ?? [],
+      episodeRows: hydratedRows,
       settings,
     }),
     divisionId: division.id,

@@ -11,6 +11,7 @@ import {
 import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
 import type { CoworldRoundIntegrityState } from "./agents/CoworldLeagueRoundIntegrity";
 import type {
+  CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
   CoworldLeagueMirrorData,
@@ -189,6 +190,7 @@ export interface PublicMatchParticipant {
   isAlive: boolean;
   isWinner: boolean;
   color: string;
+  reliability: CoworldLeagueEpisodePlayerRow["reliability"] | null;
 }
 
 /**
@@ -372,6 +374,7 @@ export interface ProxyWarPublicReadModel {
     roundIntegrityFeedStale: boolean;
   };
   roundIntegrity: CoworldRoundIntegrityState | null;
+  schedulerHealth: CoworldLeagueMirrorData["schedulerHealth"] | null;
   league: CoworldLeagueMirrorData["league"];
   builders: PublicBuilder[];
   agents: PublicAgent[];
@@ -614,6 +617,7 @@ function publicMatch(
       isAlive: player.isAlive,
       isWinner: player.isWinner,
       color: player.color,
+      reliability: player.reliability ?? null,
     }),
   );
   const winner = participants.find((participant) => participant.isWinner);
@@ -894,6 +898,7 @@ export function buildProxyWarPublicReadModel(
       roundIntegrityFeedStale: mirror.roundIntegrityFeedStale ?? false,
     },
     roundIntegrity: mirror.roundIntegrity ?? null,
+    schedulerHealth: mirror.schedulerHealth ?? null,
     league: mirror.league,
     builders: identity.builders.map(publicBuilder),
     agents: publicAgents(

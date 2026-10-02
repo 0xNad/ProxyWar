@@ -33,6 +33,7 @@ import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
+  CoworldLeaguePlayerReliability,
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
@@ -506,13 +507,27 @@ export interface CoworldRecentRoundEpisodeRead {
  * The latest completed round must itself be readable before this result can
  * count as fresh. Older successful round reads may fill the display window,
  * but they cannot make an unreadable latest round look healthy.
+ *
+ * `includeFailedRounds` is for the REPLAY feed only. A round that fails the
+ * ladder's integrity threshold still contains episodes that finished and
+ * published replays — real battles the division-wide replay feed used to
+ * return. The hosted API no longer accepts a division filter for episode
+ * requests (HTTP 422 since late 2026-09), so this fallback is now the only
+ * replay path; without failed rounds, a run of failed rounds froze every
+ * battle surface on the last round that happened to pass. With the flag,
+ * "latest round" means the latest terminal round (completed or failed), and
+ * only completed episodes count toward `minimumRows`, so the window fills
+ * with watchable battles rather than failed requests. Round integrity keeps
+ * calling this without the flag: its verdict is about rated rounds only.
  */
 export async function readRecentRoundEpisodeRows(args: {
   roundsRaw: unknown;
   readCoworldJson: (args: string[]) => Promise<unknown>;
   minimumRows: number;
   maximumRounds?: number;
+  includeFailedRounds?: boolean;
 }): Promise<CoworldRecentRoundEpisodeRead> {
+  const includeFailedRounds = args.includeFailedRounds === true;
   const maximumRounds = args.maximumRounds ?? 10;
   if (
     !Number.isInteger(args.minimumRows) ||
@@ -527,7 +542,8 @@ export async function readRecentRoundEpisodeRows(args: {
     .filter(
       (round): round is Record<string, unknown> =>
         round !== null &&
-        round.status === "completed" &&
+        (round.status === "completed" ||
+          (includeFailedRounds && round.status === "failed")) &&
         asString(round.completed_at) !== null &&
         coworldRoundIdPattern.test(asString(round.id) ?? ""),
     )
@@ -543,6 +559,7 @@ export async function readRecentRoundEpisodeRows(args: {
   const successfulRoundIds: string[] = [];
   const failedRoundIds: string[] = [];
   const seenEpisodeRequestIds = new Set<string>();
+  let countedRows = 0;
   for (const round of rounds) {
     const roundId = asString(round.id);
     if (roundId === null) continue;
@@ -584,11 +601,15 @@ export async function readRecentRoundEpisodeRows(args: {
           seenEpisodeRequestIds.add(episodeRequestId);
         }
         rows.push(...roundRows);
+        countedRows += includeFailedRounds
+          ? roundRows.filter((entry) => asRecord(entry)?.status === "completed")
+              .length
+          : roundRows.length;
       }
     } catch {
       failedRoundIds.push(roundId);
     }
-    if (rows.length >= args.minimumRows) break;
+    if (countedRows >= args.minimumRows) break;
   }
   return {
     rows,
@@ -611,6 +632,7 @@ export interface ParsedHostedReplay {
   turnCount: number | null;
   decisionCount: number | null;
   degradedCount: number | null;
+  playerReliabilityByName: Map<string, CoworldLeaguePlayerReliability>;
   winnerSlot: number | null;
   players: Array<{
     slot: number;
@@ -841,6 +863,79 @@ function replayUiAggregatesFromMatchSummary(raw: unknown): {
   return { decisionCount, rejectedCount, fallbackCount, actionCounts };
 }
 
+function playerReliabilityFromMatchSummary(
+  raw: unknown,
+): Map<string, CoworldLeaguePlayerReliability> {
+  if (typeof raw !== "string") return new Map();
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return new Map();
+  }
+  const rows = asRecord(value)?.playerReliability;
+  if (!Array.isArray(rows) || rows.length > 256) return new Map();
+  const reliability = new Map<string, CoworldLeaguePlayerReliability>();
+  const ambiguousNames = new Set<string>();
+  for (const value of rows) {
+    const row = asRecord(value);
+    const username = boundedString(row?.username, 160);
+    const brainDecisionCount = asNumber(row?.brainDecisionCount);
+    const brainFallbackCount = asNumber(row?.brainFallbackCount);
+    const degradedDecisionCount = asNumber(row?.degradedDecisionCount);
+    const rawCauseCounts = asRecord(row?.degradedCauseCounts);
+    if (
+      username === null ||
+      brainDecisionCount === null ||
+      !Number.isInteger(brainDecisionCount) ||
+      brainDecisionCount < 0 ||
+      brainFallbackCount === null ||
+      !Number.isInteger(brainFallbackCount) ||
+      brainFallbackCount < 0 ||
+      brainFallbackCount > brainDecisionCount ||
+      degradedDecisionCount === null ||
+      !Number.isInteger(degradedDecisionCount) ||
+      degradedDecisionCount < 0 ||
+      degradedDecisionCount > brainDecisionCount ||
+      rawCauseCounts === null ||
+      Object.keys(rawCauseCounts).length > 32
+    ) {
+      continue;
+    }
+    const degradedCauseCounts: Record<string, number> = {};
+    for (const [cause, rawCount] of Object.entries(rawCauseCounts)) {
+      const count = asNumber(rawCount);
+      if (
+        /^[a-z0-9_-]{1,80}$/.test(cause) &&
+        count !== null &&
+        Number.isInteger(count) &&
+        count >= 0 &&
+        count <= brainDecisionCount
+      ) {
+        degradedCauseCounts[cause] = count;
+      }
+    }
+    if (reliability.has(username)) {
+      reliability.delete(username);
+      ambiguousNames.add(username);
+      continue;
+    }
+    if (ambiguousNames.has(username)) continue;
+    reliability.set(username, {
+      brainDecisionCount,
+      brainFallbackCount,
+      fallbackRate:
+        brainDecisionCount === 0
+          ? 0
+          : Math.round((brainFallbackCount / brainDecisionCount) * 10_000) /
+            10_000,
+      degradedDecisionCount,
+      degradedCauseCounts,
+    });
+  }
+  return reliability;
+}
+
 function projectCoworldReplayUiDecision(
   value: unknown,
 ): CoworldReplayUiDecision | null {
@@ -984,6 +1079,9 @@ export function parseHostedReplayPayload(
     turnCount: asNumber(results?.turn_count),
     decisionCount: asNumber(results?.decision_count),
     degradedCount: asNumber(results?.degraded_count),
+    playerReliabilityByName: playerReliabilityFromMatchSummary(
+      inlineRunArtifacts["match-summary.json"],
+    ),
     winnerSlot: asNumber(results?.winner_slot),
     players,
   };
@@ -1045,20 +1143,25 @@ export function buildEpisodeRow(input: {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
   const players: CoworldLeagueEpisodePlayerRow[] = replay.players
-    .map((player) => ({
-      slot: player.slot,
-      name: player.name,
-      tilesOwned: player.tilesOwned,
-      isAlive: player.isAlive,
-      isWinner: replay.winnerSlot !== null && player.slot === replay.winnerSlot,
-      color:
-        colors.get(player.name) ??
-        fallbackPlayerColors[
-          ((player.slot % fallbackPlayerColors.length) +
-            fallbackPlayerColors.length) %
-            fallbackPlayerColors.length
-        ],
-    }))
+    .map((player) => {
+      const reliability = replay.playerReliabilityByName.get(player.name);
+      return {
+        slot: player.slot,
+        name: player.name,
+        tilesOwned: player.tilesOwned,
+        isAlive: player.isAlive,
+        isWinner:
+          replay.winnerSlot !== null && player.slot === replay.winnerSlot,
+        color:
+          colors.get(player.name) ??
+          fallbackPlayerColors[
+            ((player.slot % fallbackPlayerColors.length) +
+              fallbackPlayerColors.length) %
+              fallbackPlayerColors.length
+          ],
+        ...(reliability !== undefined ? { reliability } : {}),
+      };
+    })
     .sort((a, b) => b.tilesOwned - a.tilesOwned);
   const winner = players.find((player) => player.isWinner);
   return {

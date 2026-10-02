@@ -50,10 +50,11 @@ describe("appShellHeader account chip", () => {
     const links = Array.from(
       root.querySelectorAll<HTMLAnchorElement>("header a"),
     );
-    // Only the brand-mark link ("/") and the five nav links are present.
+    // Only the brand-mark link ("/") and the six nav links are present.
     expect(links.map((a) => a.getAttribute("href"))).toEqual([
       "/",
       "/watch",
+      "/world",
       "/league",
       "/agents",
       "/builders",

@@ -20,12 +20,13 @@ import { buildPwLeagueRoundIntegrityArtifact } from "../../scripts/build-pw-leag
 // @ts-expect-error The host installer is intentionally plain Node ESM.
 import * as sentinelInstaller from "../../scripts/install-pw-league-round-integrity-sentinel.mjs";
 // @ts-expect-error The installed dependency-free adapter is intentionally plain Node ESM.
-import { collectConfirmedCoworldRoundIntegrity } from "../../scripts/pw-league-round-integrity-sentinel-adapter.mjs";
+import * as sentinelAdapter from "../../scripts/pw-league-round-integrity-sentinel-adapter.mjs";
 import {
   COWORLD_ROUND_INTEGRITY_CONFIRMATION_MS,
   coworldRoundIntegrityCriticalSignal,
   episodeRowsByRoundId,
   evaluateCoworldRoundIntegrity,
+  needsCoworldEpisodeIntegrityDetail,
   parseCoworldLadderIntegritySettings,
   recentTerminalCompletedRounds,
 } from "../../src/server/agents/CoworldLeagueRoundIntegrity";
@@ -40,6 +41,8 @@ const {
   transformPwLeagueSentinelSource,
   verifyPwLeagueSentinelRoundIntegrity,
 } = sentinelInstaller;
+const { collectConfirmedCoworldRoundIntegrity, readCoworldRoundsWithFallback } =
+  sentinelAdapter;
 
 const temporaryDirectories: string[] = [];
 const repositoryHead = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -63,6 +66,7 @@ const detector = {
   COWORLD_ROUND_INTEGRITY_CONFIRMATION_MS,
   episodeRowsByRoundId,
   evaluateCoworldRoundIntegrity,
+  needsCoworldEpisodeIntegrityDetail,
   parseCoworldLadderIntegritySettings,
   recentTerminalCompletedRounds,
   coworldRoundIntegrityCriticalSignal,
@@ -107,7 +111,10 @@ function fixtureEpisodes(phantomCount = 14) {
   );
 }
 
-function fixtureCoworld(episodeReads: unknown[][]) {
+function fixtureCoworld(
+  episodeReads: unknown[][],
+  episodeDetails = new Map<string, unknown>(),
+) {
   const calls: string[][] = [];
   let episodeRead = 0;
   return {
@@ -138,6 +145,14 @@ function fixtureCoworld(episodeReads: unknown[][]) {
         ];
       }
       if (args[0] === "episodes") {
+        if (args.length === 2 && !args[1].startsWith("-")) {
+          const detail = episodeDetails.get(args[1]);
+          if (detail instanceof Error) throw detail;
+          if (detail === undefined) {
+            throw new Error(`missing fixture detail for ${args[1]}`);
+          }
+          return detail;
+        }
         const result =
           episodeReads[Math.min(episodeRead, episodeReads.length - 1)];
         episodeRead += 1;
@@ -147,6 +162,102 @@ function fixtureCoworld(episodeReads: unknown[][]) {
     },
   };
 }
+
+function fixtureEpisodeSummaries() {
+  return fixtureEpisodes(0).map(
+    ({
+      episode_id: _episodeId,
+      running_at: _runningAt,
+      error: _error,
+      policy_version_ids: _policyVersionIds,
+      scores: _scores,
+      ...summary
+    }) => summary,
+  );
+}
+
+test("hydrates Coworld list summaries before assessing a completed round", async () => {
+  const details = new Map(
+    fixtureEpisodes(0).map((episode) => [String(episode.id), episode]),
+  );
+  const hosted = fixtureCoworld([fixtureEpisodeSummaries()], details);
+  const result = await collectConfirmedCoworldRoundIntegrity({
+    coworld: hosted.coworld,
+    leagueId: "league_test",
+    initialRoundsRaw: [fixtureRound()],
+    detector,
+  });
+
+  expect(result).toMatchObject({
+    status: "healthy",
+    signal: null,
+    evidence: {
+      first: { assessment: { scoreBearingCount: 25, verdict: "healthy" } },
+    },
+  });
+  expect(
+    hosted.calls.filter(
+      ([command, id]) => command === "episodes" && id?.startsWith("ereq_"),
+    ),
+  ).toHaveLength(25);
+});
+
+test("a failed detail hydration stays indeterminate instead of becoming a breach", async () => {
+  const details = new Map<string, unknown>(
+    fixtureEpisodes(0).map((episode) => [String(episode.id), episode]),
+  );
+  details.set("ereq_24", new Error("detail unavailable"));
+  const hosted = fixtureCoworld([fixtureEpisodeSummaries()], details);
+  const result = await collectConfirmedCoworldRoundIntegrity({
+    coworld: hosted.coworld,
+    leagueId: "league_test",
+    initialRoundsRaw: [fixtureRound()],
+    detector,
+  });
+
+  expect(result).toMatchObject({
+    status: "indeterminate",
+    signal: null,
+    evidence: {
+      first: { kind: "incomplete", reason: "episode_detail_incomplete" },
+    },
+  });
+});
+
+test("round reads fall back only for Coworld's missing pagination response fields", async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ entries: [fixtureRound()] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const shapeError = Object.assign(new Error("Command failed"), {
+    stderr: [
+      "ValidationError for RoundListPublic",
+      "total_count Field required",
+      "limit Field required",
+      "offset Field required",
+    ].join("\n"),
+  });
+  await expect(
+    readCoworldRoundsWithFallback({
+      coworld: async () => {
+        throw shapeError;
+      },
+      leagueId: "league_test",
+      fetchImpl,
+      server: "https://example.test/api",
+    }),
+  ).resolves.toEqual({ entries: [fixtureRound()] });
+  await expect(
+    readCoworldRoundsWithFallback({
+      coworld: async () => {
+        throw new Error("network timeout");
+      },
+      leagueId: "league_test",
+      fetchImpl,
+    }),
+  ).rejects.toThrow("network timeout");
+});
 
 test("emits round_incomplete_execution only after identical evidence persists for 60 seconds", async () => {
   const hosted = fixtureCoworld([fixtureEpisodes(), fixtureEpisodes()]);
@@ -234,7 +345,13 @@ function sentinelFixtureSource(): string {
     "  const signals = [];",
     "  const evidence = {};",
     "  try {",
-    "    const roundsRaw = [];",
+    "    const roundsRaw = await coworld([",
+    '      "rounds",',
+    '      "-l",',
+    "      LEAGUE_ID,",
+    '      "--limit",',
+    '      "10",',
+    "    ]);",
     "    const rounds = [];",
     "    evidence.rounds = rounds;",
     "  } catch (error) {",
@@ -341,6 +458,7 @@ test("building and copying the detector is explicitly insufficient until the sen
     issues: [],
     importWired: true,
     callWired: true,
+    roundReadFallbackWired: true,
   });
 });
 

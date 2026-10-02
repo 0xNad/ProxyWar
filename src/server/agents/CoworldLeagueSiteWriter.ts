@@ -19,6 +19,7 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import type { PublicAgent } from "../ProxyWarPublicReadModel";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import { readAgentStatsArtifact } from "./AgentStatsArtifact";
 import {
@@ -27,6 +28,7 @@ import {
 } from "./CoworldLeagueArtifactRetention";
 import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import type { CoworldRoundIntegrityState } from "./CoworldLeagueRoundIntegrity";
+import type { CoworldLeagueSchedulerHealth } from "./CoworldLeagueSchedulerHealth";
 import {
   appendStandingsHistorySnapshot,
   EMPTY_STANDINGS_HISTORY_STORE,
@@ -34,6 +36,16 @@ import {
   snapshotFromMirrorData,
   type StandingsHistoryStore,
 } from "./CoworldLeagueStandingsHistory";
+import {
+  battlesFromMirrorData,
+  buildPublicWorldModel,
+  mergeWorldLedger,
+  readWorldLedgerStore,
+  reduceWorld,
+  serialiseWorldLedgerStore,
+  type PublicWorldLinks,
+  type WorldLedgerBattle,
+} from "./CoworldLeagueWorld";
 import {
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
@@ -79,6 +91,16 @@ export interface CoworldLeagueEpisodePlayerRow {
   isAlive: boolean;
   isWinner: boolean;
   color: string;
+  /** Exact cycle-level fallback attribution from the public match summary. */
+  reliability?: CoworldLeaguePlayerReliability;
+}
+
+export interface CoworldLeaguePlayerReliability {
+  brainDecisionCount: number;
+  brainFallbackCount: number;
+  fallbackRate: number;
+  degradedDecisionCount: number;
+  degradedCauseCounts: Record<string, number>;
 }
 
 export interface CoworldLeagueEpisodeRow {
@@ -197,6 +219,8 @@ export interface CoworldLeagueMirrorData {
   roundIntegrityFeedStale?: boolean;
   /** Last verified/persisted score-bearing round assessment. */
   roundIntegrity?: CoworldRoundIntegrityState;
+  /** Read-only hosted round cadence and recent scheduler-gap evidence. */
+  schedulerHealth?: CoworldLeagueSchedulerHealth;
   league: {
     id: string;
     name: string;
@@ -240,7 +264,14 @@ export interface CoworldLeagueSitePaths {
   dataPath: string;
   readModelPath: string;
   standingsHistoryPath: string;
+  /** Public `/world` read model (`world.json`). */
+  worldPath: string;
+  /** Private append-only battle ledger the world is reduced from. */
+  worldLedgerPath: string;
 }
+
+export const COWORLD_LEAGUE_WORLD_FILE = "world.json";
+export const COWORLD_LEAGUE_WORLD_LEDGER_FILE = "world-ledger.json";
 
 /**
  * Share of a match's decisions that must fall back before the card shows a
@@ -555,6 +586,74 @@ async function copySocialImage(siteDir: string): Promise<void> {
   }
 }
 
+export interface CoworldLeagueWorldPublication {
+  worldPath: string;
+  worldLedgerPath: string;
+  /** Battles the ledger did not have before this publication. */
+  battlesAdded: number;
+  /** `false` when the ledger was unreadable and nothing was written. */
+  published: boolean;
+}
+
+/**
+ * Appends this publish's battles (plus any `extraBattles`, e.g. the archive
+ * backfill) to `world-ledger.json` and republishes `world.json` from the
+ * whole ledger. Caller must hold the site write lock.
+ *
+ * Same last-good discipline as `standings-history.json`: a corrupt ledger is
+ * never overwritten (and `world.json` keeps its last good version), and any
+ * failure here is logged and swallowed — the world map is a derived
+ * surface, so it must never fail a league publish.
+ */
+export async function publishCoworldLeagueWorldUnlocked(args: {
+  siteDir: string;
+  data: CoworldLeagueMirrorData;
+  readModelAgents: readonly PublicAgent[];
+  /** The read model's account and starter links, for the front page. */
+  links?: PublicWorldLinks | null;
+  extraBattles?: readonly WorldLedgerBattle[];
+}): Promise<CoworldLeagueWorldPublication> {
+  const worldPath = path.join(args.siteDir, COWORLD_LEAGUE_WORLD_FILE);
+  const worldLedgerPath = path.join(
+    args.siteDir,
+    COWORLD_LEAGUE_WORLD_LEDGER_FILE,
+  );
+  try {
+    const existing = await readWorldLedgerStore(worldLedgerPath);
+    if (existing === "corrupt") {
+      console.warn(
+        `coworld-league-mirror: ${COWORLD_LEAGUE_WORLD_LEDGER_FILE} is corrupt, leaving it untouched and keeping the last published world: ${worldLedgerPath}`,
+      );
+      return { worldPath, worldLedgerPath, battlesAdded: 0, published: false };
+    }
+    const incoming = [
+      ...(args.extraBattles ?? []),
+      ...battlesFromMirrorData(args.data),
+    ];
+    const ledger = mergeWorldLedger(existing, incoming);
+    const battlesAdded = ledger.battles.length - existing.battles.length;
+    if (ledger !== existing) {
+      await writeFileAtomic(worldLedgerPath, serialiseWorldLedgerStore(ledger));
+    }
+    const world = buildPublicWorldModel({
+      state: reduceWorld(ledger),
+      ledger,
+      data: args.data,
+      readModelAgents: args.readModelAgents,
+      links: args.links ?? null,
+    });
+    await writeFileAtomic(worldPath, `${JSON.stringify(world)}\n`);
+    return { worldPath, worldLedgerPath, battlesAdded, published: true };
+  } catch (error) {
+    console.warn(
+      `coworld-league-mirror: world map publish failed, keeping the last published world: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return { worldPath, worldLedgerPath, battlesAdded: 0, published: false };
+  }
+}
+
 async function writeCoworldLeagueSiteUnlocked(
   siteDir: string,
   data: CoworldLeagueMirrorData,
@@ -768,6 +867,15 @@ async function writeCoworldLeagueSiteUnlocked(
     seasonRegistry,
     archivedFeaturedMatchReplayHrefs,
   );
+  // The persistent world map (`/world`) — built from the same `data` and
+  // identity resolution as the read model, before data.json/read-model.json
+  // so a page that sees the new snapshot never sees an older world.
+  const world = await publishCoworldLeagueWorldUnlocked({
+    siteDir,
+    data,
+    readModelAgents: readModel.agents,
+    links: readModel.links,
+  });
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
   await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
@@ -781,6 +889,8 @@ async function writeCoworldLeagueSiteUnlocked(
     dataPath,
     readModelPath,
     standingsHistoryPath,
+    worldPath: world.worldPath,
+    worldLedgerPath: world.worldLedgerPath,
   };
 }
 
@@ -874,6 +984,18 @@ export function coworldLeagueIndexHtml(
         translateText("coworld_league.scheduling_paused"),
       )}</div>`
     : "";
+  const schedulerHealthBanner =
+    !data.stale && data.schedulerHealth?.status === "delayed"
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.scheduler_delayed"),
+        )}</div>`
+      : !data.stale &&
+          data.schedulerHealth?.status === "healthy" &&
+          data.schedulerHealth.latestObservedGap !== null
+        ? `<div class="stale-banner">${escapeHtml(
+            translateText("coworld_league.scheduler_recovered"),
+          )}</div>`
+        : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   // The LIVE premiere card always takes precedence; the compact latest-revealed
   // card fills the same slot ONLY when nothing is currently premiering, so the
@@ -1006,6 +1128,7 @@ ${leagueSocialMetaHtml(schedulingPaused)}
     .combatant .name.dead { color:var(--muted); text-decoration:line-through; }
     .combatant .name .win { color:var(--good); }
     .tiles { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align:right; }
+    .player-reliability { grid-column:2 / 4; color:var(--amber); font:700 10px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:-5px; }
     .bar { grid-column:2 / 4; height:4px; background:var(--surface2); border-radius:2px; overflow:hidden; }
     .bar i { display:block; height:100%; }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
@@ -1073,6 +1196,7 @@ ${leagueSocialMetaHtml(schedulingPaused)}
     </header>
     ${staleBanner}
     ${schedulingPausedBanner}
+    ${schedulerHealthBanner}
     ${roundIntegrityBanner}
     ${roundIntegrityFeedBanner}
     ${championFeedBanner}
@@ -1790,6 +1914,27 @@ function battleCard(
       view.agent === null
         ? (provisionalIdentities.get(player.name) ?? null)
         : null;
+    const reliability = player.reliability;
+    const reliabilityMarkup =
+      reliability !== undefined && reliability.brainFallbackCount > 0
+        ? `<span class="player-reliability" title="${escapeHtml(
+            translateText("coworld_league.player_fallback_tip"),
+          )}">${escapeHtml(
+            translateText("coworld_league.player_fallback_share")
+              .replace(
+                "{fallback}",
+                formatTiles(reliability.brainFallbackCount),
+              )
+              .replace(
+                "{decisions}",
+                formatTiles(reliability.brainDecisionCount),
+              )
+              .replace(
+                "{percent}",
+                String(Math.round(reliability.fallbackRate * 100)),
+              ),
+          )}</span>`
+        : "";
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
@@ -1809,6 +1954,7 @@ function battleCard(
                 )})</span>`
           }</span>
           <span class="tiles">${escapeHtml(formatTiles(player.tilesOwned))}</span>
+          ${reliabilityMarkup}
           <span class="bar" aria-hidden="true"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
             player.color,
           )}"></i></span>

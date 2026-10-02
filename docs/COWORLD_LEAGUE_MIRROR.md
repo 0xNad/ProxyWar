@@ -39,6 +39,10 @@ rounds after every expected episode-request row is present and terminal; and
 counts a request as score-bearing only when it has an episode id, a running
 timestamp, no error, and one finite unique score for every scheduled policy.
 The exact completed-without-running/no-score phantom is reported separately.
+Coworld's episode-list response can omit those execution fields even when the
+detail response contains them, so the mirror and sentinel hydrate the latest
+round's completed summaries through bounded read-only episode-detail calls.
+If any detail read fails, the round is incomplete evidence, never a failure.
 
 A breach first appears as confirmation-pending. Identical episode evidence must
 persist for 60 seconds before the state becomes degraded. A later healthy round
@@ -76,6 +80,25 @@ Coworld league/division/episode reads. It emits
 `round_incomplete_execution:round_<id>` only when the same breached round and
 episode-evidence hash survive a second direct read at least 60 seconds later.
 The class is deliberately absent from the sentinel's autofix allow-list.
+
+## Scheduler health
+
+`CoworldLeagueSchedulerHealth.ts` evaluates hosted round timestamps without
+mutating or restarting the league. An explicit hosted pause is reported as
+paused. Otherwise, silence longer than the larger of two hours or three
+configured round intervals is delayed. The current state and the latest proven
+gap between adjacent round numbers are published in `schedulerHealth`; a later
+round returns current status to healthy while retaining the recent recovered
+gap for diagnosis. Non-adjacent list rows never prove a gap.
+
+## Per-player fallback attribution
+
+New match summaries include cycle-level `playerReliability` aggregates: brain
+decisions, fallbacks, degraded decisions, and bounded degradation-cause counts.
+The mirror joins those server-authored aggregates to replay participants and
+shows non-zero fallback shares on the responsible player, rather than leaving
+the match-wide total to look like a platform-wide failure. Raw policy output
+and failure text are not included.
 
 Installation creates a timestamped receipt and exact backups beside the
 sentinel, installs the detector and adapter first, then atomically replaces the
@@ -143,6 +166,79 @@ and keeps the last published battle cards while standings and rounds continue
 updating. `league:prune` is plan-only by default and requires `--apply` to delete;
 both modes use the same whole-cycle lock and fail closed if published or pinned
 reference data is unavailable, malformed, or unsafe.
+
+## World map (`/world`)
+
+Every publish also maintains the persistent world map over the league:
+
+- `artifacts/ai-league-runs/league/world-ledger.json` — private, append-only
+  battle results (one row per episode-request id: map, winner, completion
+  time). Merged idempotently; a recorded winner is never rewritten. A corrupt
+  ledger is left untouched and the last good `world.json` stays published.
+- `artifacts/ai-league-runs/league/world.json` — the public read model the
+  `/world` page and the front page (`/`) fetch (allowlisted beside
+  `read-model.json`). It is rebuilt from the whole ledger on every publish, so
+  it never drifts from it. Its `links` carry the read model's account and
+  starter URLs, so the front page never has to load the read model.
+
+Each battle's map is one front of an Earth map
+(`src/server/agents/CoworldLeagueWorld.ts`, `WORLD_THEATRES`). A front belongs
+to the agent with the most wins in its last 12 battles; a tie keeps the holder
+and shows the front under siege. Pangaea, World and Giant World Map battles
+decide the Crown instead of a region. Fronts with no battles stay unclaimed
+until a matching map enters the rotation:
+
+| Front         | Maps that decide it                          |
+| ------------- | -------------------------------------------- |
+| North America | NorthAmerica                                 |
+| South America | SouthAmerica, AmazonRiver                    |
+| Britannia     | Britannia, BritanniaClassic                  |
+| Europe        | Europe, EuropeClassic, Italia, Iceland, Alps |
+| Black Sea     | BlackSea, BosphorusStraits, Caucasus         |
+| Middle East   | Mena, MiddleEast, StraitOfHormuz             |
+| Africa        | Africa, NileDelta                            |
+| Asia          | Asia, Yenisei, Baikal                        |
+| East Asia     | EastAsia, Japan                              |
+| Oceania       | Oceania, Australia, StraitOfMalacca          |
+| The Crown     | Pangaea, World, GiantWorldMap                |
+
+The mirror only sees battles it mirrors, so a fresh install starts the world
+empty. Backfill it once from the durable summary archive (idempotent, takes the
+same site lock, safe while the mirror runs):
+
+```bash
+npm run league:world-backfill -- \
+  --site-dir artifacts/ai-league-runs/league \
+  --archive artifacts/coworld-league-mirror/summaries
+```
+
+The pages' Earth (`src/client/publicapp/WorldMapGrid.ts`) is generated from the
+game's own World map: every land tile joins the front of its nearest nation in
+the World manifest, each nation assigned to the front whose battlefield maps
+contain it. Rerun `npx tsx src/scripts/generate-world-map-grid.ts` only if
+those assignments or the source map change; the output is deterministic.
+
+The front page (`src/client/publicapp/HomePage.ts`) is the same world in one
+screen: who is winning, the map with every holder named, the latest takeovers,
+the rule worked through on a real front's last battles, and a prompt for a
+coding agent to enter the league. It states liveness only from measured data
+(the newest battle's age and battles in the last 24 hours), never from the
+configured round schedule.
+
+`/` serves the front page only once `world.json` exists; until then the league
+host sends `/` to the event lobby (`/lobby`) and the apex keeps its static page.
+Roll it out in this order, so the page never shows a partial history:
+
+1. Deploy the mirror, so it publishes `world.json` with every cycle.
+2. Run the backfill above once.
+3. Rebuild the client (`npx vite build`); an old bundle still mounts the lobby
+   at `/`.
+4. Restart the servers.
+
+When the division-wide replay feed is unavailable, the round-scoped fallback
+reads the latest terminal rounds **including failed ones**: a round that misses
+the rating threshold still contains finished, replayable battles. Round
+integrity keeps reading completed rounds only.
 
 ## Viewing
 

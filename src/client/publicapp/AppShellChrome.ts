@@ -24,9 +24,13 @@ import { translateText } from "../Utils";
  * today, so the shipped text-mark IS the existing brand mark.
  */
 
+/** The community group linked from the footer and the front page. */
+export const TELEGRAM_COMMUNITY_URL = "https://t.me/+TeaDXnPwbxk1Mjk8";
+
 export type AppShellRoute =
   | "/"
   | "/watch"
+  | "/world"
   | "/league"
   | "/agents"
   | "/builders"
@@ -39,6 +43,7 @@ const NAV_ITEMS: ReadonlyArray<{
   href: string;
 }> = [
   { route: "/watch", labelKey: "app_shell.nav_watch", href: "/watch" },
+  { route: "/world", labelKey: "app_shell.nav_world", href: "/world" },
   { route: "/league", labelKey: "app_shell.nav_league", href: "/league" },
   { route: "/agents", labelKey: "app_shell.nav_agents", href: "/agents" },
   {
@@ -170,7 +175,7 @@ export function appShellFooter(): TemplateResult {
             >${translateText("app_shell.footer_credits")}</a
           >
           <a
-            href="https://t.me/+TeaDXnPwbxk1Mjk8"
+            href=${TELEGRAM_COMMUNITY_URL}
             class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             rel="noopener noreferrer"
             target="_blank"

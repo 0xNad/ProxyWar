@@ -1916,6 +1916,26 @@ describe("match summary cycle-level counts under action batching", () => {
       brainFallbackCount: 1,
       // (300 + 100) / 2 primaries — NOT (300*3 + 100) / 4 records.
       averageDecisionLatencyMs: 200,
+      playerReliability: [
+        {
+          agentID: "agent-a",
+          username: "Batched A",
+          brainDecisionCount: 1,
+          brainFallbackCount: 1,
+          fallbackRate: 1,
+          degradedDecisionCount: 0,
+          degradedCauseCounts: { unspecified_fallback: 1 },
+        },
+        {
+          agentID: "agent-b",
+          username: "Scalar B",
+          brainDecisionCount: 1,
+          brainFallbackCount: 0,
+          fallbackRate: 0,
+          degradedDecisionCount: 0,
+          degradedCauseCounts: {},
+        },
+      ],
     });
   });
 
