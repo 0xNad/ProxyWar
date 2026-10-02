@@ -1,3 +1,4 @@
+import { html, nothing, type TemplateResult } from "lit";
 import { getMapName, translateText } from "../Utils";
 import { preciseAge } from "./HomePresentation";
 import type { WorldEvent, WorldTheatreId } from "./WorldModelSchema";
@@ -162,4 +163,26 @@ export function eventSentence(
       rivalWins: event.rivalWins,
     },
   };
+}
+
+/** Invisible-separator markers for templates spliced into translated sentences. */
+const NAME_MARKER_PATTERN = /\u2063(\d+)\u2063/;
+export function nameMarker(index: number): string {
+  return `\u2063${index}\u2063`;
+}
+
+/**
+ * A translated sentence with templates (styled names, links) spliced in
+ * where `nameMarker`s were passed as parameters, so translations keep full
+ * control of word order.
+ */
+export function splice(
+  key: string,
+  params: Record<string, string | number>,
+  parts: readonly TemplateResult[],
+): TemplateResult {
+  const pieces = translateText(key, params).split(NAME_MARKER_PATTERN);
+  return html`${pieces.map((piece, index) =>
+    index % 2 === 0 ? piece : (parts[Number(piece)] ?? nothing),
+  )}`;
 }

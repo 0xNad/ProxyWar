@@ -14,18 +14,12 @@ import {
   appShellHeader,
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
-import {
-  clearestSiege,
-  contrastRatio,
-  crownFront,
-  frontsInState,
-  holderGroups,
-  type RegionFront,
-} from "./HomePresentation";
+import { contrastRatio, type RegionFront } from "./HomePresentation";
+import { renderDispatches } from "./WorldDispatches";
 import { renderDrawer } from "./WorldDrawer";
-import { renderFronts, stateWord, unclaimedLine } from "./WorldFronts";
-import { CROWN_GLYPH } from "./WorldGlyphs";
+import { renderFronts, unclaimedLine } from "./WorldFronts";
 import { renderHistory, type HistoryFocus } from "./WorldHistory";
+import { renderKey, renderLegend } from "./WorldLegend";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_HEIGHT,
@@ -36,13 +30,13 @@ import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
-  type WorldEvent,
   type WorldModel,
   type WorldTheatre,
   type WorldTheatreId,
 } from "./WorldModelSchema";
 import { ensureWorldStyles } from "./WorldPageStyles";
 import { renderPlacards, type PlacardView } from "./WorldPlacards";
+import { renderPowers } from "./WorldPowers";
 import {
   assignBannerColors,
   changedSinceVisit,
@@ -51,21 +45,18 @@ import {
   frontPaints,
   frontSwatch,
   parseVisitSnapshot,
-  UNCLAIMED_HEX,
   visitSnapshot,
   WORLD_REGION_IDS,
   worldVerdict,
 } from "./WorldPresentation";
+import { renderRules } from "./WorldRules";
 import {
   battlefieldName,
-  eventSentence,
   formatAge,
   formatDate,
-  formatDayHeading,
   formatList,
-  formatNumber,
-  formatTime,
-  localDay,
+  nameMarker,
+  splice,
 } from "./WorldText";
 import { ICONS, type WorldView } from "./WorldView";
 
@@ -88,17 +79,11 @@ const CLOCK_MS = 30 * 1000;
 const REVEAL_MS = 1400;
 const FRAME_MS = 40;
 const VISIT_KEY = "proxywar.world.lastVisit";
-const DISPATCHES_COLLAPSED = 10;
 /** The map stops growing here; past it the page has margins. */
 const STAGE_MAX_WIDTH = 1440;
 /** The ocean behind the map; banners darker than 3:1 on it get an ink edge. */
 const OCEAN = "#071225";
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
-/** Invisible-separator markers for names spliced into translated sentences. */
-const NAME_MARKER_PATTERN = /\u2063(\d+)\u2063/;
-function nameMarker(index: number): string {
-  return `\u2063${index}\u2063`;
-}
 
 const FRONT_NAME_KEYS: Record<WorldTheatreId, string> = {
   north_america: "world_page.front_north_america",
@@ -582,12 +567,15 @@ export class WorldPage extends LitElement {
       <main class="wp-main">
         ${this.renderHero(model)} ${renderFronts(view)}
         <div class="wp-wrap wp-columns">
-          ${this.renderDispatches(model)} ${this.renderPowers(model)}
+          ${renderDispatches(view, this.dispatchesExpanded, () => {
+            this.dispatchesExpanded = !this.dispatchesExpanded;
+          })}
+          ${renderPowers(view)}
         </div>
         ${renderHistory(view, this.historyFocus, (focus) => {
           this.historyFocus = focus;
         })}
-        ${this.renderRules(model)}
+        ${renderRules(view)}
       </main>
       ${this.selected !== null ? renderDrawer(view, this.selected) : nothing}
     `;
@@ -609,6 +597,9 @@ export class WorldPage extends LitElement {
       date: (iso, withTime) => this.date(iso, withTime),
       list: (items) => this.list(items),
       openFront: (id) => this.openFront(id),
+      focusFront: (id) => {
+        this.hoverFront = id;
+      },
       closeFront: () => this.closeFront(),
     };
   }
@@ -716,7 +707,7 @@ export class WorldPage extends LitElement {
         </div>
         ${this.renderMap(model)}
         <div class="wp-wrap wp-guide">
-          ${this.renderLegend(model)} ${this.renderKey(model)}
+          ${renderLegend(this.view(model))} ${renderKey(this.view(model))}
         </div>
       </section>
     `;
@@ -733,7 +724,7 @@ export class WorldPage extends LitElement {
     params: Record<string, string | number>,
     names: readonly string[],
   ): TemplateResult {
-    return this.spliced(
+    return splice(
       key,
       params,
       names.map(
@@ -745,18 +736,6 @@ export class WorldPage extends LitElement {
           >`,
       ),
     );
-  }
-
-  /** A translated sentence with templates spliced in at `nameMarker`s. */
-  private spliced(
-    key: string,
-    params: Record<string, string | number>,
-    parts: readonly TemplateResult[],
-  ): TemplateResult {
-    const pieces = translateText(key, params).split(NAME_MARKER_PATTERN);
-    return html`${pieces.map((piece, index) =>
-      index % 2 === 0 ? piece : (parts[Number(piece)] ?? nothing),
-    )}`;
   }
 
   private list(items: readonly string[]): string {
@@ -900,373 +879,15 @@ export class WorldPage extends LitElement {
 
   // ------------------------------------------------------ legend and key
 
-  /**
-   * Who holds what, under the map. Below 1180 px there is no room for
-   * placards on the map, so this is how a phone or tablet reads it: every
-   * holder named in full, every front's state in words, each front one tap
-   * from its history. Same order as the front page's legend.
-   */
-  private renderLegend(model: WorldModel) {
-    const crown = crownFront(model);
-    const crownHolder = crown?.holder ?? null;
-    const open = frontsInState(model, "unclaimed", this.now);
-    return html`<ul
-      class="wp-legend"
-      aria-label=${translateText("world_page.legend_aria")}
-    >
-      ${holderGroups(model).map(
-        (group) =>
-          html`<li>
-            <span class="wp-legend-who"
-              >${this.emblem(group.holder, 22)}${this.agentLink(
-                group.holder,
-                "wp-legend-name",
-              )}</span
-            ><span class="wp-legend-fronts"
-              >${group.fronts.map((front) => this.legendFront(front))}</span
-            >
-          </li>`,
-      )}
-      ${crown !== null
-        ? html`<li>
-            <span class="wp-legend-who"
-              >${this.emblem(crownHolder, 22)}${crownHolder === null
-                ? html`<span class="wp-legend-name wp-legend-muted"
-                    >${translateText("world_page.crown_vacant")}</span
-                  >`
-                : this.agentLink(crownHolder, "wp-legend-name")}</span
-            ><span class="wp-legend-fronts">${this.legendFront(crown)}</span>
-          </li>`
-        : nothing}
-      ${open.length > 0
-        ? html`<li>
-            <span class="wp-legend-who"
-              ><i
-                class="wp-sw wp-sw-flag wp-sw-open"
-                style="--paint:${UNCLAIMED_HEX}"
-              ></i
-              ><span class="wp-legend-name wp-legend-muted"
-                >${translateText("world_page.legend_unclaimed")}</span
-              ></span
-            ><span class="wp-legend-fronts"
-              >${open.map((front) => this.legendFront(front, false))}</span
-            >
-          </li>`
-        : nothing}
-    </ul>`;
-  }
-
-  /** One front in the legend: its map swatch, its name, its state in words. */
-  private legendFront(front: WorldTheatre, withSwatch = true) {
-    const state = stateWord(frontDisplayState(front, this.now));
-    const name = html`<span class="wp-legend-front-name"
-      >${this.frontName(front.id)}</span
-    >`;
-    // The Crown holds no land, so it has nothing on the map to highlight.
-    const onMap = front.id !== "crown";
-    let mark: TemplateResult | typeof nothing = nothing;
-    if (!onMap) {
-      mark = html`<span class="wp-legend-front-crown">${CROWN_GLYPH}</span>`;
-    } else if (withSwatch) {
-      mark = html`<i
-        class="wp-sw ${this.lowContrast(front.holder) ? "wp-low" : ""}"
-        style="--paint:${this.swatch(front)}"
-      ></i>`;
-    }
-    return html`<button
-      type="button"
-      class="wp-legend-front"
-      aria-haspopup="dialog"
-      @click=${() => this.openFront(front.id)}
-      @pointerenter=${() => {
-        if (onMap) this.hoverFront = front.id;
-      }}
-      @pointerleave=${() => {
-        this.hoverFront = null;
-      }}
-      @focus=${() => {
-        if (onMap) this.hoverFront = front.id;
-      }}
-      @blur=${() => {
-        this.hoverFront = null;
-      }}
-    >
-      ${mark}<span class="wp-legend-front-text"
-        >${state === null
-          ? name
-          : this.spliced(
-              "world_page.front_with_state",
-              { front: nameMarker(0), state },
-              [name],
-            )}</span
-      >
-    </button>`;
-  }
-
-  /** How to read the map, with swatches painted like the map itself. */
-  private renderKey(model: WorldModel) {
-    const siege = clearestSiege(
-      model,
-      (name) => this.bannerColor(name),
-      this.now,
-    );
-    const quiet = frontsInState(model, "quiet", this.now)[0] ?? null;
-    const open = frontsInState(model, "unclaimed", this.now).length > 0;
-    if (siege === null && quiet === null && !open) return nothing;
-    return html`<ul
-      class="wp-key"
-      aria-label=${translateText("world_page.key_aria")}
-    >
-      ${siege !== null
-        ? html`<li>
-            <i class="wp-sw" style="--paint:${this.swatch(siege)}"></i
-            >${translateText("world_page.key_siege")}
-          </li>`
-        : nothing}
-      ${quiet !== null
-        ? html`<li>
-            <i class="wp-sw" style="--paint:${this.swatch(quiet)}"></i
-            >${translateText("world_page.key_quiet")}
-          </li>`
-        : nothing}
-      ${open
-        ? html`<li>
-            <i class="wp-sw wp-sw-open" style="--paint:${UNCLAIMED_HEX}"></i
-            >${translateText("world_page.key_open")}
-          </li>`
-        : nothing}
-    </ul>`;
-  }
-
   // -------------------------------------------------------------- fronts
 
   // -------------------------------------------------------------- dispatches
 
-  private renderDispatches(model: WorldModel) {
-    const events = this.dispatchesExpanded
-      ? model.events
-      : model.events.slice(0, DISPATCHES_COLLAPSED);
-    return html`<section class="wp-panel" aria-labelledby="wp-dispatches-title">
-      <h2 id="wp-dispatches-title" class="wp-section-title">
-        ${translateText("world_page.dispatches_title")}
-      </h2>
-      <p class="wp-panel-intro">
-        ${translateText("world_page.dispatches_definition", {
-          window: model.windowSize,
-        })}
-      </p>
-      ${model.events.length === 0
-        ? html`<p class="wp-muted">
-            ${translateText("world_page.dispatches_empty")}
-          </p>`
-        : this.dayGroups(events).map(
-            (group) =>
-              html`<h3 class="wp-dispatch-day">
-                  ${formatDayHeading(group.events[0].at, this.now)}
-                </h3>
-                <ol class="wp-dispatches" role="list">
-                  ${group.events.map((event) => this.renderDispatch(event))}
-                </ol>`,
-          )}
-      ${model.events.length > DISPATCHES_COLLAPSED
-        ? html`<button
-            type="button"
-            class="wp-more"
-            @click=${() => {
-              this.dispatchesExpanded = !this.dispatchesExpanded;
-            }}
-          >
-            ${this.dispatchesExpanded
-              ? translateText("world_page.dispatches_less")
-              : translateText("world_page.dispatches_more", {
-                  count: model.events.length,
-                })}
-          </button>`
-        : nothing}
-    </section>`;
-  }
-
-  /** Events in a row by the visitor's calendar day, newest day first. */
-  private dayGroups(
-    events: readonly WorldEvent[],
-  ): Array<{ day: string; events: WorldEvent[] }> {
-    const groups: Array<{ day: string; events: WorldEvent[] }> = [];
-    for (const event of events) {
-      const day = localDay(Date.parse(event.at));
-      const last = groups[groups.length - 1];
-      if (last !== undefined && last.day === day) last.events.push(event);
-      else groups.push({ day, events: [event] });
-    }
-    return groups;
-  }
-
-  /** One event in the front page's words; the whole row watches the battle. */
-  private renderDispatch(event: WorldEvent) {
-    const { key, params } = eventSentence(event, (name) => this.label(name));
-    const sentence = translateText(key, {
-      ...params,
-      agent: this.label(event.agent),
-    });
-    return html`<li>
-      <a
-        class="wp-dispatch"
-        href=${event.href}
-        aria-label=${translateText("world_page.watch_event_aria", {
-          event: sentence,
-        })}
-      >
-        <time datetime=${event.at} title=${this.age(event.at)}
-          >${formatTime(event.at)}</time
-        >
-        <span class="wp-dispatch-text"
-          ><i
-            class="wp-dispatch-chip ${this.lowContrast(event.agent)
-              ? "wp-low"
-              : ""}"
-            style="--chip:${this.bannerColor(event.agent)}"
-            aria-hidden="true"
-          ></i
-          >${this.spliced(key, { ...params, agent: nameMarker(0) }, [
-            html`<b>${this.label(event.agent)}</b>`,
-          ])}</span
-        >
-        <span class="wp-dispatch-watch" aria-hidden="true"
-          >${translateText("world_page.event_battle_link")}</span
-        >
-      </a>
-    </li>`;
-  }
-
   // -------------------------------------------------------------- powers
-
-  private renderPowers(model: WorldModel) {
-    const crownHolder = this.theatre("crown")?.holder ?? null;
-    const rows = model.agents
-      .filter(
-        (agent) =>
-          agent.theatres.some((id) => id !== "crown") ||
-          agent.name === crownHolder,
-      )
-      .concat(
-        model.agents
-          .filter(
-            (agent) =>
-              !agent.theatres.some((id) => id !== "crown") &&
-              agent.name !== crownHolder,
-          )
-          .sort(
-            (a, b) => b.conquests - a.conquests || b.battlesWon - a.battlesWon,
-          )
-          .slice(0, 4),
-      );
-    return html`<section class="wp-panel" aria-labelledby="wp-powers-title">
-      <h2 id="wp-powers-title" class="wp-section-title">
-        ${translateText("world_page.powers_title")}
-      </h2>
-      <p class="wp-panel-intro">
-        ${translateText("world_page.powers_intro", {
-          date:
-            model.firstBattleAt === null ? "—" : this.date(model.firstBattleAt),
-        })}
-      </p>
-      <table class="wp-powers">
-        <thead>
-          <tr>
-            <th scope="col">${translateText("world_page.powers_agent")}</th>
-            <th scope="col">${translateText("world_page.powers_fronts")}</th>
-            <th scope="col" class="wp-num wp-powers-conquests">
-              ${translateText("world_page.powers_conquests")}
-            </th>
-            <th scope="col" class="wp-num">
-              ${translateText("world_page.powers_wins")}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((agent) => {
-            // The Crown last, after the land; the same links as the legend.
-            const holdings = [
-              ...agent.theatres.filter((id) => id !== "crown"),
-              ...(agent.name === crownHolder ? (["crown"] as const) : []),
-            ].flatMap((id) => {
-              const theatre = this.theatre(id);
-              return theatre === undefined ? [] : [theatre];
-            });
-            return html`<tr style="--banner:${this.bannerColor(agent.name)}">
-              <th scope="row">
-                <span class="wp-power-agent">
-                  ${this.emblem(agent.name, 26)} ${this.agentLink(agent.name)}
-                </span>
-              </th>
-              <td>
-                ${holdings.length === 0
-                  ? html`<span class="wp-muted">—</span>`
-                  : html`<span class="wp-power-fronts"
-                      >${holdings.map((theatre) =>
-                        this.legendFront(theatre),
-                      )}</span
-                    >`}
-              </td>
-              <td class="wp-num wp-powers-conquests">
-                ${formatNumber(agent.conquests)}
-              </td>
-              <td class="wp-num">${formatNumber(agent.battlesWon)}</td>
-            </tr>`;
-          })}
-        </tbody>
-      </table>
-    </section>`;
-  }
 
   // -------------------------------------------------------------- history
 
   // -------------------------------------------------------------- rules
-
-  private renderRules(model: WorldModel) {
-    return html`<section
-      class="wp-wrap wp-section"
-      aria-labelledby="wp-rules-title"
-    >
-      <div class="wp-section-head">
-        <h2 id="wp-rules-title" class="wp-section-title">
-          ${translateText("world_page.rules_title")}
-        </h2>
-      </div>
-      <div class="wp-rules">
-        <article class="wp-rule">
-          <span class="wp-rule-icon">${unsafeSVG(ICONS.pin)}</span>
-          <h3>${translateText("world_page.rule_place_title")}</h3>
-          <p>${translateText("world_page.rule_place_body")}</p>
-        </article>
-        <article class="wp-rule">
-          <span class="wp-rule-icon">${unsafeSVG(ICONS.flag)}</span>
-          <h3>
-            ${translateText("world_page.rule_window_title", {
-              window: model.windowSize,
-            })}
-          </h3>
-          <p>
-            ${translateText("world_page.rule_window_body", {
-              window: model.windowSize,
-            })}
-          </p>
-        </article>
-        <article class="wp-rule">
-          <span class="wp-rule-icon wp-rule-icon-crown">${CROWN_GLYPH}</span>
-          <h3>${translateText("world_page.rule_crown_title")}</h3>
-          <p>${translateText("world_page.rule_crown_body")}</p>
-        </article>
-      </div>
-      ${model.firstBattleAt !== null
-        ? html`<p class="wp-data-note">
-            ${translateText("world_page.data_note", {
-              count: model.battleCount,
-              date: this.date(model.firstBattleAt),
-            })}
-          </p>`
-        : nothing}
-    </section>`;
-  }
 
   // -------------------------------------------------------------- drawer
 }

@@ -27,6 +27,8 @@ export interface WorldView {
   date(iso: string, withTime?: boolean): string;
   list(items: readonly string[]): string;
   openFront(id: WorldTheatreId): void;
+  /** Light a front on the map while it is pointed at (null clears it). */
+  focusFront(id: WorldTheatreId | null): void;
   closeFront(): void;
 }
 
