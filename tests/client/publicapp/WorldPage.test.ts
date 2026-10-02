@@ -248,6 +248,8 @@ describe("world-page", () => {
     const el = mount();
     await settle(el);
     const key = el.querySelector(".wp-key");
+    expect(key?.tagName).toBe("UL");
+    expect(key?.getAttribute("aria-label")).toBe("How to read the map");
     expect(text(key)).toBe("Hatched: under siege (tied) Slate: unclaimed");
     expect(key?.querySelector(".wp-sw")?.getAttribute("style")).toContain(
       "repeating-linear-gradient",
@@ -270,6 +272,67 @@ describe("world-page", () => {
     expect(
       text(find(el, ".wp-row", "Oceania")?.querySelector(".wp-row-state")),
     ).toBe("Quiet");
+    // A tie that has gone quiet is still a tie, not a lead.
+    const asia = find<HTMLElement>(el, ".wp-row", "Asia");
+    expect(text(asia?.querySelector(".wp-row-state"))).toBe("Quiet");
+    expect(text(asia?.querySelector(".wp-row-race"))).toBe(
+      "relh is level at 2 wins each",
+    );
+  });
+
+  it("keeps its clock running when world.json stops changing, and says when the feed pauses", async () => {
+    vi.useFakeTimers({
+      toFake: ["Date", "setInterval", "clearInterval"],
+      now: NOW,
+    });
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    const el = mount();
+    await settle(el);
+    expect(text(el.querySelector(".wp-feed"))).toBe(
+      "Live Last battle 22 min ago",
+    );
+    vi.setSystemTime(new Date("2026-09-30T03:10:00.000Z"));
+    vi.advanceTimersByTime(30_000);
+    await settle(el);
+    expect(text(el.querySelector(".wp-feed"))).toBe(
+      "Paused Last battle 5 h ago. The map moves again when battles do.",
+    );
+    visibility.mockRestore();
+  });
+
+  it("names the Crown's siege in the headline numbers, and lists tied leaders in words", async () => {
+    const base = worldFixture();
+    serve({
+      ...base,
+      theatres: base.theatres.map((theatre) => {
+        if (theatre.id === "crown") {
+          return {
+            ...theatre,
+            status: "contested" as const,
+            challenger: "Andre von Houck",
+            challengerWins: 4,
+          };
+        }
+        if (theatre.id === "europe") {
+          return { ...theatre, status: "held" as const, holder: "Matt Van" };
+        }
+        if (theatre.id === "africa") {
+          return { ...theatre, status: "held" as const, holder: "Alpha" };
+        }
+        return theatre;
+      }),
+    } satisfies WorldModel);
+    const el = mount();
+    await settle(el);
+    expect(text(el.querySelector(".wp-stat-crown"))).toBe(
+      "Crown: relh, under siege",
+    );
+    expect(text(el.querySelector("h1"))).toBe(
+      "Alpha and Matt Van share the lead",
+    );
+    expect(document.title).toBe("The World · Proxy War");
   });
 
   it("says a front whose battles all ended without a winner has no winner yet", async () => {
@@ -433,6 +496,11 @@ describe("world-page", () => {
     const el = mount();
     await settle(el);
     expect(text(el.querySelector(".wp-drawer-title"))).toBe("The Crown");
+    // Focus moves into the sheet, as when it is opened by a click.
+    expect(document.activeElement).toBe(el.querySelector(".wp-drawer-close"));
+    expect(text(el.querySelector(".wp-drawer-maps"))).toBe(
+      "Fought on Pangaea (9,396 battles) and World (1,316 battles)",
+    );
   });
 
   it("tells a returning visitor which fronts changed hands", async () => {

@@ -79,6 +79,8 @@ import { ICONS, type WorldView } from "./WorldView";
 type LoadState = "loading" | "ready" | "error";
 
 const REFRESH_MS = 2 * 60 * 1000;
+/** Ages, live/paused and quiet fronts move with the clock, not only with data. */
+const CLOCK_MS = 30 * 1000;
 const REVEAL_MS = 1400;
 const FRAME_MS = 40;
 const VISIT_KEY = "proxywar.world.lastVisit";
@@ -155,6 +157,7 @@ export class WorldPage extends LitElement {
   private revealTimer: ReturnType<typeof setTimeout> | null = null;
   private glowKey = "";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private clockTimer: ReturnType<typeof setInterval> | null = null;
   private mapVisible = true;
   private observer: IntersectionObserver | null = null;
   private resizeObserver: ResizeObserver | null = null;
@@ -173,6 +176,9 @@ export class WorldPage extends LitElement {
     this.refreshTimer = setInterval(() => {
       if (document.visibilityState === "visible") void this.load(false);
     }, REFRESH_MS);
+    this.clockTimer = setInterval(() => {
+      if (document.visibilityState === "visible") this.now = Date.now();
+    }, CLOCK_MS);
     window.addEventListener("hashchange", this.onHashChange);
     document.addEventListener("keydown", this.onKeyDown);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
@@ -182,6 +188,8 @@ export class WorldPage extends LitElement {
     super.disconnectedCallback();
     if (this.refreshTimer !== null) clearInterval(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.clockTimer !== null) clearInterval(this.clockTimer);
+    this.clockTimer = null;
     if (this.raf !== 0) cancelAnimationFrame(this.raf);
     this.raf = 0;
     if (this.revealTimer !== null) clearTimeout(this.revealTimer);
@@ -199,8 +207,8 @@ export class WorldPage extends LitElement {
     if (initial) this.loadState = "loading";
     try {
       const model = await fetchWorldModel();
-      if (!initial && this.model?.generatedAt === model.generatedAt) return;
       this.now = Date.now();
+      if (!initial && this.model?.generatedAt === model.generatedAt) return;
       this.colors = assignBannerColors(model);
       this.agents = new Map(model.agents.map((agent) => [agent.name, agent]));
       if (initial) {
@@ -256,9 +264,27 @@ export class WorldPage extends LitElement {
       this.resizeObserver.observe(wrap);
       void document.fonts?.ready.then(() => this.layoutMap());
     }
-    // Label text changes with the data; hovering only scales a label.
-    if (changed.has("model") || changed.has("loadState")) this.layoutMap();
-    this.paint(performance.now());
+    // Hovering only highlights; anything else may change the text (data,
+    // the clock, translations arriving late), so measure and title again.
+    const hoverOnly =
+      changed.size > 0 &&
+      [...changed.keys()].every(
+        (key) => key === "hoverFront" || key === "historyIndex",
+      );
+    if (!hoverOnly) {
+      this.layoutMap();
+      document.title = translateText("world_page.document_title");
+    }
+    // The map repaints only when what it shows changes.
+    if (
+      changed.has("model") ||
+      changed.has("loadState") ||
+      changed.has("hoverFront") ||
+      changed.has("changed") ||
+      changed.has("now")
+    ) {
+      this.paint(performance.now());
+    }
     this.schedule();
   }
 
@@ -390,7 +416,16 @@ export class WorldPage extends LitElement {
     const match = /^#front-([a-z_]+)$/.exec(window.location.hash);
     const id = match?.[1] as WorldTheatreId | undefined;
     const known = this.model?.theatres.some((theatre) => theatre.id === id);
-    this.selected = id !== undefined && known === true ? id : null;
+    const next = id !== undefined && known === true ? id : null;
+    if (next === this.selected) return;
+    this.selected = next;
+    // A link straight to a front opens its sheet with focus inside, as a
+    // click does.
+    if (next !== null) {
+      void this.updateComplete.then(() =>
+        this.querySelector<HTMLElement>(".wp-drawer-close")?.focus(),
+      );
+    }
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -606,9 +641,9 @@ export class WorldPage extends LitElement {
         headline = this.withNames(
           "world_page.verdict_tied",
           {
-            names: verdict.names
-              .map((_, index) => nameMarker(index))
-              .join(" & "),
+            names: this.list(
+              verdict.names.map((_, index) => nameMarker(index)),
+            ),
           },
           verdict.names,
         );
@@ -666,9 +701,12 @@ export class WorldPage extends LitElement {
             ${crown?.holder
               ? html`<li class="wp-stat-crown">
                   ${CROWN_GLYPH}
-                  ${translateText("world_page.stat_crown", {
-                    name: this.label(crown.holder),
-                  })}
+                  ${translateText(
+                    frontDisplayState(crown, this.now) === "contested"
+                      ? "world_page.stat_crown_siege"
+                      : "world_page.stat_crown",
+                    { name: this.label(crown.holder) },
+                  )}
                 </li>`
               : nothing}
             ${model.firstBattleAt !== null
@@ -1048,29 +1086,29 @@ export class WorldPage extends LitElement {
     const quiet = frontsInState(model, "quiet", this.now)[0] ?? null;
     const open = frontsInState(model, "unclaimed", this.now).length > 0;
     if (siege === null && quiet === null && !open) return nothing;
-    return html`<p
+    return html`<ul
       class="wp-key"
       aria-label=${translateText("world_page.key_aria")}
     >
       ${siege !== null
-        ? html`<span
-            ><i class="wp-sw" style="--paint:${this.swatch(siege)}"></i
-            >${translateText("world_page.key_siege")}</span
-          >`
+        ? html`<li>
+            <i class="wp-sw" style="--paint:${this.swatch(siege)}"></i
+            >${translateText("world_page.key_siege")}
+          </li>`
         : nothing}
       ${quiet !== null
-        ? html`<span
-            ><i class="wp-sw" style="--paint:${this.swatch(quiet)}"></i
-            >${translateText("world_page.key_quiet")}</span
-          >`
+        ? html`<li>
+            <i class="wp-sw" style="--paint:${this.swatch(quiet)}"></i
+            >${translateText("world_page.key_quiet")}
+          </li>`
         : nothing}
       ${open
-        ? html`<span
-            ><i class="wp-sw wp-sw-open" style="--paint:${UNCLAIMED_HEX}"></i
-            >${translateText("world_page.key_open")}</span
-          >`
+        ? html`<li>
+            <i class="wp-sw wp-sw-open" style="--paint:${UNCLAIMED_HEX}"></i
+            >${translateText("world_page.key_open")}
+          </li>`
         : nothing}
-    </p>`;
+    </ul>`;
   }
 
   // -------------------------------------------------------------- fronts

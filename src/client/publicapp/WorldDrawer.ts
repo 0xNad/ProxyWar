@@ -105,9 +105,7 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
                     : nothing}
                 </div>
               </div>
-              <p class="wp-front-line">
-                ${contestLine(view, theatre, display)}
-              </p>`}
+              <p class="wp-front-line">${contestLine(view, theatre)}</p>`}
         ${theatre.tallies.length > 0
           ? html`<h3 class="wp-drawer-sub">
                 ${translateText("world_page.detail_tally", {
@@ -191,12 +189,14 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
         ${theatre.maps.length > 0
           ? html`<p class="wp-drawer-maps">
               ${translateText("world_page.detail_battlefields", {
-                maps: theatre.maps
-                  .map(
-                    (entry) =>
-                      `${battlefieldName(entry.map)} (${entry.battles})`,
-                  )
-                  .join(", "),
+                maps: view.list(
+                  theatre.maps.map((entry) =>
+                    translateText("world_page.detail_battlefield", {
+                      map: battlefieldName(entry.map),
+                      count: entry.battles,
+                    }),
+                  ),
+                ),
               })}
             </p>`
           : nothing}

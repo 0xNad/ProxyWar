@@ -100,21 +100,20 @@ function renderFrontRow(
                     >`
                   : nothing}</span
               >
-              <span class="wp-row-race"
-                >${contestLine(view, theatre, display)}</span
-              >
+              <span class="wp-row-race">${contestLine(view, theatre)}</span>
             </span>`}
     </div>
     <div class="wp-row-form">${renderStrip(view, theatre, model)}</div>
     <div class="wp-row-last">
       ${theatre.lastBattleAt === null
         ? nothing
-        : html`<span class="wp-row-age">${view.age(theatre.lastBattleAt)}</span
-            ><span class="wp-row-age-phone"
+        : html`<span class="wp-row-age">${view.age(theatre.lastBattleAt)}</span>
+            <span class="wp-row-age-phone"
               >${translateText("world_page.row_last_battle", {
                 age: view.age(theatre.lastBattleAt),
               })}</span
-            ><span class="wp-row-count"
+            >
+            <span class="wp-row-count"
               >${translateText("world_page.front_battles", {
                 count: theatre.battleCount,
               })}</span
@@ -124,18 +123,15 @@ function renderFrontRow(
 }
 
 /** How close the race for a held front is, in words. */
-export function contestLine(
-  view: WorldView,
-  theatre: WorldTheatre,
-  display: FrontDisplayState,
-): string {
+export function contestLine(view: WorldView, theatre: WorldTheatre): string {
   if (theatre.challenger === null) {
     return translateText("world_page.front_unchallenged", {
       wins: theatre.holderWins,
       window: view.model.windowSize,
     });
   }
-  if (display === "contested") {
+  // A tie stays a tie when the front goes quiet: decide on the status.
+  if (theatre.status === "contested") {
     return translateText("world_page.front_level", {
       challenger: view.label(theatre.challenger),
       wins: theatre.holderWins,

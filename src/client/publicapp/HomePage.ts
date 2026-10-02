@@ -993,29 +993,29 @@ export class HomePage extends LitElement {
     const quiet = frontsInState(model, "quiet", this.now)[0] ?? null;
     const open = frontsInState(model, "unclaimed", this.now).length > 0;
     if (siege === null && quiet === null && !open) return nothing;
-    return html`<p
+    return html`<ul
       class="hp-key"
       aria-label=${translateText("home_page.key_aria")}
     >
       ${siege !== null
-        ? html`<span
-            ><i class="hp-sw" style="--frame:${this.swatch(siege)}"></i
-            >${translateText("home_page.key_siege")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw" style="--frame:${this.swatch(siege)}"></i
+            >${translateText("home_page.key_siege")}
+          </li>`
         : nothing}
       ${quiet !== null
-        ? html`<span
-            ><i class="hp-sw" style="--frame:${this.swatch(quiet)}"></i
-            >${translateText("home_page.key_quiet")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw" style="--frame:${this.swatch(quiet)}"></i
+            >${translateText("home_page.key_quiet")}
+          </li>`
         : nothing}
       ${open
-        ? html`<span
-            ><i class="hp-sw hp-sw-open" style="--frame:${UNCLAIMED_HEX}"></i
-            >${translateText("home_page.key_open")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw hp-sw-open" style="--frame:${UNCLAIMED_HEX}"></i
+            >${translateText("home_page.key_open")}
+          </li>`
         : nothing}
-    </p>`;
+    </ul>`;
   }
 
   // --------------------------------------------- legend (phone and tablet)
@@ -1489,7 +1489,7 @@ const HOME_PAGE_CSS = `
 .hp-seal-title,.hp-seal-detail{font-size:12px;color:var(--hp-ink-2)}
 .hp-seal-name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:15px;font-weight:700;overflow-wrap:anywhere}
 
-.hp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;font-size:14px;color:var(--hp-ink-2)}
+.hp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;padding:0;list-style:none;font-size:14px;color:var(--hp-ink-2)}
 .hp-key-desktop{padding:10px var(--hp-gutter) 0}
 .hp-sw{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:-1px;background:var(--frame)}
 .hp-sw-open{box-shadow:inset 0 0 0 1px #46556c}

@@ -39,10 +39,11 @@ const WORLD_PAGE_CSS = `
 .wp-stat-crown{color:var(--wp-ink)!important}
 .wp-since{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem;margin-top:1rem;padding:.5rem .8rem;border-left:2px solid var(--wp-ink);font-size:14px;color:var(--wp-ink)}
 .wp-since-dot{display:none}
-.wp-since-list{display:flex;flex-wrap:wrap;gap:.35rem}
-.wp-since-front{display:inline-flex;align-items:center;gap:.35rem;padding:.2rem .5rem;border-radius:999px;border:1px solid var(--wp-line);background:rgba(0,0,0,.25);color:var(--wp-ink);font-size:12.5px;cursor:pointer}
+.wp-since-list{display:flex;flex-wrap:wrap;gap:12px .5rem}
+.wp-since-front{position:relative;display:inline-flex;align-items:center;gap:.35rem;min-height:32px;padding:0 .6rem;border-radius:999px;border:1px solid var(--wp-line);background:rgba(0,0,0,.25);color:var(--wp-ink);font-size:12.5px;cursor:pointer}
 .wp-since-front:hover{border-color:var(--wp-ink)}
-.wp-since-dismiss{margin-left:auto;background:none;border:0;color:var(--wp-dim);font-size:12.5px;text-decoration:underline;cursor:pointer}
+.wp-since-front::after{content:"";position:absolute;inset:-6px -2px}
+.wp-since-dismiss{min-height:44px;margin-left:auto;padding:0 .5rem;background:none;border:0;color:var(--wp-dim);font-size:12.5px;text-decoration:underline;cursor:pointer}
 .wp-stage-wrap{position:relative;z-index:1;margin-top:clamp(14px,2vw,22px)}
 .wp-stage{position:relative;width:100%;max-width:1440px;margin:0 auto;aspect-ratio:500/218;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .wp-graticule{position:absolute;inset:0;width:100%;height:100%}
@@ -77,15 +78,15 @@ const WORLD_PAGE_CSS = `
 .wp-sw{display:inline-block;flex:none;width:12px;height:12px;margin-right:6px;background:var(--paint)}
 .wp-sw-open{box-shadow:inset 0 0 0 1px #46556c}
 .wp-low{box-shadow:inset 0 0 0 1px var(--wp-ink)}
-.wp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;font-size:13px;line-height:1.5;color:var(--wp-dim)}
-.wp-key span{display:inline-flex;align-items:center}
+.wp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;padding:0;list-style:none;font-size:13px;line-height:1.5;color:var(--wp-dim)}
+.wp-key li{display:inline-flex;align-items:center}
 .wp-legend{display:none;margin:0 0 10px;padding:0;list-style:none}
-.wp-legend li{display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;min-height:44px;border-bottom:1px solid var(--wp-line);break-inside:avoid}
+.wp-legend li{display:flex;flex-wrap:wrap;align-items:center;gap:12px 12px;min-height:44px;border-bottom:1px solid var(--wp-line);break-inside:avoid}
 .wp-legend-who{display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0}
 .wp-legend-name{position:relative;display:inline-flex;align-items:center;min-height:32px;font:700 14px/1.25 var(--wp-display);color:var(--wp-ink);overflow-wrap:anywhere}
 .wp-legend-muted{font-weight:400;color:var(--wp-dim)}
 .wp-sw-flag{width:22px;height:22px;margin-right:0}
-.wp-legend-fronts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:0 16px;margin-left:auto}
+.wp-legend-fronts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:12px 16px;margin-left:auto}
 .wp-legend-front{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0;border:0;background:none;color:var(--wp-ink);font:400 13px/1.2 var(--wp-display);white-space:nowrap;cursor:pointer}
 /* 44px tap targets without 44px lines: a wrapped row stays compact. */
 a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;inset:-6px -4px}
@@ -163,10 +164,10 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-num{text-align:right!important;font-variant-numeric:tabular-nums;color:var(--wp-dim)}
 .wp-power-agent{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
 .wp-power-crown{display:inline-flex;width:16px;height:9px;color:var(--wp-ink)}
-.wp-front-chips{display:flex;flex-wrap:wrap;gap:.25rem}
-.wp-front-chip{position:relative;padding:.18rem .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
+.wp-front-chips{display:flex;flex-wrap:wrap;gap:12px 6px}
+.wp-front-chip{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0 .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
 .wp-front-chip:hover{background:color-mix(in srgb,var(--banner) 24%,transparent)}
-.wp-front-chip::after{content:"";position:absolute;inset:-9px -2px}
+.wp-front-chip::after{content:"";position:absolute;inset:-6px -2px}
 .wp-history{display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:16px;padding:1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
 @media (max-width:820px){.wp-history{grid-template-columns:minmax(0,1fr)}}
 .wp-history-chart{position:relative;min-width:0}
@@ -206,7 +207,7 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-drawer-art::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,#0b1526),linear-gradient(90deg,color-mix(in srgb,var(--banner) 40%,transparent),transparent 75%)}
 .wp-drawer-head{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;padding:0 1.2rem;margin-top:-56px;position:relative;z-index:1}
 .wp-drawer-title{margin:.45rem 0 0;font:700 30px/1.1 var(--wp-display);color:var(--wp-ink);text-shadow:0 2px 14px rgba(0,0,0,.7)}
-.wp-drawer-close{display:inline-flex;width:38px;height:38px;padding:9px;border-radius:50%;border:1px solid var(--wp-line);background:rgba(5,10,20,.7);color:var(--wp-ink);cursor:pointer;align-self:flex-start;margin-top:.2rem}
+.wp-drawer-close{display:inline-flex;width:44px;height:44px;padding:12px;border-radius:50%;border:1px solid var(--wp-line);background:rgba(5,10,20,.7);color:var(--wp-ink);cursor:pointer;align-self:flex-start;margin-top:.2rem}
 .wp-drawer-close:hover{border-color:rgba(148,170,200,.45)}
 .wp-drawer-close:focus-visible{outline:2px solid #fff;outline-offset:2px}
 .wp-drawer-body{display:flex;flex-direction:column;gap:.75rem;padding:1rem 1.2rem 2rem}
