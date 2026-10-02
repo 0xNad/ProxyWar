@@ -25,7 +25,7 @@ import {
 import { renderDrawer } from "./WorldDrawer";
 import { renderFronts, stateWord, unclaimedLine } from "./WorldFronts";
 import { CROWN_GLYPH } from "./WorldGlyphs";
-import { renderHistory } from "./WorldHistory";
+import { renderHistory, type HistoryFocus } from "./WorldHistory";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_GRATICULE,
@@ -143,7 +143,7 @@ export class WorldPage extends LitElement {
   @state() private changed: WorldTheatreId[] = [];
   @state() private sinceVisitAt: string | null = null;
   @state() private dispatchesExpanded = false;
-  @state() private historyIndex: number | null = null;
+  @state() private historyFocus: HistoryFocus | null = null;
   @state() private now = Date.now();
 
   private colors = new Map<string, string>();
@@ -269,7 +269,7 @@ export class WorldPage extends LitElement {
     const hoverOnly =
       changed.size > 0 &&
       [...changed.keys()].every(
-        (key) => key === "hoverFront" || key === "historyIndex",
+        (key) => key === "hoverFront" || key === "historyFocus",
       );
     if (!hoverOnly) {
       this.layoutMap();
@@ -588,8 +588,8 @@ export class WorldPage extends LitElement {
         <div class="wp-wrap wp-columns">
           ${this.renderDispatches(model)} ${this.renderPowers(model)}
         </div>
-        ${renderHistory(view, this.historyIndex, (index) => {
-          this.historyIndex = index;
+        ${renderHistory(view, this.historyFocus, (focus) => {
+          this.historyFocus = focus;
         })}
         ${this.renderRules(model)}
       </main>

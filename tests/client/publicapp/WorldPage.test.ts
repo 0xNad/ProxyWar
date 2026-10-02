@@ -430,30 +430,91 @@ describe("world-page", () => {
     expect(styles.some((style) => style.includes("url("))).toBe(false);
   });
 
-  it("lets a keyboard step through the war day by day, read out in words", async () => {
+  it("shows who held each front each day, and steps through the days by keyboard", async () => {
     const el = mount();
     await settle(el);
-    const chart = el.querySelector<SVGElement>(
-      '.wp-history-chart [role="slider"]',
+    // One row per front, the Crown first; long reigns are named on the bar.
+    expect(
+      [...el.querySelectorAll(".wp-tl-front")].map((label) => text(label)),
+    ).toEqual([
+      "The Crown",
+      "North America",
+      "South America",
+      "Britannia",
+      "Europe",
+      "Black Sea",
+      "Middle East",
+      "Africa",
+      "Asia",
+      "East Asia",
+      "Oceania",
+    ]);
+    const asia = el.querySelector('.wp-tl-bar[data-front="asia"]');
+    expect(
+      [...(asia?.querySelectorAll(".wp-tl-run") ?? [])].map((run) => [
+        text(run),
+        run.getAttribute("style")?.match(/flex-grow:(\d+)/)?.[1],
+      ]),
+    ).toEqual([
+      ["Alpha", "1"],
+      ["Matt Van", "2"],
+    ]);
+    // A front no one has held yet says so; it stays slate.
+    expect(
+      text(el.querySelector('.wp-tl-bar[data-front="africa"] .wp-tl-open')),
+    ).toBe("Unclaimed");
+
+    const grid = el.querySelector<HTMLElement>('.wp-tl [role="slider"]');
+    expect(grid?.getAttribute("tabindex")).toBe("0");
+    expect(grid?.getAttribute("aria-valuetext")).toBe(
+      "Sep 29: the Crown held by relh, Asia held by Matt Van, and Oceania held by Alpha",
     );
-    expect(chart?.getAttribute("tabindex")).toBe("0");
-    expect(chart?.getAttribute("aria-valuetext")).toBe(
-      "Sep 29: the Crown held by relh, Alpha with 1 front, and Matt Van with 1 front",
-    );
-    chart?.dispatchEvent(
+    grid?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
     );
     await settle(el);
-    expect(chart?.getAttribute("aria-valuenow")).toBe("0");
-    expect(chart?.getAttribute("aria-valuetext")).toBe(
-      "Sep 27: the Crown held by Andre von Houck and Alpha with 2 fronts",
-    );
-    expect(text(el.querySelector(".wp-history-tip"))).toContain("Sep 27");
-    chart?.dispatchEvent(
+    expect(grid?.getAttribute("aria-valuenow")).toBe("0");
+    const day =
+      "Sep 27: the Crown held by Andre von Houck, Asia held by Alpha, and Oceania held by Alpha";
+    expect(grid?.getAttribute("aria-valuetext")).toBe(day);
+    expect(text(el.querySelector(".wp-tl-readout"))).toBe(day);
+    grid?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
     );
     await settle(el);
-    expect(chart?.getAttribute("aria-valuenow")).toBe("1");
+    expect(grid?.getAttribute("aria-valuenow")).toBe("1");
+  });
+
+  it("names the reign under the pointer", async () => {
+    const el = mount();
+    await settle(el);
+    const bar = el.querySelector<HTMLElement>('.wp-tl-bar[data-front="asia"]');
+    if (bar === null) throw new Error("no Asia bar");
+    bar.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 300, height: 22 }) as DOMRect;
+    // Three days across 300 px: x = 250 is the last day, inside Matt Van's
+    // reign, which is still going.
+    bar
+      .querySelector(".wp-tl-run")
+      ?.dispatchEvent(
+        new MouseEvent("pointermove", { clientX: 250, bubbles: true }),
+      );
+    await settle(el);
+    expect(text(bar.querySelector(".wp-tl-tip"))).toBe(
+      "Matt Van has held Asia since Sep 28",
+    );
+    expect(bar.querySelector(".wp-tl-pointed")?.textContent).toContain(
+      "Matt Van",
+    );
+    bar
+      .querySelector(".wp-tl-run")
+      ?.dispatchEvent(
+        new MouseEvent("pointermove", { clientX: 10, bubbles: true }),
+      );
+    await settle(el);
+    expect(text(bar.querySelector(".wp-tl-tip"))).toBe(
+      "Alpha held Asia on Sep 27",
+    );
   });
 
   it("tells assistive tech that a front opens a dialog, and keeps Tab inside it", async () => {
