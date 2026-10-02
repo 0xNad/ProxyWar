@@ -367,6 +367,67 @@ describe("world-page", () => {
     expect(styles.some((style) => style.includes("url("))).toBe(false);
   });
 
+  it("lets a keyboard step through the war day by day, read out in words", async () => {
+    const el = mount();
+    await settle(el);
+    const chart = el.querySelector<SVGElement>(
+      '.wp-history-chart [role="slider"]',
+    );
+    expect(chart?.getAttribute("tabindex")).toBe("0");
+    expect(chart?.getAttribute("aria-valuetext")).toBe(
+      "Sep 29: the Crown held by relh, Alpha with 1 front, and Matt Van with 1 front",
+    );
+    chart?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
+    );
+    await settle(el);
+    expect(chart?.getAttribute("aria-valuenow")).toBe("0");
+    expect(chart?.getAttribute("aria-valuetext")).toBe(
+      "Sep 27: the Crown held by Andre von Houck and Alpha with 2 fronts",
+    );
+    expect(text(el.querySelector(".wp-history-tip"))).toContain("Sep 27");
+    chart?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    await settle(el);
+    expect(chart?.getAttribute("aria-valuenow")).toBe("1");
+  });
+
+  it("tells assistive tech that a front opens a dialog, and keeps Tab inside it", async () => {
+    const el = mount();
+    await settle(el);
+    for (const selector of [
+      ".wp-label",
+      ".wp-crown",
+      ".wp-legend-front",
+      ".wp-row-hit",
+    ]) {
+      expect(el.querySelector(selector)?.getAttribute("aria-haspopup")).toBe(
+        "dialog",
+      );
+    }
+    find<HTMLButtonElement>(el, ".wp-legend-front", "Asia")?.click();
+    await settle(el);
+    const sheet = el.querySelector<HTMLElement>('[role="dialog"]');
+    const close = el.querySelector<HTMLButtonElement>(".wp-drawer-close");
+    const links = sheet?.querySelectorAll<HTMLElement>("a[href]") ?? [];
+    const last = links[links.length - 1];
+    expect(document.activeElement).toBe(close);
+    last.focus();
+    sheet?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(close);
+    sheet?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+    expect(document.activeElement).toBe(last);
+  });
+
   it("opens the front named in the URL hash", async () => {
     window.history.replaceState(null, "", "/world#front-crown");
     const el = mount();

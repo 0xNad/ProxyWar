@@ -16,7 +16,7 @@ export function ensureWorldStyles(): void {
 
 const WORLD_PAGE_CSS = `
 :where(.wp-root) .crown-glyph{display:block;width:100%;height:100%}
-.wp-root{--wp-ocean:#071225;--wp-ink:#edf1f7;--wp-dim:#a4afbf;--wp-faint:#6f7d90;--wp-line:rgba(148,170,200,.14);--wp-glass:rgba(8,15,28,.78);--wp-display:"PW Overpass",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wp-root{--wp-ocean:#071225;--wp-ink:#edf1f7;--wp-dim:#a4afbf;--wp-faint:#8593a6;--wp-line:rgba(148,170,200,.14);--wp-glass:rgba(8,15,28,.78);--wp-display:"PW Overpass",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 .wp-main{display:block;padding-bottom:3rem}
 .wp-wrap{width:100%;max-width:1240px;margin:0 auto;padding-inline:clamp(16px,3vw,28px)}
 .wp-loading{display:flex;align-items:center;justify-content:center;gap:.75rem;min-height:60vh;color:var(--wp-dim);font:400 16px/1.4 var(--wp-display)}
@@ -171,6 +171,7 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 @media (max-width:820px){.wp-history{grid-template-columns:minmax(0,1fr)}}
 .wp-history-chart{position:relative;min-width:0}
 .wp-history-chart svg{display:block;width:100%;height:260px}
+.wp-history-chart svg:focus-visible{outline:2px solid var(--wp-ink);outline-offset:4px}
 .wp-history-layer{stroke:rgba(5,12,25,.6);stroke-width:1;vector-effect:non-scaling-stroke}
 .wp-history-grid{stroke:rgba(148,170,200,.12);stroke-dasharray:3 5;vector-effect:non-scaling-stroke}
 .wp-history-cursor{stroke:#fff;stroke-width:1.5;vector-effect:non-scaling-stroke}
@@ -181,8 +182,8 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-tip-row i{width:9px;height:9px;border-radius:2px;flex:none}
 .wp-tip-row b{margin-left:auto;color:var(--wp-ink)}
 .wp-history-legend{display:flex;flex-direction:column;gap:.45rem;margin:0;padding:0;list-style:none;font-size:12.5px;color:var(--wp-dim)}
-.wp-history-legend li{display:flex;align-items:center;gap:.5rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-history-legend i{width:12px;height:12px;border-radius:3px;flex:none}
+.wp-history-legend li{display:flex;align-items:flex-start;gap:.5rem;min-width:0;overflow-wrap:anywhere}
+.wp-history-legend i{width:12px;height:12px;margin-top:3px;border-radius:3px;flex:none}
 .wp-history-crown{background:none;box-shadow:inset 0 0 0 2px var(--wp-ink);border-radius:50%!important}
 .wp-history-others{background:rgba(148,163,184,.35)}
 @media (max-width:820px){.wp-history-legend{flex-direction:row;flex-wrap:wrap}}

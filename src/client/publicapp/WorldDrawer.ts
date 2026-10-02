@@ -31,6 +31,7 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="wp-drawer-title"
+      @keydown=${trapFocus}
       data-state=${display}
       style="--banner:${view.bannerColor(
         theatre.holder,
@@ -201,6 +202,27 @@ export function renderDrawer(view: WorldView, id: WorldTheatreId) {
           : nothing}
       </div>
     </aside>`;
+}
+
+/** Tab and Shift+Tab cycle inside the open sheet, as in any modal dialog. */
+function trapFocus(event: KeyboardEvent): void {
+  if (event.key !== "Tab") return;
+  const sheet = event.currentTarget as HTMLElement;
+  const focusable = [
+    ...sheet.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ];
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (first === undefined || last === undefined) return;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function thumbnail(theatre: WorldTheatre): string | null {

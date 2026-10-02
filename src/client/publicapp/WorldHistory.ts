@@ -1,6 +1,7 @@
 import { html, nothing, svg } from "lit";
 import { translateText } from "../Utils";
 import { CROWN_GLYPH } from "./WorldGlyphs";
+import type { WorldDay } from "./WorldModelSchema";
 import { WORLD_REGION_IDS } from "./WorldPresentation";
 import type { WorldView } from "./WorldView";
 
@@ -59,6 +60,13 @@ export function renderHistory(
   const crownColor = (holder: string | null | undefined) =>
     holder ? view.bannerColor(holder) : "rgba(148,163,184,0.18)";
   const hoverDay = hover === null ? null : days[hover];
+  const step = (index: number) => onHover(Math.max(0, Math.min(n - 1, index)));
+  const indexAt = (event: PointerEvent) => {
+    const rect = (event.currentTarget as SVGElement).getBoundingClientRect();
+    return Math.round(((event.clientX - rect.left) / rect.width) * (n - 1));
+  };
+  // Without a pointer or focus on it, the chart reads as its latest day.
+  const current = hover ?? n - 1;
   return html`<section
     class="wp-wrap wp-section"
     aria-labelledby="wp-history-title"
@@ -76,19 +84,36 @@ export function renderHistory(
         <svg
           viewBox="0 0 ${width} ${height + 26}"
           preserveAspectRatio="none"
-          role="img"
+          tabindex="0"
+          role="slider"
           aria-label=${translateText("world_page.history_aria")}
-          @pointermove=${(event: PointerEvent) => {
-            const rect = (
-              event.currentTarget as SVGElement
-            ).getBoundingClientRect();
-            const index = Math.round(
-              ((event.clientX - rect.left) / rect.width) * (n - 1),
-            );
-            onHover(Math.max(0, Math.min(n - 1, index)));
+          aria-valuemin="0"
+          aria-valuemax=${n - 1}
+          aria-valuenow=${current}
+          aria-valuetext=${daySummary(view, days[current])}
+          @pointermove=${(event: PointerEvent) => step(indexAt(event))}
+          @pointerdown=${(event: PointerEvent) => step(indexAt(event))}
+          @pointerleave=${(event: PointerEvent) => {
+            // A finger lifting is a leave too; a tapped day stays shown.
+            if (event.pointerType === "mouse") onHover(null);
           }}
-          @pointerleave=${() => {
-            onHover(null);
+          @focus=${(event: FocusEvent) => {
+            // Keyboard focus shows the latest day; a click already picked one.
+            if (focusVisible(event.currentTarget as Element)) step(current);
+          }}
+          @blur=${() => onHover(null)}
+          @keydown=${(event: KeyboardEvent) => {
+            const next: Record<string, number> = {
+              ArrowLeft: current - 1,
+              ArrowDown: current - 1,
+              ArrowRight: current + 1,
+              ArrowUp: current + 1,
+              Home: 0,
+              End: n - 1,
+            };
+            if (!(event.key in next)) return;
+            event.preventDefault();
+            step(next[event.key]);
           }}
         >
           ${days.map(
@@ -116,6 +141,7 @@ export function renderHistory(
         ${hoverDay !== null && hover !== null
           ? html`<div
               class="wp-history-tip"
+              aria-hidden="true"
               style="left:${Math.min(
                 86,
                 Math.max(14, (hover / Math.max(1, n - 1)) * 100),
@@ -157,20 +183,63 @@ export function renderHistory(
   </section>`;
 }
 
-function tipRows(view: WorldView, holders: Record<string, string | null>) {
+function focusVisible(element: Element): boolean {
+  try {
+    return element.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
+/** Fronts held per agent on one day, most first. */
+function frontCounts(
+  holders: Record<string, string | null>,
+): Array<[string, number]> {
+  const regionIds = WORLD_REGION_IDS as readonly string[];
   const counts = new Map<string, number>();
   for (const [id, holder] of Object.entries(holders)) {
-    if (holder === null || id === "crown") continue;
+    if (holder === null || !regionIds.includes(id)) continue;
     counts.set(holder, (counts.get(holder) ?? 0) + 1);
   }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(
-      ([name, count]) =>
-        html`<span class="wp-tip-row"
-          ><i style="background:${view.bannerColor(name)}"></i>${view.label(
-            name,
-          )} <b>${count}</b></span
-        >`,
+  return [...counts.entries()].sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  );
+}
+
+/** One day in words, for the chart's keyboard and screen-reader readout. */
+function daySummary(view: WorldView, day: WorldDay): string {
+  const parts: string[] = [];
+  const crown = day.holders.crown ?? null;
+  if (crown !== null) {
+    parts.push(
+      translateText("world_page.history_day_crown", {
+        name: view.label(crown),
+      }),
     );
+  }
+  for (const [name, count] of frontCounts(day.holders)) {
+    parts.push(
+      translateText("world_page.history_day_fronts", {
+        name: view.label(name),
+        count,
+      }),
+    );
+  }
+  return translateText("world_page.history_day", {
+    date: view.date(`${day.day}T12:00:00Z`),
+    summary:
+      parts.length === 0
+        ? translateText("world_page.history_day_none")
+        : view.list(parts),
+  });
+}
+
+function tipRows(view: WorldView, holders: Record<string, string | null>) {
+  return frontCounts(holders).map(
+    ([name, count]) =>
+      html`<span class="wp-tip-row"
+        ><i style="background:${view.bannerColor(name)}"></i>${view.label(name)}
+        <b>${count}</b></span
+      > `,
+  );
 }

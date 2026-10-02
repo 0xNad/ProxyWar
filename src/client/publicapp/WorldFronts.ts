@@ -71,6 +71,7 @@ function renderFrontRow(
     <button
       type="button"
       class="wp-row-hit"
+      aria-haspopup="dialog"
       aria-label=${translateText("world_page.front_open", { front: name })}
       @click=${() => view.openFront(theatre.id)}
     ></button>

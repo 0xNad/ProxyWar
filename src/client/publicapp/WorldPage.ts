@@ -747,6 +747,7 @@ export class WorldPage extends LitElement {
             html`<button
               type="button"
               class="wp-since-front"
+              aria-haspopup="dialog"
               @click=${() => this.openFront(id)}
             >
               ${this.emblem(this.theatre(id)?.holder ?? null, 16)}
@@ -848,6 +849,7 @@ export class WorldPage extends LitElement {
     return html`<button
       type="button"
       class="wp-label"
+      aria-haspopup="dialog"
       data-state=${display}
       ?data-focus=${this.hoverFront === theatre.id}
       ?data-changed=${this.changed.includes(theatre.id)}
@@ -894,6 +896,7 @@ export class WorldPage extends LitElement {
     return html`<button
       type="button"
       class="wp-crown"
+      aria-haspopup="dialog"
       data-state=${display}
       style="left:${anchor.x}%;top:${anchor.y}%;--banner:${this.bannerColor(
         crown.holder,
@@ -1008,6 +1011,7 @@ export class WorldPage extends LitElement {
     return html`<button
       type="button"
       class="wp-legend-front"
+      aria-haspopup="dialog"
       @click=${() => this.openFront(front.id)}
       @pointerenter=${() => {
         if (onMap) this.hoverFront = front.id;
@@ -1212,6 +1216,7 @@ export class WorldPage extends LitElement {
                           html`<button
                             type="button"
                             class="wp-front-chip"
+                            aria-haspopup="dialog"
                             @click=${() => this.openFront(id)}
                           >
                             ${this.frontName(id)}
