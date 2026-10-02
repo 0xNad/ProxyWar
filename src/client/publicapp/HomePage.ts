@@ -1,4 +1,4 @@
-import { html, LitElement, nothing, svg, TemplateResult } from "lit";
+import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
 import { translateText } from "../Utils";
@@ -18,7 +18,6 @@ import {
   frontsInState,
   holderGroups,
   leaderCaveats,
-  preciseAge,
   regionFronts,
   warDay,
   watchEvent,
@@ -30,17 +29,8 @@ import {
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
-import {
-  mix,
-  paintWorldFrame,
-  QUIET_AMOUNT,
-  QUIET_RGB,
-  SEA,
-  STRIPE_AMOUNT,
-  UNCLAIMED_RGB,
-  worldGrid,
-  type Rgb,
-} from "./WorldMapRenderer";
+import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
+import { mix, paintWorldFrame, SEA, worldGrid } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
@@ -50,18 +40,33 @@ import {
   type WorldTheatreId,
 } from "./WorldModelSchema";
 import {
+  ensurePlacardStyles,
+  renderPlacards,
+  VACANT_RING,
+  type PlacardView,
+} from "./WorldPlacards";
+import {
   assignBannerColors,
   bannerColorOf,
-  battlefieldKey,
   changedSinceVisit,
   feedState,
   frontDisplayState,
   frontPaints,
+  frontSwatch,
   hexToRgb,
   parseVisitSnapshot,
+  rgbHex,
+  UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
-import { battlefieldName } from "./WorldText";
+import {
+  eventSentence,
+  formatAge,
+  formatDate,
+  formatList,
+  frontInText,
+  pageLocale,
+} from "./WorldText";
 
 /**
  * The front page: the war table. The first screen answers the one question
@@ -94,65 +99,13 @@ const VISIT_KEY = "proxywar.home.lastVisit";
 const OCEAN = "#071225";
 const STARTER_REPOSITORY_URL =
   "https://github.com/0xNad/proxywar-coworld-starter";
-const UNCLAIMED_HEX = rgbHex(UNCLAIMED_RGB);
-const VACANT_RING = "#46556c";
-
-/**
- * Placards sit on the shared label anchors; only fronts whose anchor is in
- * a crowded or tiny spot are nudged (offsets in % of the map box). East
- * Asia's placard moves out to sea and keeps a leader line to its anchor.
- */
-const PLACARD_PLACEMENT: Partial<
-  Record<
-    WorldTheatreId,
-    {
-      readonly align?: "left" | "right";
-      readonly dx?: number;
-      readonly dy?: number;
-      readonly leader?: boolean;
-    }
-  >
-> = {
-  britannia: { align: "left", dx: 2.2 },
-  europe: { dx: -1.4 },
-  black_sea: { align: "right", dx: 0.8 },
-  middle_east: { dy: 1.5 },
-  east_asia: { align: "right", dx: 2.5, dy: 7.5, leader: true },
-};
-
-/** Dispatch sentences per event kind; `onMap` adds "on {map}". */
-const EVENT_KEYS: Record<
-  WorldEvent["kind"],
-  { readonly plain: string; readonly onMap: string }
-> = {
-  conquest: {
-    plain: "home_page.event_conquest",
-    onMap: "home_page.event_conquest_on",
-  },
-  claim: { plain: "home_page.event_claim", onMap: "home_page.event_claim_on" },
-  siege: { plain: "home_page.event_siege", onMap: "home_page.event_siege_on" },
-  held: { plain: "home_page.event_held", onMap: "home_page.event_held_on" },
-};
-
-/** A hold whose last challenger's wins have aged out of the window. */
-const HELD_UNOPPOSED_KEYS = {
-  plain: "home_page.event_held_unopposed",
-  onMap: "home_page.event_held_unopposed_on",
-} as const;
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
-
-/** A pixel crown with a raised centre (a flat one reads as battlements). */
-const CROWN_GLYPH = svg`<svg viewBox="0 0 9 5" aria-hidden="true" shape-rendering="crispEdges"><path d="M4 0h1v1H4zM0 1h1v1H0zM3 1h3v1H3zM8 1h1v1H8zM0 2h2v1H0zM3 2h3v1H3zM7 2h2v1H7zM0 3h9v2H0z"/></svg>`;
 
 /** Invisible-separator markers for templates spliced into translated sentences. */
 const MARK_PATTERN = /⁣(\d+)⁣/;
 function mark(index: number): string {
   return `⁣${index}⁣`;
-}
-
-function rgbHex(rgb: Rgb): string {
-  return `#${rgb.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
 }
 
 function reducedMotion(): boolean {
@@ -182,6 +135,7 @@ function storageSet(key: string, value: string): void {
 function ensureHomeStyles(): void {
   if (typeof document === "undefined") return;
   ensurePublicFonts();
+  ensurePlacardStyles();
   if (document.getElementById(STYLE_ELEMENT_ID) !== null) return;
   const style = document.createElement("style");
   style.id = STYLE_ELEMENT_ID;
@@ -403,55 +357,13 @@ export class HomePage extends LitElement {
     if (wrap === null || map === null) return;
     const available = wrap.clientWidth;
     if (available === 0) return;
-    const scale = available / WORLD_GRID_WIDTH;
-    const whole = Math.round(scale);
-    const width =
-      whole >= 2 && Math.abs(whole - scale) / scale <= 0.05
-        ? whole * WORLD_GRID_WIDTH
-        : available;
+    const width = pixelMapWidth(available, WORLD_GRID_WIDTH);
     map.style.width = `${width}px`;
     map.style.marginLeft = `${Math.round((available - width) / 2)}px`;
-    const labels = [
-      ...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal"),
-    ];
-    for (const label of labels) {
-      label.style.marginLeft = "0px";
-      label.style.marginTop = "0px";
-    }
-    const bounds = wrap.getBoundingClientRect();
-    const pad = 8;
-    const placed: DOMRect[] = [];
-    for (const label of labels) {
-      const rect = label.getBoundingClientRect();
-      if (rect.width === 0) continue;
-      let dx = 0;
-      if (rect.right > bounds.right - pad) dx = bounds.right - pad - rect.right;
-      if (rect.left + dx < bounds.left + pad)
-        dx = bounds.left + pad - rect.left;
-      // Greedy: a label that lands on one already placed moves down past it.
-      let dy = 0;
-      for (let pass = 0; pass < 4; pass++) {
-        const top = rect.top + dy;
-        const left = rect.left + dx;
-        const hit = placed.find(
-          (other) =>
-            left < other.right + 4 &&
-            left + rect.width > other.left - 4 &&
-            top < other.bottom + 4 &&
-            top + rect.height > other.top - 4,
-        );
-        if (hit === undefined) break;
-        const below = hit.bottom + 4 - top;
-        // Pushing past the map's bottom edge would clip it: go above instead.
-        dy +=
-          rect.bottom + dy + below > bounds.bottom - pad
-            ? hit.top - 4 - (rect.bottom + dy)
-            : below;
-      }
-      if (dx !== 0) label.style.marginLeft = `${Math.round(dx)}px`;
-      if (dy !== 0) label.style.marginTop = `${Math.round(dy)}px`;
-      placed.push(label.getBoundingClientRect());
-    }
+    separateLabels(
+      [...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal")],
+      wrap.getBoundingClientRect(),
+    );
   }
 
   // ------------------------------------------------------------- helpers
@@ -504,21 +416,7 @@ export class HomePage extends LitElement {
 
   /** CSS paint for a swatch, computed with the renderer's own maths. */
   private swatch(front: WorldTheatre | null): string {
-    if (front === null || front.holder === null) return UNCLAIMED_HEX;
-    const display = frontDisplayState(front, this.now);
-    const holder = hexToRgb(this.colorOf(front.holder));
-    if (holder === null || display === "unclaimed") return UNCLAIMED_HEX;
-    if (display === "quiet") {
-      return rgbHex(mix(holder, QUIET_RGB, QUIET_AMOUNT));
-    }
-    if (display === "contested") {
-      const rival = hexToRgb(this.colorOf(front.challenger));
-      if (rival !== null) {
-        const stripe = rgbHex(mix(holder, rival, STRIPE_AMOUNT));
-        return `repeating-linear-gradient(135deg,${stripe} 0 2px,${rgbHex(holder)} 2px 7px)`;
-      }
-    }
-    return rgbHex(holder);
+    return frontSwatch(front, (name) => this.colorOf(name), this.now);
   }
 
   private label(name: string): string {
@@ -529,23 +427,12 @@ export class HomePage extends LitElement {
     return translateText(`world_page.front_${id}`);
   }
 
-  private frontInText(id: WorldTheatreId): string {
-    return translateText(`home_page.in_text_${id}`);
-  }
-
   private locale(): string | undefined {
-    return document.documentElement.lang || undefined;
+    return pageLocale();
   }
 
   private list(items: readonly string[]): string {
-    try {
-      return new Intl.ListFormat(this.locale(), {
-        style: "long",
-        type: "conjunction",
-      }).format(items);
-    } catch {
-      return items.join(", ");
-    }
+    return formatList(items);
   }
 
   /** A list whose items are templates (bold front names, linked agents). */
@@ -559,33 +446,11 @@ export class HomePage extends LitElement {
   }
 
   private date(iso: string): string {
-    const time = Date.parse(iso);
-    if (!Number.isFinite(time)) return "—";
-    return new Intl.DateTimeFormat(this.locale(), {
-      month: "short",
-      day: "numeric",
-    }).format(new Date(time));
+    return formatDate(iso);
   }
 
   private age(iso: string): string {
-    const age = preciseAge(iso, this.now);
-    switch (age.key) {
-      case "now":
-        return translateText("home_page.age_now");
-      case "minutes":
-        return translateText("home_page.age_minutes", { count: age.minutes });
-      case "hours_minutes":
-        return translateText("home_page.age_hours_minutes", {
-          hours: age.hours,
-          minutes: age.minutes,
-        });
-      case "hours":
-        return translateText("home_page.age_hours", { count: age.hours });
-      case "days":
-        return translateText("home_page.age_days", { count: age.days });
-      case "date":
-        return translateText("home_page.age_date", { date: this.date(iso) });
-    }
+    return formatAge(iso, this.now);
   }
 
   /** A translated sentence with templates (names, links) spliced in. */
@@ -686,7 +551,7 @@ export class HomePage extends LitElement {
               tabindex="-1"
               aria-hidden="true"
             ></a>
-            ${this.renderPlacards(model)}
+            ${renderPlacards(this.placardView(), model)}
           </div>
         </div>
         <div class="hp-key-desktop">${this.renderKey(model)}</div>
@@ -798,12 +663,12 @@ export class HomePage extends LitElement {
             html` <span class=${index > 0 ? "hp-caveat-more" : ""}
               >${caveat.kind === "siege"
                 ? translateText("home_page.caveat_siege", {
-                    front: this.frontInText(caveat.front.id),
+                    front: frontInText(caveat.front.id),
                     challenger: this.label(caveat.front.challenger ?? ""),
                     wins: caveat.front.holderWins,
                   })
                 : translateText("home_page.caveat_quiet", {
-                    front: this.frontInText(caveat.front.id),
+                    front: frontInText(caveat.front.id),
                     date: this.date(caveat.front.lastBattleAt ?? ""),
                   })}</span
             >`,
@@ -848,23 +713,30 @@ export class HomePage extends LitElement {
       return html`<span>${translateText("home_page.clock_no_battles")}</span>`;
     }
     const day = this.lastDayCount(model, feed.lastBattleAt);
+    // Spaces between the parts: the flex gap separates them on screen, the
+    // spaces in the text (copied or read aloud).
     if (feed.kind === "paused") {
       return html`<span class="hp-pill hp-pill-paused"
           >${translateText("home_page.paused_pill")}</span
-        ><span
+        >
+        <span
           >${translateText("home_page.clock_paused", {
             age: this.age(feed.lastBattleAt),
           })}</span
-        ><span>${day}</span>`;
+        >
+        <span>${day}</span>`;
     }
     const warDayNumber = warDay(model, this.now);
     return html`<span class="hp-pill hp-pill-live"
         >${translateText("home_page.live_pill")}</span
-      ><span
+      >
+      <span
         >${translateText("home_page.clock_last_battle", {
           age: this.age(feed.lastBattleAt),
         })}</span
-      ><span>${day}</span>${warDayNumber === null || compact
+      >
+      <span>${day}</span>
+      ${warDayNumber === null || compact
         ? nothing
         : html`<span
             >${translateText("home_page.clock_day", {
@@ -918,7 +790,7 @@ export class HomePage extends LitElement {
   private watchLabel(event: WorldEvent): string {
     const params = {
       agent: this.label(event.agent),
-      front: this.frontInText(event.theatreId),
+      front: frontInText(event.theatreId),
     };
     switch (event.kind) {
       case "conquest":
@@ -934,103 +806,43 @@ export class HomePage extends LitElement {
 
   // ------------------------------------------------------------- placards
 
-  private renderPlacards(model: WorldModel) {
-    const leaders: TemplateResult[] = [];
-    const placards = regionFronts(model).map((front) => {
-      const anchor = WORLD_GRID_ANCHORS[front.id];
-      const place = PLACARD_PLACEMENT[front.id] ?? {};
-      const x = anchor.x + (place.dx ?? 0);
-      const y = anchor.y + (place.dy ?? 0);
-      const href = `/world#front-${front.id}`;
-      const display = frontDisplayState(front, this.now);
-      if (display === "unclaimed" || front.holder === null) {
-        return html`<li class="hp-placard-full">
-          <a
-            class="hp-open"
-            href=${href}
-            style="left:${x}%;top:${y}%"
-            aria-label=${translateText("home_page.open_aria", {
-              front: this.frontName(front.id),
-            })}
-            ><b>${this.frontName(front.id)}</b
-            ><span>${translateText("home_page.never_fought")}</span></a
-          >
-        </li>`;
-      }
-      if (place.leader === true) {
-        leaders.push(
-          svg`<line x1=${anchor.x} y1=${anchor.y} x2=${x} y2=${y}></line>`,
-        );
-      }
-      const holder = front.holder;
-      const siege =
-        display === "contested" && front.challenger !== null
-          ? html`<span
-              class="hp-mark-siege"
-              style="--rival:${this.colorOf(front.challenger)}"
-              ><i
-                class=${this.lowContrast(front.challenger) ? "hp-low" : ""}
-              ></i
-              >${translateText("home_page.mark_level", {
-                challenger: this.label(front.challenger),
-                wins: front.challengerWins,
-              })}</span
-            >`
-          : nothing;
-      return html`<li class="hp-placard-full">
-        <a
-          class="hp-mark"
-          data-state=${display}
-          data-align=${place.align ?? "center"}
-          href=${href}
-          style="left:${x}%;top:${y}%;--frame:${this.swatch(front)}"
-          aria-label=${this.placardLabel(front, holder)}
-          ><span class="hp-flag ${this.lowContrast(holder) ? "hp-low" : ""}"
-            >${this.emblem(holder)}</span
-          ><span class="hp-mark-text"
-            ><span class="hp-mark-name">${this.label(holder)}</span
-            ><span class="hp-mark-detail">${this.placardDetail(front)}</span
-            >${siege}</span
-          ></a
-        >
-      </li>`;
-    });
-    return html`<svg
-        class="hp-leaders hp-placard-full"
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        aria-hidden="true"
-      >
-        ${leaders}
-      </svg>
-      <ul class="hp-marks" aria-label=${translateText("home_page.map_aria")}>
-        ${placards}${this.renderSeal(model)}
-      </ul>`;
-  }
-
-  private placardDetail(front: RegionFront): string {
-    const name = this.frontName(front.id);
-    const display = frontDisplayState(front, this.now);
-    if (display === "quiet" && front.lastBattleAt !== null) {
-      return translateText("home_page.mark_quiet", {
-        front: name,
-        date: this.date(front.lastBattleAt),
-      });
-    }
-    if (display === "contested") {
-      return translateText("home_page.mark_siege", { front: name });
-    }
-    if (front.heldSince === null) return name;
-    const since = Date.parse(front.heldSince);
-    return Number.isFinite(since) && this.now - since < 24 * 60 * 60 * 1000
-      ? translateText("home_page.mark_taken", {
-          front: name,
-          age: this.age(front.heldSince),
-        })
-      : translateText("home_page.mark_held_since", {
-          front: name,
-          date: this.date(front.heldSince),
-        });
+  /** What the shared placards need from the front page: links to `/world`. */
+  private placardView(): PlacardView {
+    return {
+      now: this.now,
+      label: (name) => this.label(name),
+      colorOf: (name) => this.colorOf(name),
+      swatch: (front) => this.swatch(front),
+      lowContrast: (name) => this.lowContrast(name),
+      emblem: (name) => this.emblem(name),
+      frontName: (id) => this.frontName(id),
+      age: (iso) => this.age(iso),
+      date: (iso) => this.date(iso),
+      target: (id) => ({ href: `/world#front-${id}` }),
+      placardAria: (front, holder) => this.placardLabel(front, holder),
+      openAria: (front) =>
+        translateText("home_page.open_aria", {
+          front: this.frontName(front.id),
+        }),
+      openLine: () => translateText("home_page.never_fought"),
+      sealAria: (crown) => {
+        const holder = crown?.holder ?? null;
+        if (holder === null) {
+          return translateText("home_page.crown_aria_vacant");
+        }
+        return crown !== null &&
+          crown.challenger !== null &&
+          frontDisplayState(crown, this.now) === "contested"
+          ? translateText("home_page.crown_aria_siege", {
+              holder: this.label(holder),
+              challenger: this.label(crown.challenger),
+              wins: crown.holderWins,
+            })
+          : translateText("home_page.crown_aria", {
+              holder: this.label(holder),
+            });
+      },
+    };
   }
 
   private placardLabel(front: RegionFront, holder: string): string {
@@ -1055,77 +867,35 @@ export class HomePage extends LitElement {
     return translateText("home_page.mark_aria_held", params);
   }
 
-  /** The Crown holds no land, so it sits in open water as a seal — never omitted. */
-  private renderSeal(model: WorldModel) {
-    const crown = crownFront(model);
-    const anchor = WORLD_GRID_ANCHORS.crown;
-    const holder = crown?.holder ?? null;
-    return html`<li class="hp-seal-item">
-      <a
-        class="hp-seal"
-        href="/world#front-crown"
-        style="left:${anchor.x}%;top:${anchor.y}%;--ring:${holder === null
-          ? VACANT_RING
-          : this.colorOf(holder)}"
-        aria-label=${holder === null
-          ? translateText("home_page.crown_aria_vacant")
-          : translateText("home_page.crown_aria", {
-              holder: this.label(holder),
-            })}
-        ><span class="hp-seal-disc ${this.lowContrast(holder) ? "hp-low" : ""}"
-          ><span class="hp-seal-crown">${CROWN_GLYPH}</span>${this.emblem(
-            holder,
-          )}</span
-        ><span class="hp-seal-text"
-          ><span class="hp-seal-title"
-            >${translateText("home_page.crown_title")}</span
-          ><span class="hp-seal-name"
-            >${holder === null
-              ? translateText("home_page.crown_vacant")
-              : this.label(holder)}</span
-          ><span class="hp-seal-detail"
-            >${translateText("home_page.crown_note")}</span
-          >${holder !== null && crown?.heldSince
-            ? html`<span class="hp-seal-detail"
-                >${translateText("home_page.crown_taken", {
-                  age: this.age(crown.heldSince),
-                })}</span
-              >`
-            : nothing}</span
-        ></a
-      >
-    </li>`;
-  }
-
   /** How to read the map, with swatches painted like the map itself. */
   private renderKey(model: WorldModel) {
     const siege = clearestSiege(model, (name) => this.colorOf(name), this.now);
     const quiet = frontsInState(model, "quiet", this.now)[0] ?? null;
     const open = frontsInState(model, "unclaimed", this.now).length > 0;
     if (siege === null && quiet === null && !open) return nothing;
-    return html`<p
+    return html`<ul
       class="hp-key"
       aria-label=${translateText("home_page.key_aria")}
     >
       ${siege !== null
-        ? html`<span
-            ><i class="hp-sw" style="--frame:${this.swatch(siege)}"></i
-            >${translateText("home_page.key_siege")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw" style="--frame:${this.swatch(siege)}"></i
+            >${translateText("home_page.key_siege")}
+          </li>`
         : nothing}
       ${quiet !== null
-        ? html`<span
-            ><i class="hp-sw" style="--frame:${this.swatch(quiet)}"></i
-            >${translateText("home_page.key_quiet")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw" style="--frame:${this.swatch(quiet)}"></i
+            >${translateText("home_page.key_quiet")}
+          </li>`
         : nothing}
       ${open
-        ? html`<span
-            ><i class="hp-sw hp-sw-open" style="--frame:${UNCLAIMED_HEX}"></i
-            >${translateText("home_page.key_open")}</span
-          >`
+        ? html`<li>
+            <i class="hp-sw hp-sw-open" style="--frame:${UNCLAIMED_HEX}"></i
+            >${translateText("home_page.key_open")}
+          </li>`
         : nothing}
-    </p>`;
+    </ul>`;
   }
 
   // --------------------------------------------- legend (phone and tablet)
@@ -1240,23 +1010,7 @@ export class HomePage extends LitElement {
   }
 
   private renderEvent(event: WorldEvent) {
-    // "on Pangaea" only when the map is not the front's namesake map.
-    const onMap =
-      battlefieldKey(event.map) !== event.theatreId.replace(/_/g, "");
-    const keys =
-      event.rival !== null || event.kind === "claim"
-        ? EVENT_KEYS[event.kind]
-        : event.kind === "held"
-          ? HELD_UNOPPOSED_KEYS
-          : EVENT_KEYS.claim;
-    const key = onMap ? keys.onMap : keys.plain;
-    const params = {
-      front: this.frontInText(event.theatreId),
-      map: battlefieldName(event.map),
-      wins: event.agentWins,
-      rival: event.rival === null ? "" : this.label(event.rival),
-      rivalWins: event.rivalWins,
-    };
+    const { key, params } = eventSentence(event, (name) => this.label(name));
     const sentence = translateText(key, {
       ...params,
       agent: this.label(event.agent),
@@ -1470,11 +1224,11 @@ export class HomePage extends LitElement {
           ? translateText("home_page.example_tied", {
               wins: front.holderWins,
               holder: this.label(holder),
-              front: this.frontInText(front.id),
+              front: frontInText(front.id),
             })
           : translateText("home_page.example_lead", {
               holder: this.label(holder),
-              front: this.frontInText(front.id),
+              front: frontInText(front.id),
             })}
       </p>
     </figure>`;
@@ -1585,37 +1339,8 @@ const HOME_PAGE_CSS = `
 .hp-map{position:relative;width:100%;aspect-ratio:${WORLD_GRID_WIDTH}/${WORLD_GRID_HEIGHT}}
 .hp-map-canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated}
 .hp-map-link{position:absolute;inset:0;cursor:zoom-in}
-.hp-marks{position:absolute;inset:0;margin:0;padding:0;list-style:none;pointer-events:none}
-.hp-marks a{pointer-events:auto}
-.hp-leaders{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-.hp-leaders line{stroke:var(--hp-ink);stroke-width:1;vector-effect:non-scaling-stroke;opacity:.7}
-.hp-mark{position:absolute;display:flex;align-items:flex-start;gap:8px;width:max-content;max-width:256px;padding:4px 10px 5px 4px;background:var(--hp-plate);color:var(--hp-ink);text-decoration:none;transform:translate(-50%,-50%)}
-.hp-mark[data-align="left"]{transform:translate(calc(-100% - 4px),-50%)}
-.hp-mark[data-align="right"]{transform:translate(4px,-50%)}
-.hp-flag{flex:none;display:block;width:32px;height:32px;padding:3px;background:var(--frame)}
-.hp-flag img{display:block;width:26px;height:26px;image-rendering:pixelated}
-.hp-low{box-shadow:inset 0 0 0 1px var(--hp-ink)}
-.hp-mark-text{display:flex;flex-direction:column;min-width:0;padding-top:1px}
-.hp-mark-name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;line-height:1.15;font-weight:700;text-wrap:balance;overflow-wrap:anywhere}
-.hp-mark-detail{font-size:12px;line-height:1.3;color:var(--hp-ink-2)}
-.hp-mark-siege{display:flex;align-items:center;gap:5px;font-size:12px;line-height:1.3}
-.hp-mark-siege i{flex:none;width:10px;height:10px;background:var(--rival)}
-.hp-mark[data-state="quiet"] .hp-mark-name{color:#cdd4de}
-.hp-mark:hover .hp-mark-name,.hp-open:hover b,.hp-seal:hover .hp-seal-name{text-decoration:underline;text-underline-offset:2px}
-.hp-open{position:absolute;transform:translate(-50%,-50%);text-align:center;text-decoration:none;line-height:1.25;white-space:nowrap}
-.hp-open b{display:block;font-size:13px;font-weight:700}
-.hp-open span{font-size:12px;color:var(--hp-ink-2)}
-.hp-seal{position:absolute;display:flex;align-items:center;gap:12px;text-decoration:none;transform:translate(-32px,-50%)}
-.hp-seal-disc{position:relative;flex:none;display:grid;place-items:center;width:64px;height:64px;border-radius:50%;background:var(--hp-plate);box-shadow:inset 0 0 0 3px var(--ring)}
-.hp-seal-disc.hp-low{box-shadow:inset 0 0 0 3px var(--ring),inset 0 0 0 4px var(--hp-ink)}
-.hp-seal-disc img{width:30px;height:30px;image-rendering:pixelated}
-.hp-seal-crown{position:absolute;left:50%;top:-8px;width:28px;height:14px;padding:0 4px 2px;background:var(--hp-sea);transform:translateX(-50%)}
-.hp-seal-crown svg{display:block;width:100%;height:100%;fill:var(--hp-ink)}
-.hp-seal-text{display:flex;flex-direction:column;max-width:15em;line-height:1.25}
-.hp-seal-title,.hp-seal-detail{font-size:12px;color:var(--hp-ink-2)}
-.hp-seal-name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:15px;font-weight:700;overflow-wrap:anywhere}
 
-.hp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;font-size:14px;color:var(--hp-ink-2)}
+.hp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;padding:0;list-style:none;font-size:14px;color:var(--hp-ink-2)}
 .hp-key-desktop{padding:10px var(--hp-gutter) 0}
 .hp-sw{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:-1px;background:var(--frame)}
 .hp-sw-open{box-shadow:inset 0 0 0 1px #46556c}
@@ -1680,12 +1405,7 @@ const HOME_PAGE_CSS = `
 .hp-as-of{grid-column:1/-1;margin:0;font-size:13px;color:var(--hp-ink-2)}
 
 @media (max-width:1179px){
-  .hp-placard-full,.hp-key-desktop{display:none}
-  .hp-seal{gap:0;transform:translate(-50%,-50%)}
-  .hp-seal-text{display:none}
-  .hp-seal-disc{width:30px;height:30px;box-shadow:inset 0 0 0 2px var(--ring)}
-  .hp-seal-disc img{width:14px;height:14px}
-  .hp-seal-crown{width:16px;height:9px;top:-5px;padding:0 3px 1px}
+  .hp-key-desktop{display:none}
   .hp-legend{display:block;padding:12px var(--hp-gutter) 0}
   .hp-legend-list{columns:2;column-gap:40px}
   .hp-legend-list li{break-inside:avoid}
@@ -1703,9 +1423,6 @@ const HOME_PAGE_CSS = `
   .hp-caveat-more{display:none}
   .hp-hud .hp-row{display:none}
   .hp-clock-phone{display:flex;gap:4px 12px;margin-top:10px}
-  .hp-seal-disc{width:24px;height:24px}
-  .hp-seal-disc img{width:12px;height:12px}
-  .hp-seal-crown{width:14px;height:8px;top:-5px}
   .hp-phone-actions{display:flex;flex-direction:column;gap:10px;padding:14px var(--hp-gutter) 0}
   .hp-phone-actions .hp-btn{min-height:48px;width:100%}
   .hp-legend{padding-top:16px}

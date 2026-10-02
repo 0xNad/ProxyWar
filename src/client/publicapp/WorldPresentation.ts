@@ -1,4 +1,12 @@
-import type { FrontPaint } from "./WorldMapRenderer";
+import {
+  mix,
+  QUIET_AMOUNT,
+  QUIET_RGB,
+  STRIPE_AMOUNT,
+  UNCLAIMED_RGB,
+  type FrontPaint,
+  type Rgb,
+} from "./WorldMapRenderer";
 import type {
   WorldAgent,
   WorldModel,
@@ -200,6 +208,40 @@ export function frontPaints(
   return paints;
 }
 
+export function rgbHex(rgb: Rgb): string {
+  return `#${rgb.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Land no agent holds, as a CSS colour. */
+export const UNCLAIMED_HEX = rgbHex(UNCLAIMED_RGB);
+
+/**
+ * CSS paint for a front's swatch, computed with the renderer's own maths so
+ * a key or legend swatch matches the map: the holder's banner, faded once
+ * quiet, hatched with the challenger's colour while under siege.
+ */
+export function frontSwatch(
+  front: WorldTheatre | null,
+  colorOf: (name: string | null) => string,
+  now: number,
+): string {
+  if (front === null || front.holder === null) return UNCLAIMED_HEX;
+  const display = frontDisplayState(front, now);
+  const holder = hexToRgb(colorOf(front.holder));
+  if (holder === null || display === "unclaimed") return UNCLAIMED_HEX;
+  if (display === "quiet") {
+    return rgbHex(mix(holder, QUIET_RGB, QUIET_AMOUNT));
+  }
+  if (display === "contested") {
+    const rival = hexToRgb(colorOf(front.challenger));
+    if (rival !== null) {
+      const stripe = rgbHex(mix(holder, rival, STRIPE_AMOUNT));
+      return `repeating-linear-gradient(135deg,${stripe} 0 2px,${rgbHex(holder)} 2px 7px)`;
+    }
+  }
+  return rgbHex(holder);
+}
+
 export type FeedState =
   | { kind: "live"; lastBattleAt: string }
   | { kind: "paused"; lastBattleAt: string }
@@ -245,24 +287,6 @@ export function worldVerdict(model: WorldModel): WorldVerdict {
     };
   }
   return { kind: "leader", name: topName, fronts: topCount, claimed };
-}
-
-/** Compact relative time: "just now", "12m", "5h", "3d", or a date past a week. */
-export function relativeAge(
-  iso: string,
-  now: number,
-): { unit: "now" | "m" | "h" | "d" | "date"; value: number; date: Date } {
-  const time = Date.parse(iso);
-  const date = new Date(Number.isFinite(time) ? time : now);
-  const seconds = Math.max(0, Math.round((now - date.getTime()) / 1000));
-  if (seconds < 60) return { unit: "now", value: 0, date };
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return { unit: "m", value: minutes, date };
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return { unit: "h", value: hours, date };
-  const days = Math.round(hours / 24);
-  if (days <= 7) return { unit: "d", value: days, date };
-  return { unit: "date", value: days, date };
 }
 
 export const WORLD_REGION_IDS: readonly WorldTheatreId[] = [

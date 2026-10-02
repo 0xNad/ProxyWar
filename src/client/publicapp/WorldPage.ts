@@ -1,7 +1,12 @@
-import { html, LitElement, nothing, svg, TemplateResult } from "lit";
+import {
+  html,
+  LitElement,
+  nothing,
+  type PropertyValues,
+  type TemplateResult,
+} from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
-import { assetUrl } from "../../core/AssetUrls";
 import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
@@ -9,38 +14,51 @@ import {
   appShellHeader,
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
-import { ensurePublicFonts } from "./PublicFonts";
+import { contrastRatio, type RegionFront } from "./HomePresentation";
+import { renderDispatches } from "./WorldDispatches";
+import { renderDrawer } from "./WorldDrawer";
+import { renderFronts, unclaimedLine } from "./WorldFronts";
+import { renderHistory, type HistoryFocus } from "./WorldHistory";
+import { renderKey, renderLegend } from "./WorldLegend";
 import {
   WORLD_GRID_ANCHORS,
-  WORLD_GRID_GRATICULE,
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
+import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
 import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
-  type WorldBattle,
-  type WorldEvent,
   type WorldModel,
   type WorldTheatre,
   type WorldTheatreId,
 } from "./WorldModelSchema";
+import { ensureWorldStyles } from "./WorldPageStyles";
+import { renderPlacards, type PlacardView } from "./WorldPlacards";
+import { renderPowers } from "./WorldPowers";
 import {
   assignBannerColors,
-  battlefieldKey,
   changedSinceVisit,
   feedState,
   frontDisplayState,
   frontPaints,
+  frontSwatch,
   parseVisitSnapshot,
-  relativeAge,
   visitSnapshot,
   WORLD_REGION_IDS,
   worldVerdict,
-  type FrontDisplayState,
 } from "./WorldPresentation";
-import { battlefieldName } from "./WorldText";
+import { renderRules } from "./WorldRules";
+import {
+  battlefieldName,
+  formatAge,
+  formatDate,
+  formatList,
+  nameMarker,
+  splice,
+} from "./WorldText";
+import { ICONS, type WorldView } from "./WorldView";
 
 /**
  * `/world` — the persistent world map over the league. Every league battle
@@ -56,17 +74,16 @@ import { battlefieldName } from "./WorldText";
 type LoadState = "loading" | "ready" | "error";
 
 const REFRESH_MS = 2 * 60 * 1000;
+/** Ages, live/paused and quiet fronts move with the clock, not only with data. */
+const CLOCK_MS = 30 * 1000;
 const REVEAL_MS = 1400;
 const FRAME_MS = 40;
-const STRIPE_CYCLE_MS = 2600;
 const VISIT_KEY = "proxywar.world.lastVisit";
-const STYLE_ELEMENT_ID = "world-page-styles";
-const DISPATCHES_COLLAPSED = 10;
-/** Invisible-separator markers for names spliced into translated sentences. */
-const NAME_MARKER_PATTERN = /\u2063(\d+)\u2063/;
-function nameMarker(index: number): string {
-  return `\u2063${index}\u2063`;
-}
+/** The map stops growing here; past it the page has margins. */
+const STAGE_MAX_WIDTH = 1440;
+/** The ocean behind the map; banners darker than 3:1 on it get an ink edge. */
+const OCEAN = "#071225";
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 const FRONT_NAME_KEYS: Record<WorldTheatreId, string> = {
   north_america: "world_page.front_north_america",
@@ -80,30 +97,6 @@ const FRONT_NAME_KEYS: Record<WorldTheatreId, string> = {
   east_asia: "world_page.front_east_asia",
   oceania: "world_page.front_oceania",
   crown: "world_page.front_crown",
-};
-
-const STATUS_KEYS: Record<FrontDisplayState, string> = {
-  held: "world_page.status_held",
-  contested: "world_page.status_contested",
-  quiet: "world_page.status_quiet",
-  unclaimed: "world_page.status_unclaimed",
-};
-
-const ICONS = {
-  crown:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 17.5h18l-1.7-9.8-5 4.4L12 4.5l-2.3 7.6-5-4.4z"/><rect x="3" y="19" width="18" height="2.2" rx="1.1" fill="currentColor"/></svg>',
-  swords:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l10 10M20 4L10 14"/><path d="M6.5 15.5l2 2M17.5 15.5l-2 2"/><path d="M4 20l3.5-3.5M20 20l-3.5-3.5"/></svg>',
-  flag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/></svg>',
-  shield:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6z"/><path d="M9 12l2 2 4-4" stroke-linecap="round"/></svg>',
-  pin: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21s-6-5.4-6-11a6 6 0 1 1 12 0c0 5.6-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></svg>',
-  close:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-  globe:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg>',
-  arrow:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
 };
 
 function reducedMotion(): boolean {
@@ -130,17 +123,6 @@ function storageSet(key: string, value: string): void {
   }
 }
 
-/** Overpass ships with the game (`resources/fonts`); the highway-sign face suits map labels. */
-function ensureWorldStyles(): void {
-  if (typeof document === "undefined") return;
-  ensurePublicFonts();
-  if (document.getElementById(STYLE_ELEMENT_ID) !== null) return;
-  const style = document.createElement("style");
-  style.id = STYLE_ELEMENT_ID;
-  style.textContent = WORLD_PAGE_CSS;
-  document.head.appendChild(style);
-}
-
 @customElement("world-page")
 export class WorldPage extends LitElement {
   @state() private loadState: LoadState = "loading";
@@ -150,7 +132,7 @@ export class WorldPage extends LitElement {
   @state() private changed: WorldTheatreId[] = [];
   @state() private sinceVisitAt: string | null = null;
   @state() private dispatchesExpanded = false;
-  @state() private historyIndex: number | null = null;
+  @state() private historyFocus: HistoryFocus | null = null;
   @state() private now = Date.now();
 
   private colors = new Map<string, string>();
@@ -162,12 +144,12 @@ export class WorldPage extends LitElement {
   /** Reveal progress of the last frame actually painted. */
   private paintedReveal = 0;
   private revealTimer: ReturnType<typeof setTimeout> | null = null;
-  private glowKey = "";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private clockTimer: ReturnType<typeof setInterval> | null = null;
   private mapVisible = true;
   private observer: IntersectionObserver | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private returnFocus: HTMLElement | null = null;
-  private centredScroll = false;
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES, "wp-root");
@@ -182,6 +164,9 @@ export class WorldPage extends LitElement {
     this.refreshTimer = setInterval(() => {
       if (document.visibilityState === "visible") void this.load(false);
     }, REFRESH_MS);
+    this.clockTimer = setInterval(() => {
+      if (document.visibilityState === "visible") this.now = Date.now();
+    }, CLOCK_MS);
     window.addEventListener("hashchange", this.onHashChange);
     document.addEventListener("keydown", this.onKeyDown);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
@@ -191,12 +176,16 @@ export class WorldPage extends LitElement {
     super.disconnectedCallback();
     if (this.refreshTimer !== null) clearInterval(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.clockTimer !== null) clearInterval(this.clockTimer);
+    this.clockTimer = null;
     if (this.raf !== 0) cancelAnimationFrame(this.raf);
     this.raf = 0;
     if (this.revealTimer !== null) clearTimeout(this.revealTimer);
     this.revealTimer = null;
     this.observer?.disconnect();
     this.observer = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     window.removeEventListener("hashchange", this.onHashChange);
     document.removeEventListener("keydown", this.onKeyDown);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
@@ -206,8 +195,8 @@ export class WorldPage extends LitElement {
     if (initial) this.loadState = "loading";
     try {
       const model = await fetchWorldModel();
-      if (!initial && this.model?.generatedAt === model.generatedAt) return;
       this.now = Date.now();
+      if (!initial && this.model?.generatedAt === model.generatedAt) return;
       this.colors = assignBannerColors(model);
       this.agents = new Map(model.agents.map((agent) => [agent.name, agent]));
       if (initial) {
@@ -224,6 +213,7 @@ export class WorldPage extends LitElement {
           // map half-revealed.
           this.revealTimer = setTimeout(() => {
             this.revealTimer = null;
+            this.revealStart = 0;
             this.paint(performance.now());
           }, REVEAL_MS + 60);
         }
@@ -231,14 +221,13 @@ export class WorldPage extends LitElement {
       this.model = model;
       this.loadState = "ready";
       if (initial) this.onHashChange();
-      this.glowKey = "";
       document.title = translateText("world_page.document_title");
     } catch {
       if (initial || this.model === null) this.loadState = "error";
     }
   }
 
-  protected updated(): void {
+  protected updated(changed: PropertyValues): void {
     if (this.loadState !== "ready") return;
     const stage = this.querySelector<HTMLElement>(".wp-stage");
     if (
@@ -252,17 +241,63 @@ export class WorldPage extends LitElement {
       });
       this.observer.observe(stage);
     }
-    const scroller = this.querySelector<HTMLElement>(".wp-stage-scroll");
-    if (scroller !== null && !this.centredScroll) {
-      this.centredScroll = true;
-      if (scroller.scrollWidth > scroller.clientWidth) {
-        // Narrow screens pan the map; open on the Old World, where most fronts are.
-        scroller.scrollLeft =
-          (scroller.scrollWidth - scroller.clientWidth) * 0.62;
-      }
+    const wrap = this.querySelector<HTMLElement>(".wp-stage-wrap");
+    if (
+      wrap !== null &&
+      this.resizeObserver === null &&
+      "ResizeObserver" in window
+    ) {
+      this.resizeObserver = new ResizeObserver(() => this.layoutMap());
+      this.resizeObserver.observe(wrap);
+      void document.fonts?.ready.then(() => this.layoutMap());
     }
-    this.paint(performance.now());
+    // Hovering only highlights; anything else may change the text (data,
+    // the clock, translations arriving late), so measure and title again.
+    const hoverOnly =
+      changed.size > 0 &&
+      [...changed.keys()].every(
+        (key) => key === "hoverFront" || key === "historyFocus",
+      );
+    if (!hoverOnly) {
+      this.layoutMap();
+      document.title = translateText("world_page.document_title");
+    }
+    // The map repaints only when what it shows changes.
+    if (
+      changed.has("model") ||
+      changed.has("loadState") ||
+      changed.has("hoverFront") ||
+      changed.has("changed") ||
+      changed.has("now")
+    ) {
+      this.paint(performance.now());
+    }
     this.schedule();
+  }
+
+  /**
+   * Whole tile multiples when the width is close to one, so every tile is
+   * the same size and the siege hatching never shimmers; then labels are
+   * pushed apart where they overlap and kept on screen. The hero clips the
+   * few pixels of ocean a snapped map overhangs.
+   */
+  private layoutMap(): void {
+    const wrap = this.querySelector<HTMLElement>(".wp-stage-wrap");
+    const stage = this.querySelector<HTMLElement>(".wp-stage");
+    if (wrap === null || stage === null) return;
+    const space = wrap.clientWidth;
+    if (space === 0) return;
+    const width = pixelMapWidth(
+      Math.min(space, STAGE_MAX_WIDTH),
+      WORLD_GRID_WIDTH,
+    );
+    stage.style.maxWidth = "none";
+    stage.style.width = `${width}px`;
+    stage.style.marginLeft = `${Math.round((space - width) / 2)}px`;
+    separateLabels(
+      [...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal")],
+      wrap.getBoundingClientRect(),
+    );
   }
 
   // ------------------------------------------------------------------ canvas
@@ -284,17 +319,14 @@ export class WorldPage extends LitElement {
       revealed: (id) => reveal >= (order.indexOf(id) + 1) / order.length,
       changed: reveal >= 1 ? this.changed : [],
     });
-    const phase = reducedMotion()
-      ? 0
-      : (time % STRIPE_CYCLE_MS) / STRIPE_CYCLE_MS;
-    paintWorldFrame(this.image.data, { fronts, focus: this.hoverFront, phase });
+    // A still frame, as on the front page: the reveal is the page's one
+    // motion, and a map that keeps moving claims a liveness nobody measured.
+    paintWorldFrame(this.image.data, {
+      fronts,
+      focus: this.hoverFront,
+      phase: 0,
+    });
     context.putImageData(this.image, 0, 0);
-    const glowKey = `${model.generatedAt}|${this.hoverFront}|${Math.min(1, Math.floor(reveal * 10) / 10)}`;
-    if (glowKey !== this.glowKey) {
-      this.glowKey = glowKey;
-      const glow = this.querySelector<HTMLCanvasElement>("canvas.wp-glow");
-      glow?.getContext("2d")?.putImageData(this.image, 0, 0);
-    }
   }
 
   private revealProgress(time: number): number {
@@ -302,15 +334,10 @@ export class WorldPage extends LitElement {
     return Math.min(1, (time - this.revealStart) / REVEAL_MS);
   }
 
+  /** Only the reveal animates; afterwards the map repaints on change alone. */
   private needsAnimation(time: number): boolean {
     if (reducedMotion() || this.model === null) return false;
-    if (this.revealProgress(time) < 1) return true;
-    if (this.changed.length > 0) return true;
-    return this.model.theatres.some(
-      (theatre) =>
-        theatre.id !== "crown" &&
-        frontDisplayState(theatre, this.now) === "contested",
-    );
+    return this.revealProgress(time) < 1;
   }
 
   private schedule(): void {
@@ -344,6 +371,8 @@ export class WorldPage extends LitElement {
   };
 
   private onStagePointer(event: PointerEvent): void {
+    // Over a placard, the placard's own front stays lit, not the land below.
+    if ((event.target as Element).closest(".hp-marks") !== null) return;
     const stage = event.currentTarget as HTMLElement;
     const rect = stage.getBoundingClientRect();
     const next = theatreAtPoint(
@@ -370,7 +399,16 @@ export class WorldPage extends LitElement {
     const match = /^#front-([a-z_]+)$/.exec(window.location.hash);
     const id = match?.[1] as WorldTheatreId | undefined;
     const known = this.model?.theatres.some((theatre) => theatre.id === id);
-    this.selected = id !== undefined && known === true ? id : null;
+    const next = id !== undefined && known === true ? id : null;
+    if (next === this.selected) return;
+    this.selected = next;
+    // A link straight to a front opens its sheet with focus inside, as a
+    // click does.
+    if (next !== null) {
+      void this.updateComplete.then(() =>
+        this.querySelector<HTMLElement>(".wp-drawer-close")?.focus(),
+      );
+    }
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -402,9 +440,23 @@ export class WorldPage extends LitElement {
 
   // -------------------------------------------------------------- helpers
 
+  /** Always a `#rrggbb` colour: these values are written into style attributes. */
   private bannerColor(name: string | null): string {
     if (name === null) return "#64748b";
-    return this.colors.get(name) ?? this.agents.get(name)?.color ?? "#94a3b8";
+    const color = this.colors.get(name) ?? this.agents.get(name)?.color;
+    return color !== undefined && HEX_COLOR.test(color) ? color : "#94a3b8";
+  }
+
+  /** Below 3:1 on the ocean, a banner swatch gets an ink edge. */
+  private lowContrast(name: string | null): boolean {
+    if (name === null) return false;
+    const ratio = contrastRatio(this.bannerColor(name), OCEAN);
+    return ratio !== null && ratio < 3;
+  }
+
+  /** A front's paint as the map shows it, for swatches. */
+  private swatch(front: WorldTheatre | null): string {
+    return frontSwatch(front, (name) => this.bannerColor(name), this.now);
   }
 
   private label(name: string | null): string {
@@ -421,30 +473,11 @@ export class WorldPage extends LitElement {
   }
 
   private age(iso: string | null): string {
-    if (iso === null) return "—";
-    const age = relativeAge(iso, this.now);
-    switch (age.unit) {
-      case "now":
-        return translateText("world_page.age_now");
-      case "m":
-        return translateText("world_page.age_minutes", { count: age.value });
-      case "h":
-        return translateText("world_page.age_hours", { count: age.value });
-      case "d":
-        return translateText("world_page.age_days", { count: age.value });
-      default:
-        return this.date(iso);
-    }
+    return iso === null ? "—" : formatAge(iso, this.now);
   }
 
   private date(iso: string, withTime = false): string {
-    const time = Date.parse(iso);
-    if (!Number.isFinite(time)) return "—";
-    return new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
-      month: "short",
-      day: "numeric",
-      ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
-    }).format(new Date(time));
+    return formatDate(iso, withTime);
   }
 
   private emblem(name: string | null, size: number): TemplateResult {
@@ -455,8 +488,13 @@ export class WorldPage extends LitElement {
         class="wp-emblem"
         style="--size:${size}px;--banner:${color}"
         aria-hidden="true"
-        >${unsafeSVG(agent.emblemSvg)}</span
-      >`;
+        ><img
+          src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+            agent.emblemSvg,
+          )}"
+          alt=""
+          decoding="async"
+      /></span>`;
     }
     return html`<span
       class="wp-emblem wp-emblem-blank"
@@ -484,16 +522,6 @@ export class WorldPage extends LitElement {
 
   private theatre(id: WorldTheatreId): WorldTheatre | undefined {
     return this.model?.theatres.find((theatre) => theatre.id === id);
-  }
-
-  private thumbnail(theatre: WorldTheatre): string | null {
-    const key = theatre.maps[0]?.map ?? theatre.battlefields[0];
-    if (key === undefined) return null;
-    try {
-      return assetUrl(`maps/${battlefieldKey(key)}/thumbnail.webp`);
-    } catch {
-      return null;
-    }
   }
 
   // -------------------------------------------------------------- render
@@ -536,16 +564,51 @@ export class WorldPage extends LitElement {
   }
 
   private renderWorld(model: WorldModel) {
+    const view = this.view(model);
     return html`
       <main class="wp-main">
-        ${this.renderHero(model)} ${this.renderFronts(model)}
+        ${this.renderHero(model)} ${renderFronts(view)}
         <div class="wp-wrap wp-columns">
-          ${this.renderDispatches(model)} ${this.renderPowers(model)}
+          ${renderDispatches(view, this.dispatchesExpanded, () => {
+            this.dispatchesExpanded = !this.dispatchesExpanded;
+          })}
+          ${renderPowers(view)}
         </div>
-        ${this.renderHistory(model)} ${this.renderRules(model)}
+        ${renderHistory(view, this.historyFocus, (focus) => {
+          // A pointer moving within one reign's day changes nothing.
+          const current = this.historyFocus;
+          if (focus?.day === current?.day && focus?.front === current?.front) {
+            return;
+          }
+          this.historyFocus = focus;
+        })}
+        ${renderRules(view)}
       </main>
-      ${this.selected !== null ? this.renderDrawer(this.selected) : nothing}
+      ${this.selected !== null ? renderDrawer(view, this.selected) : nothing}
     `;
+  }
+
+  /** The page's helpers, for the sections rendered by their own modules. */
+  private view(model: WorldModel): WorldView {
+    return {
+      model,
+      now: this.now,
+      label: (name) => this.label(name),
+      bannerColor: (name) => this.bannerColor(name),
+      lowContrast: (name) => this.lowContrast(name),
+      swatch: (front) => this.swatch(front),
+      emblem: (name, size) => this.emblem(name, size),
+      agentLink: (name, extraClass) => this.agentLink(name, extraClass),
+      frontName: (id) => this.frontName(id),
+      age: (iso) => this.age(iso),
+      date: (iso, withTime) => this.date(iso, withTime),
+      list: (items) => this.list(items),
+      openFront: (id) => this.openFront(id),
+      focusFront: (id) => {
+        this.hoverFront = id;
+      },
+      closeFront: () => this.closeFront(),
+    };
   }
 
   // -------------------------------------------------------------- hero
@@ -572,9 +635,9 @@ export class WorldPage extends LitElement {
         headline = this.withNames(
           "world_page.verdict_tied",
           {
-            names: verdict.names
-              .map((_, index) => nameMarker(index))
-              .join(" & "),
+            names: this.list(
+              verdict.names.map((_, index) => nameMarker(index)),
+            ),
           },
           verdict.names,
         );
@@ -591,22 +654,28 @@ export class WorldPage extends LitElement {
           <div class="wp-eyebrow">
             <span>${translateText("world_page.eyebrow")}</span>
             ${feed.kind === "empty"
-              ? html`<span class="wp-feed wp-feed-paused"
-                  ><i></i>${translateText("world_page.feed_empty")}</span
+              ? html`<span class="wp-feed"
+                  >${translateText("world_page.feed_empty")}</span
                 >`
-              : html`<span
-                  class="wp-feed ${feed.kind === "live"
-                    ? "wp-feed-live"
-                    : "wp-feed-paused"}"
-                  title=${feed.kind === "paused"
-                    ? translateText("world_page.feed_paused_title")
-                    : ""}
-                  ><i></i>${translateText(
-                    feed.kind === "live"
-                      ? "world_page.feed_live"
-                      : "world_page.feed_paused",
-                    { age: this.age(feed.lastBattleAt) },
-                  )}</span
+              : html`<span class="wp-feed"
+                  ><span
+                    class="wp-pill ${feed.kind === "live"
+                      ? "wp-pill-live"
+                      : "wp-pill-paused"}"
+                    >${translateText(
+                      feed.kind === "live"
+                        ? "home_page.live_pill"
+                        : "home_page.paused_pill",
+                    )}</span
+                  >
+                  <span
+                    >${translateText(
+                      feed.kind === "live"
+                        ? "world_page.feed_live"
+                        : "world_page.feed_paused",
+                      { age: this.age(feed.lastBattleAt) },
+                    )}</span
+                  ></span
                 >`}
           </div>
           <h1 id="wp-headline" class="wp-headline">${headline}</h1>
@@ -618,17 +687,18 @@ export class WorldPage extends LitElement {
               })}
             </li>
             <li class=${contested > 0 ? "wp-stat-hot" : ""}>
-              ${unsafeSVG(ICONS.swords)}
               ${translateText("world_page.stat_contested", {
                 count: contested,
               })}
             </li>
             ${crown?.holder
               ? html`<li class="wp-stat-crown">
-                  ${unsafeSVG(ICONS.crown)}
-                  ${translateText("world_page.stat_crown", {
-                    name: this.label(crown.holder),
-                  })}
+                  ${translateText(
+                    frontDisplayState(crown, this.now) === "contested"
+                      ? "world_page.stat_crown_siege"
+                      : "world_page.stat_crown",
+                    { name: this.label(crown.holder) },
+                  )}
                 </li>`
               : nothing}
             ${model.firstBattleAt !== null
@@ -642,7 +712,10 @@ export class WorldPage extends LitElement {
           </ul>
           ${this.renderSinceVisit()}
         </div>
-        ${this.renderMap(model)} ${this.renderPowerBar(model)}
+        ${this.renderMap(model)}
+        <div class="wp-wrap wp-guide">
+          ${renderLegend(this.view(model))} ${renderKey(this.view(model))}
+        </div>
       </section>
     `;
   }
@@ -658,18 +731,22 @@ export class WorldPage extends LitElement {
     params: Record<string, string | number>,
     names: readonly string[],
   ): TemplateResult {
-    const parts = translateText(key, params).split(NAME_MARKER_PATTERN);
-    return html`${parts.map((part, index) => {
-      if (index % 2 === 0) return part;
-      const name = names[Number(part)];
-      return name === undefined
-        ? nothing
-        : html`<span
+    return splice(
+      key,
+      params,
+      names.map(
+        (name) =>
+          html`<span
             class="wp-headline-name"
             style="--banner:${this.bannerColor(name)}"
             >${this.label(name)}</span
-          >`;
-    })}`;
+          >`,
+      ),
+    );
+  }
+
+  private list(items: readonly string[]): string {
+    return formatList(items);
   }
 
   private renderSinceVisit() {
@@ -688,6 +765,7 @@ export class WorldPage extends LitElement {
             html`<button
               type="button"
               class="wp-since-front"
+              aria-haspopup="dialog"
               @click=${() => this.openFront(id)}
             >
               ${this.emblem(this.theatre(id)?.holder ?? null, 16)}
@@ -708,9 +786,8 @@ export class WorldPage extends LitElement {
   }
 
   private renderMap(model: WorldModel) {
-    const crown = model.theatres.find((theatre) => theatre.id === "crown");
     return html`
-      <div class="wp-stage-scroll">
+      <div class="wp-stage-wrap">
         <div
           class="wp-stage"
           @pointermove=${(event: PointerEvent) => this.onStagePointer(event)}
@@ -719,26 +796,6 @@ export class WorldPage extends LitElement {
           }}
           @click=${(event: MouseEvent) => this.onStageClick(event)}
         >
-          <svg
-            class="wp-graticule"
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-            aria-hidden="true"
-          >
-            ${WORLD_GRID_GRATICULE.meridians.map(
-              (x) => svg`<line x1=${x} x2=${x} y1="0" y2="100"></line>`,
-            )}
-            ${WORLD_GRID_GRATICULE.parallels.map(
-              (y) =>
-                svg`<line class=${y === WORLD_GRID_GRATICULE.equator ? "wp-equator" : ""} x1="0" x2="100" y1=${y} y2=${y}></line>`,
-            )}
-          </svg>
-          <canvas
-            class="wp-glow"
-            width=${WORLD_GRID_WIDTH}
-            height=${WORLD_GRID_HEIGHT}
-            aria-hidden="true"
-          ></canvas>
           <canvas
             class="wp-map"
             width=${WORLD_GRID_WIDTH}
@@ -746,1174 +803,108 @@ export class WorldPage extends LitElement {
             role="img"
             aria-label=${translateText("world_page.map_label")}
           ></canvas>
-          <div class="wp-labels">
-            ${WORLD_REGION_IDS.map((id) => {
-              const theatre = model.theatres.find((entry) => entry.id === id);
-              return theatre === undefined
-                ? nothing
-                : this.renderLabel(theatre);
-            })}
-            ${crown !== undefined ? this.renderCrownMedallion(crown) : nothing}
-          </div>
-          <div class="wp-legend" aria-hidden="true">
-            <span
-              ><i class="wp-key-held"></i>${translateText(
-                "world_page.legend_held",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-siege"></i>${translateText(
-                "world_page.legend_siege",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-quiet"></i>${translateText(
-                "world_page.legend_quiet",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-unclaimed"></i>${translateText(
-                "world_page.legend_unclaimed",
-              )}</span
-            >
-          </div>
+          ${renderPlacards(this.placardView(), model)}
         </div>
       </div>
     `;
   }
 
-  private renderLabel(theatre: WorldTheatre) {
-    const anchor = WORLD_GRID_ANCHORS[theatre.id];
-    const display = frontDisplayState(theatre, this.now);
-    const name = this.frontName(theatre.id);
-    const aria =
-      theatre.holder === null
-        ? translateText("world_page.label_aria_unclaimed", { front: name })
-        : display === "contested"
-          ? translateText("world_page.label_aria_contested", {
-              front: name,
-              holder: this.label(theatre.holder),
-              challenger: this.label(theatre.challenger),
+  /**
+   * What the shared placards need from `/world`: each opens its front's
+   * sheet, highlights its front on the map while pointed at, and is marked
+   * when it changed hands since the last visit.
+   */
+  private placardView(): PlacardView {
+    return {
+      now: this.now,
+      label: (name) => this.label(name),
+      colorOf: (name) => this.bannerColor(name),
+      swatch: (front) => this.swatch(front),
+      lowContrast: (name) => this.lowContrast(name),
+      emblem: (name) => this.flag(name),
+      frontName: (id) => this.frontName(id),
+      age: (iso) => this.age(iso),
+      date: (iso) => this.date(iso),
+      target: (id) => ({ open: () => this.openFront(id) }),
+      placardAria: (front, holder) => this.placardAria(front, holder),
+      openAria: (front) =>
+        translateText("world_page.label_aria_unclaimed", {
+          front: this.frontName(front.id),
+        }),
+      openLine: (front) => unclaimedLine(front),
+      sealAria: (crown) => {
+        const holder = crown?.holder ?? null;
+        if (holder === null) {
+          return translateText("world_page.crown_aria_vacant");
+        }
+        return crown !== null &&
+          crown.challenger !== null &&
+          frontDisplayState(crown, this.now) === "contested"
+          ? translateText("world_page.crown_aria_siege", {
+              holder: this.label(holder),
+              challenger: this.label(crown.challenger),
             })
-          : translateText("world_page.label_aria_held", {
-              front: name,
-              holder: this.label(theatre.holder),
+          : translateText("world_page.crown_aria", {
+              holder: this.label(holder),
             });
-    return html`<button
-      type="button"
-      class="wp-label"
-      data-state=${display}
-      ?data-focus=${this.hoverFront === theatre.id}
-      ?data-changed=${this.changed.includes(theatre.id)}
-      style="left:${anchor.x}%;top:${anchor.y}%;--banner:${this.bannerColor(
-        theatre.holder,
-      )};--rival:${this.bannerColor(theatre.challenger)}"
-      aria-label=${aria}
-      @pointerenter=${() => {
-        this.hoverFront = theatre.id;
-      }}
-      @focus=${() => {
-        this.hoverFront = theatre.id;
-      }}
-      @blur=${() => {
-        this.hoverFront = null;
-      }}
-      @click=${(event: Event) => {
-        event.stopPropagation();
-        this.openFront(theatre.id);
-      }}
-    >
-      ${theatre.holder !== null ? this.emblem(theatre.holder, 22) : nothing}
-      <span class="wp-label-text">
-        <span class="wp-label-front">${name}</span>
-        <span class="wp-label-holder"
-          >${theatre.holder === null
-            ? translateText("world_page.label_unclaimed")
-            : this.label(theatre.holder)}</span
-        >
-      </span>
-      ${display === "contested"
-        ? html`<span
-            class="wp-label-siege"
-            title=${this.label(theatre.challenger)}
-            >${unsafeSVG(ICONS.swords)}</span
-          >`
-        : nothing}
-    </button>`;
+      },
+      // The Crown holds no land: there is nothing on the map to light up.
+      focusFront: (id) => {
+        this.hoverFront = id === "crown" ? null : id;
+      },
+      changed: this.changed,
+    };
   }
 
-  private renderCrownMedallion(crown: WorldTheatre) {
-    const anchor = WORLD_GRID_ANCHORS.crown;
-    const display = frontDisplayState(crown, this.now);
-    return html`<button
-      type="button"
-      class="wp-crown"
-      data-state=${display}
-      style="left:${anchor.x}%;top:${anchor.y}%;--banner:${this.bannerColor(
-        crown.holder,
-      )}"
-      aria-label=${crown.holder === null
-        ? translateText("world_page.crown_aria_vacant")
-        : translateText("world_page.crown_aria", {
-            holder: this.label(crown.holder),
-          })}
-      @click=${(event: Event) => {
-        event.stopPropagation();
-        this.openFront("crown");
-      }}
-    >
-      <span class="wp-crown-icon">${unsafeSVG(ICONS.crown)}</span>
-      <span class="wp-crown-ring">${this.emblem(crown.holder, 44)}</span>
-      <span class="wp-crown-title"
-        >${translateText("world_page.crown_title")}</span
-      >
-      <span class="wp-crown-holder"
-        >${crown.holder === null
-          ? translateText("world_page.crown_vacant")
-          : this.label(crown.holder)}</span
-      >
-      ${display === "contested"
-        ? html`<span class="wp-crown-siege"
-            >${unsafeSVG(ICONS.swords)} ${this.label(crown.challenger)}</span
-          >`
-        : html`<span class="wp-crown-sub"
-            >${translateText("world_page.crown_sub")}</span
-          >`}
-    </button>`;
-  }
-
-  private renderPowerBar(model: WorldModel) {
-    const regions = model.theatres.filter((theatre) => theatre.id !== "crown");
-    const counts = new Map<string, number>();
-    for (const theatre of regions) {
-      if (theatre.holder !== null) {
-        counts.set(theatre.holder, (counts.get(theatre.holder) ?? 0) + 1);
-      }
+  private placardAria(front: RegionFront, holder: string): string {
+    const name = this.frontName(front.id);
+    const display = frontDisplayState(front, this.now);
+    if (display === "contested" && front.challenger !== null) {
+      return translateText("world_page.label_aria_contested", {
+        front: name,
+        holder: this.label(holder),
+        challenger: this.label(front.challenger),
+      });
     }
-    const segments = [...counts.entries()].sort(
-      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
-    );
-    const unclaimed =
-      regions.length - segments.reduce((sum, [, n]) => sum + n, 0);
-    return html`<div class="wp-wrap">
-      <div
-        class="wp-powerbar"
-        role="img"
-        aria-label=${translateText("world_page.powerbar_aria", {
-          summary: segments
-            .map(([name, count]) => `${this.label(name)} ${count}`)
-            .join(", "),
-        })}
-      >
-        ${segments.map(
-          ([name, count]) =>
-            html`<span
-              class="wp-power"
-              style="flex-grow:${count};--banner:${this.bannerColor(name)}"
-              title="${this.label(name)} · ${count}"
-            >
-              ${this.emblem(name, 18)}
-              <span class="wp-power-name">${this.label(name)}</span>
-              <b>${count}</b>
-            </span>`,
-        )}
-        ${unclaimed > 0
-          ? html`<span
-              class="wp-power wp-power-unclaimed"
-              style="flex-grow:${unclaimed}"
-              ><span class="wp-power-name"
-                >${translateText("world_page.powerbar_unclaimed")}</span
-              ><b>${unclaimed}</b></span
-            >`
-          : nothing}
-      </div>
-    </div>`;
+    if (display === "quiet" && front.lastBattleAt !== null) {
+      return translateText("world_page.label_aria_quiet", {
+        front: name,
+        holder: this.label(holder),
+        date: this.date(front.lastBattleAt),
+      });
+    }
+    return translateText("world_page.label_aria_held", {
+      front: name,
+      holder: this.label(holder),
+    });
   }
+
+  /** An agent's pixel emblem as an image, as the placards frame it. */
+  private flag(name: string | null): TemplateResult | typeof nothing {
+    const agent = name === null ? undefined : this.agents.get(name);
+    if (!agent?.emblemSvg) return nothing;
+    return html`<img
+      src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+        agent.emblemSvg,
+      )}"
+      alt=""
+      width="26"
+      height="26"
+      decoding="async"
+    />`;
+  }
+
+  // ------------------------------------------------------ legend and key
 
   // -------------------------------------------------------------- fronts
 
-  private renderFronts(model: WorldModel) {
-    const rank: Record<FrontDisplayState, number> = {
-      contested: 0,
-      held: 1,
-      quiet: 2,
-      unclaimed: 3,
-    };
-    const crown = model.theatres.find((theatre) => theatre.id === "crown");
-    const regions = model.theatres
-      .filter((theatre) => theatre.id !== "crown")
-      .sort((a, b) => {
-        const byState =
-          rank[frontDisplayState(a, this.now)] -
-          rank[frontDisplayState(b, this.now)];
-        if (byState !== 0) return byState;
-        return (b.lastBattleAt ?? "").localeCompare(a.lastBattleAt ?? "");
-      });
-    return html`<section
-      class="wp-wrap wp-section"
-      aria-labelledby="wp-fronts-title"
-    >
-      <div class="wp-section-head">
-        <h2 id="wp-fronts-title" class="wp-section-title">
-          ${translateText("world_page.fronts_title")}
-        </h2>
-        <p class="wp-section-intro">
-          ${translateText("world_page.fronts_intro", {
-            window: model.windowSize,
-          })}
-        </p>
-      </div>
-      <ul class="wp-front-grid" role="list">
-        ${crown !== undefined ? this.renderFrontCard(crown, model) : nothing}
-        ${regions.map((theatre) => this.renderFrontCard(theatre, model))}
-      </ul>
-    </section>`;
-  }
-
-  private renderFrontCard(theatre: WorldTheatre, model: WorldModel) {
-    const display = frontDisplayState(theatre, this.now);
-    const name = this.frontName(theatre.id);
-    const thumb = this.thumbnail(theatre);
-    const isCrown = theatre.id === "crown";
-    const emptySlots = Math.max(0, model.windowSize - theatre.window.length);
-    return html`<li
-      class="wp-front ${isCrown ? "wp-front-crown" : ""}"
-      data-state=${display}
-      style="--banner:${this.bannerColor(
-        theatre.holder,
-      )};--rival:${this.bannerColor(theatre.challenger)}"
-    >
-      <button
-        type="button"
-        class="wp-front-hit"
-        aria-label=${translateText("world_page.front_open", { front: name })}
-        @click=${() => this.openFront(theatre.id)}
-      ></button>
-      <div class="wp-front-art" aria-hidden="true">
-        ${thumb !== null
-          ? html`<img
-              src=${thumb}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              @error=${(event: Event) => {
-                (event.target as HTMLElement).hidden = true;
-              }}
-            />`
-          : nothing}
-      </div>
-      <div class="wp-front-body">
-        <div class="wp-front-head">
-          <h3 class="wp-front-name">
-            ${isCrown
-              ? html`<span class="wp-front-crownicon"
-                  >${unsafeSVG(ICONS.crown)}</span
-                >`
-              : nothing}${name}
-          </h3>
-          <span class="wp-chip" data-state=${display}
-            >${translateText(STATUS_KEYS[display])}</span
-          >
-        </div>
-        ${theatre.holder === null
-          ? html`<p class="wp-front-empty">
-              ${translateText("world_page.front_unclaimed_body", {
-                maps: theatre.battlefields
-                  .slice(0, 2)
-                  .map((map) => this.battlefieldName(map))
-                  .join(" / "),
-              })}
-            </p>`
-          : html`<div class="wp-front-holder">
-                ${this.emblem(theatre.holder, 30)}
-                <div class="wp-front-holdertext">
-                  <div class="wp-front-holdername">
-                    ${this.agentLink(theatre.holder)}
-                  </div>
-                  <div class="wp-front-since">
-                    ${theatre.heldSince !== null
-                      ? translateText("world_page.front_held_since", {
-                          date: this.date(theatre.heldSince),
-                        })
-                      : nothing}
-                  </div>
-                </div>
-              </div>
-              <p class="wp-front-line">
-                ${this.contestLine(theatre, display)}
-              </p>`}
-        ${theatre.battleCount > 0
-          ? html`<ol
-              class="wp-form"
-              aria-label=${translateText("world_page.front_form", {
-                count: model.windowSize,
-              })}
-            >
-              ${Array.from(
-                { length: emptySlots },
-                () => html`<li class="wp-form-empty"></li>`,
-              )}
-              ${theatre.window.map((battle) => this.renderFormCell(battle))}
-            </ol>`
-          : nothing}
-        <p class="wp-front-foot">
-          ${theatre.battleCount > 0
-            ? html`${translateText("world_page.front_battles", {
-                count: theatre.battleCount,
-              })}
-              ·
-              ${translateText("world_page.front_last_battle", {
-                age: this.age(theatre.lastBattleAt),
-              })}`
-            : translateText("world_page.front_no_battles")}
-        </p>
-      </div>
-    </li>`;
-  }
-
-  private contestLine(theatre: WorldTheatre, display: FrontDisplayState) {
-    if (theatre.challenger === null) {
-      return translateText("world_page.front_unchallenged", {
-        wins: theatre.holderWins,
-        window: this.model?.windowSize ?? 0,
-      });
-    }
-    if (display === "contested") {
-      return html`<span class="wp-siege-line"
-        >${unsafeSVG(ICONS.swords)}${translateText("world_page.front_level", {
-          challenger: this.label(theatre.challenger),
-          wins: theatre.holderWins,
-        })}</span
-      >`;
-    }
-    return translateText("world_page.front_lead", {
-      holderWins: theatre.holderWins,
-      challengerWins: theatre.challengerWins,
-      challenger: this.label(theatre.challenger),
-    });
-  }
-
-  private renderFormCell(battle: WorldBattle) {
-    const title = `${this.date(battle.at, true)} · ${this.battlefieldName(battle.map)} · ${this.label(battle.winner)}`;
-    return html`<li>
-      <a
-        href=${battle.href}
-        class="wp-form-cell ${battle.winner === null ? "wp-form-nowin" : ""}"
-        style="--c:${this.bannerColor(battle.winner)}"
-        title=${title}
-        aria-label=${title}
-      ></a>
-    </li>`;
-  }
-
   // -------------------------------------------------------------- dispatches
-
-  private renderDispatches(model: WorldModel) {
-    const events = this.dispatchesExpanded
-      ? model.events
-      : model.events.slice(0, DISPATCHES_COLLAPSED);
-    return html`<section class="wp-panel" aria-labelledby="wp-dispatches-title">
-      <h2 id="wp-dispatches-title" class="wp-section-title">
-        ${translateText("world_page.dispatches_title")}
-      </h2>
-      ${model.events.length === 0
-        ? html`<p class="wp-muted">
-            ${translateText("world_page.dispatches_empty")}
-          </p>`
-        : html`<ol class="wp-dispatches" role="list">
-            ${events.map((event) => this.renderDispatch(event, model))}
-          </ol>`}
-      ${model.events.length > DISPATCHES_COLLAPSED
-        ? html`<button
-            type="button"
-            class="wp-more"
-            @click=${() => {
-              this.dispatchesExpanded = !this.dispatchesExpanded;
-            }}
-          >
-            ${this.dispatchesExpanded
-              ? translateText("world_page.dispatches_less")
-              : translateText("world_page.dispatches_more", {
-                  count: model.events.length,
-                })}
-          </button>`
-        : nothing}
-    </section>`;
-  }
-
-  private renderDispatch(event: WorldEvent, model: WorldModel) {
-    const front = this.frontName(event.theatreId);
-    const agent = this.label(event.agent);
-    const rival = this.label(event.rival);
-    const isCrown = event.theatreId === "crown";
-    let icon: string;
-    let title: string;
-    let detail: string;
-    switch (event.kind) {
-      case "conquest":
-        title = isCrown
-          ? translateText("world_page.event_conquest_crown", { agent, rival })
-          : translateText("world_page.event_conquest", { agent, front, rival });
-        detail = translateText("world_page.event_detail_conquest", {
-          agentWins: event.agentWins,
-          rivalWins: event.rivalWins,
-          window: model.windowSize,
-        });
-        icon = isCrown ? ICONS.crown : ICONS.flag;
-        break;
-      case "siege":
-        title = translateText("world_page.event_siege", { agent, front });
-        detail = translateText("world_page.event_detail_siege", {
-          rival,
-          wins: event.agentWins,
-        });
-        icon = ICONS.swords;
-        break;
-      case "held":
-        title = translateText("world_page.event_held", { agent, front });
-        detail = translateText("world_page.event_detail_held", {
-          rival,
-          agentWins: event.agentWins,
-          rivalWins: event.rivalWins,
-        });
-        icon = ICONS.shield;
-        break;
-      default:
-        title = translateText("world_page.event_claim", { agent, front });
-        detail = translateText("world_page.event_detail_claim");
-        icon = ICONS.pin;
-    }
-    return html`<li
-      class="wp-dispatch"
-      data-kind=${event.kind}
-      style="--banner:${this.bannerColor(event.agent)}"
-    >
-      <span class="wp-dispatch-icon">${unsafeSVG(icon)}</span>
-      <div class="wp-dispatch-body">
-        <p class="wp-dispatch-title">${title}</p>
-        <p class="wp-dispatch-detail">
-          ${detail} · ${this.battlefieldName(event.map)}
-        </p>
-      </div>
-      <div class="wp-dispatch-meta">
-        <time datetime=${event.at} title=${this.date(event.at, true)}
-          >${this.age(event.at)}</time
-        >
-        <a href=${event.href} class="wp-dispatch-link"
-          >${translateText("world_page.event_battle_link")}${unsafeSVG(
-            ICONS.arrow,
-          )}</a
-        >
-      </div>
-    </li>`;
-  }
 
   // -------------------------------------------------------------- powers
 
-  private renderPowers(model: WorldModel) {
-    const crownHolder = this.theatre("crown")?.holder ?? null;
-    const rows = model.agents
-      .filter(
-        (agent) =>
-          agent.theatres.some((id) => id !== "crown") ||
-          agent.name === crownHolder,
-      )
-      .concat(
-        model.agents
-          .filter(
-            (agent) =>
-              !agent.theatres.some((id) => id !== "crown") &&
-              agent.name !== crownHolder,
-          )
-          .sort(
-            (a, b) => b.conquests - a.conquests || b.battlesWon - a.battlesWon,
-          )
-          .slice(0, 4),
-      );
-    return html`<section class="wp-panel" aria-labelledby="wp-powers-title">
-      <h2 id="wp-powers-title" class="wp-section-title">
-        ${translateText("world_page.powers_title")}
-      </h2>
-      <table class="wp-powers">
-        <thead>
-          <tr>
-            <th scope="col">${translateText("world_page.powers_agent")}</th>
-            <th scope="col">${translateText("world_page.powers_fronts")}</th>
-            <th scope="col" class="wp-num wp-powers-conquests">
-              ${translateText("world_page.powers_conquests")}
-            </th>
-            <th scope="col" class="wp-num">
-              ${translateText("world_page.powers_wins")}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((agent) => {
-            const fronts = agent.theatres.filter((id) => id !== "crown");
-            return html`<tr style="--banner:${this.bannerColor(agent.name)}">
-              <th scope="row">
-                <span class="wp-power-agent">
-                  ${this.emblem(agent.name, 26)} ${this.agentLink(agent.name)}
-                  ${agent.name === crownHolder
-                    ? html`<span
-                        class="wp-power-crown"
-                        title=${translateText("world_page.powers_crown")}
-                        >${unsafeSVG(ICONS.crown)}</span
-                      >`
-                    : nothing}
-                </span>
-              </th>
-              <td>
-                ${fronts.length === 0
-                  ? html`<span class="wp-muted">—</span>`
-                  : html`<span class="wp-front-chips"
-                      >${fronts.map(
-                        (id) =>
-                          html`<button
-                            type="button"
-                            class="wp-front-chip"
-                            @click=${() => this.openFront(id)}
-                          >
-                            ${this.frontName(id)}
-                          </button>`,
-                      )}</span
-                    >`}
-              </td>
-              <td class="wp-num wp-powers-conquests">${agent.conquests}</td>
-              <td class="wp-num">${agent.battlesWon}</td>
-            </tr>`;
-          })}
-        </tbody>
-      </table>
-    </section>`;
-  }
-
   // -------------------------------------------------------------- history
-
-  private renderHistory(model: WorldModel) {
-    const days = model.timeline;
-    if (days.length < 2) return nothing;
-    const regionIds = WORLD_REGION_IDS as readonly string[];
-    const totals = new Map<string, number>();
-    for (const day of days) {
-      for (const [id, holder] of Object.entries(day.holders)) {
-        if (holder === null || !regionIds.includes(id)) continue;
-        totals.set(holder, (totals.get(holder) ?? 0) + 1);
-      }
-    }
-    const top = [...totals.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, 8)
-      .map(([name]) => name);
-    const series = [...top, "__others"];
-    const width = 1000;
-    const height = 220;
-    const n = days.length;
-    const x = (i: number) => (n === 1 ? 0 : (i / (n - 1)) * width);
-    const y = (value: number) => height - (value / regionIds.length) * height;
-    const stacks: number[][] = days.map((day) => {
-      const counts = series.map(() => 0);
-      for (const [id, holder] of Object.entries(day.holders)) {
-        if (holder === null || !regionIds.includes(id)) continue;
-        const index = top.indexOf(holder);
-        counts[index === -1 ? series.length - 1 : index] += 1;
-      }
-      return counts;
-    });
-    const layers = series.map((name, s) => {
-      const lower = stacks.map((counts) =>
-        counts.slice(0, s).reduce((a, b) => a + b, 0),
-      );
-      const upper = stacks.map((counts, i) => lower[i] + counts[s]);
-      let d = `M${x(0)},${y(upper[0])}`;
-      for (let i = 1; i < n; i++)
-        d += ` L${x(i).toFixed(1)},${y(upper[i]).toFixed(1)}`;
-      for (let i = n - 1; i >= 0; i--)
-        d += ` L${x(i).toFixed(1)},${y(lower[i]).toFixed(1)}`;
-      return { name, d: `${d} Z` };
-    });
-    const crownColor = (holder: string | null | undefined) =>
-      holder ? this.bannerColor(holder) : "rgba(148,163,184,0.18)";
-    const hover = this.historyIndex;
-    const hoverDay = hover === null ? null : days[hover];
-    return html`<section
-      class="wp-wrap wp-section"
-      aria-labelledby="wp-history-title"
-    >
-      <div class="wp-section-head">
-        <h2 id="wp-history-title" class="wp-section-title">
-          ${translateText("world_page.history_title")}
-        </h2>
-        <p class="wp-section-intro">
-          ${translateText("world_page.history_intro")}
-        </p>
-      </div>
-      <div class="wp-history">
-        <div class="wp-history-chart">
-          <svg
-            viewBox="0 0 ${width} ${height + 26}"
-            preserveAspectRatio="none"
-            role="img"
-            aria-label=${translateText("world_page.history_aria")}
-            @pointermove=${(event: PointerEvent) => {
-              const rect = (
-                event.currentTarget as SVGElement
-              ).getBoundingClientRect();
-              const index = Math.round(
-                ((event.clientX - rect.left) / rect.width) * (n - 1),
-              );
-              this.historyIndex = Math.max(0, Math.min(n - 1, index));
-            }}
-            @pointerleave=${() => {
-              this.historyIndex = null;
-            }}
-          >
-            ${days.map(
-              (day, i) =>
-                svg`<rect x=${x(i) - width / n / 2} y="0" width=${width / n + 0.5} height="12" style="fill:${crownColor(day.holders.crown)}"></rect>`,
-            )}
-            <g transform="translate(0 26)">
-              ${[0.25, 0.5, 0.75].map(
-                (f) =>
-                  svg`<line class="wp-history-grid" x1="0" x2=${width} y1=${height * f} y2=${height * f}></line>`,
-              )}
-              ${layers.map(
-                (layer) =>
-                  svg`<path d=${layer.d} style="fill:${layer.name === "__others" ? "rgba(148,163,184,0.28)" : this.bannerColor(layer.name)}" class="wp-history-layer"></path>`,
-              )}
-              ${hover !== null
-                ? svg`<line class="wp-history-cursor" x1=${x(hover)} x2=${x(hover)} y1="0" y2=${height}></line>`
-                : nothing}
-            </g>
-          </svg>
-          <div class="wp-history-axis">
-            <span>${this.date(days[0].day + "T12:00:00Z")}</span>
-            <span>${this.date(days[n - 1].day + "T12:00:00Z")}</span>
-          </div>
-          ${hoverDay !== null && hover !== null
-            ? html`<div
-                class="wp-history-tip"
-                style="left:${Math.min(
-                  86,
-                  Math.max(14, (hover / Math.max(1, n - 1)) * 100),
-                )}%"
-              >
-                <b>${this.date(hoverDay.day + "T12:00:00Z")}</b>
-                ${hoverDay.holders.crown
-                  ? html`<span class="wp-tip-row"
-                      >${unsafeSVG(ICONS.crown)}
-                      ${this.label(hoverDay.holders.crown)}</span
-                    >`
-                  : nothing}
-                ${this.tipRows(hoverDay.holders)}
-              </div>`
-            : nothing}
-        </div>
-        <ul class="wp-history-legend" role="list">
-          <li>
-            <i class="wp-legend-crown"></i>${translateText(
-              "world_page.history_crown",
-            )}
-          </li>
-          ${top.map(
-            (name) =>
-              html`<li>
-                <i style="background:${this.bannerColor(name)}"></i
-                >${this.label(name)}
-              </li>`,
-          )}
-          ${totals.size > top.length
-            ? html`<li>
-                <i class="wp-legend-others"></i>${translateText(
-                  "world_page.history_others",
-                )}
-              </li>`
-            : nothing}
-        </ul>
-      </div>
-    </section>`;
-  }
-
-  private tipRows(holders: Record<string, string | null>) {
-    const counts = new Map<string, number>();
-    for (const [id, holder] of Object.entries(holders)) {
-      if (holder === null || id === "crown") continue;
-      counts.set(holder, (counts.get(holder) ?? 0) + 1);
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(
-        ([name, count]) =>
-          html`<span class="wp-tip-row"
-            ><i style="background:${this.bannerColor(name)}"></i>${this.label(
-              name,
-            )} <b>${count}</b></span
-          >`,
-      );
-  }
 
   // -------------------------------------------------------------- rules
 
-  private renderRules(model: WorldModel) {
-    return html`<section
-      class="wp-wrap wp-section"
-      aria-labelledby="wp-rules-title"
-    >
-      <div class="wp-section-head">
-        <h2 id="wp-rules-title" class="wp-section-title">
-          ${translateText("world_page.rules_title")}
-        </h2>
-      </div>
-      <div class="wp-rules">
-        <article class="wp-rule">
-          <span class="wp-rule-icon">${unsafeSVG(ICONS.pin)}</span>
-          <h3>${translateText("world_page.rule_place_title")}</h3>
-          <p>${translateText("world_page.rule_place_body")}</p>
-        </article>
-        <article class="wp-rule">
-          <span class="wp-rule-icon">${unsafeSVG(ICONS.flag)}</span>
-          <h3>
-            ${translateText("world_page.rule_window_title", {
-              window: model.windowSize,
-            })}
-          </h3>
-          <p>
-            ${translateText("world_page.rule_window_body", {
-              window: model.windowSize,
-            })}
-          </p>
-        </article>
-        <article class="wp-rule">
-          <span class="wp-rule-icon wp-rule-icon-crown"
-            >${unsafeSVG(ICONS.crown)}</span
-          >
-          <h3>${translateText("world_page.rule_crown_title")}</h3>
-          <p>${translateText("world_page.rule_crown_body")}</p>
-        </article>
-      </div>
-      ${model.firstBattleAt !== null
-        ? html`<p class="wp-data-note">
-            ${translateText("world_page.data_note", {
-              count: model.battleCount,
-              date: this.date(model.firstBattleAt),
-            })}
-          </p>`
-        : nothing}
-    </section>`;
-  }
-
   // -------------------------------------------------------------- drawer
-
-  private renderDrawer(id: WorldTheatreId) {
-    const theatre = this.theatre(id);
-    const model = this.model;
-    if (theatre === undefined || model === null) return nothing;
-    const display = frontDisplayState(theatre, this.now);
-    const name = this.frontName(id);
-    const thumb = this.thumbnail(theatre);
-    const maxTally = Math.max(1, ...theatre.tallies.map((tally) => tally.wins));
-    const reign = theatre.reigns.find((entry) => entry.to === null);
-    return html`<div
-        class="wp-drawer-backdrop"
-        @click=${() => this.closeFront()}
-      ></div>
-      <aside
-        class="wp-drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="wp-drawer-title"
-        data-state=${display}
-        style="--banner:${this.bannerColor(
-          theatre.holder,
-        )};--rival:${this.bannerColor(theatre.challenger)}"
-      >
-        <div class="wp-drawer-art" aria-hidden="true">
-          ${thumb !== null
-            ? html`<img
-                src=${thumb}
-                alt=""
-                @error=${(event: Event) => {
-                  (event.target as HTMLElement).hidden = true;
-                }}
-              />`
-            : nothing}
-        </div>
-        <header class="wp-drawer-head">
-          <div>
-            <span class="wp-chip" data-state=${display}
-              >${translateText(STATUS_KEYS[display])}</span
-            >
-            <h2 id="wp-drawer-title" class="wp-drawer-title">${name}</h2>
-          </div>
-          <button
-            type="button"
-            class="wp-drawer-close"
-            aria-label=${translateText("world_page.detail_close")}
-            @click=${() => this.closeFront()}
-          >
-            ${unsafeSVG(ICONS.close)}
-          </button>
-        </header>
-        <div class="wp-drawer-body">
-          ${theatre.holder === null
-            ? html`<p class="wp-front-empty">
-                ${translateText("world_page.front_unclaimed_body", {
-                  maps: theatre.battlefields
-                    .slice(0, 2)
-                    .map((map) => this.battlefieldName(map))
-                    .join(" / "),
-                })}
-              </p>`
-            : html`<div class="wp-drawer-holder">
-                  ${this.emblem(theatre.holder, 56)}
-                  <div>
-                    <div class="wp-kicker">
-                      ${translateText("world_page.detail_holder")}
-                    </div>
-                    <div class="wp-drawer-holdername">
-                      ${this.agentLink(theatre.holder)}
-                    </div>
-                    <div class="wp-front-since">
-                      ${theatre.heldSince !== null
-                        ? translateText("world_page.front_held_since", {
-                            date: this.date(theatre.heldSince),
-                          })
-                        : nothing}
-                      ${reign !== undefined
-                        ? html` ·
-                          ${translateText("world_page.detail_reign", {
-                            wins: reign.wins,
-                            battles: reign.battles,
-                          })}`
-                        : nothing}
-                    </div>
-                  </div>
-                </div>
-                <p class="wp-front-line">
-                  ${this.contestLine(theatre, display)}
-                </p>`}
-          ${theatre.tallies.length > 0
-            ? html`<h3 class="wp-drawer-sub">
-                  ${translateText("world_page.detail_tally", {
-                    window: model.windowSize,
-                  })}
-                </h3>
-                <ul class="wp-tally" role="list">
-                  ${theatre.tallies.map(
-                    (tally) =>
-                      html`<li style="--banner:${this.bannerColor(tally.name)}">
-                        <span class="wp-tally-name"
-                          >${this.emblem(tally.name, 18)}
-                          ${this.agentLink(tally.name)}</span
-                        >
-                        <span class="wp-tally-bar"
-                          ><i
-                            style="width:${(tally.wins / maxTally) * 100}%"
-                          ></i
-                        ></span>
-                        <b>${tally.wins}</b>
-                      </li>`,
-                  )}
-                </ul>`
-            : nothing}
-          ${theatre.window.length > 0
-            ? html`<h3 class="wp-drawer-sub">
-                  ${translateText("world_page.detail_battles", {
-                    count: theatre.window.length,
-                  })}
-                </h3>
-                <ol class="wp-battles" role="list">
-                  ${[...theatre.window].reverse().map(
-                    (battle) =>
-                      html`<li
-                        style="--banner:${this.bannerColor(battle.winner)}"
-                      >
-                        <a href=${battle.href} class="wp-battle">
-                          <span class="wp-battle-when"
-                            >${this.date(battle.at, true)}</span
-                          >
-                          <span class="wp-battle-map"
-                            >${this.battlefieldName(battle.map)}</span
-                          >
-                          <span class="wp-battle-winner"
-                            >${battle.winner !== null
-                              ? this.emblem(battle.winner, 16)
-                              : nothing}
-                            ${this.label(battle.winner)}</span
-                          >
-                          <span class="wp-battle-go"
-                            >${unsafeSVG(ICONS.arrow)}</span
-                          >
-                        </a>
-                      </li>`,
-                  )}
-                </ol>`
-            : nothing}
-          ${theatre.reigns.length > 0
-            ? html`<h3 class="wp-drawer-sub">
-                  ${translateText("world_page.detail_reigns")}
-                </h3>
-                <ol class="wp-reigns" role="list">
-                  ${theatre.reigns.map(
-                    (entry) =>
-                      html`<li
-                        style="--banner:${this.bannerColor(entry.holder)}"
-                      >
-                        ${this.emblem(entry.holder, 20)}
-                        <span class="wp-reign-name"
-                          >${this.label(entry.holder)}</span
-                        >
-                        <span class="wp-reign-span"
-                          >${this.date(entry.from)} –
-                          ${entry.to === null
-                            ? translateText("world_page.detail_reign_now")
-                            : this.date(entry.to)}</span
-                        >
-                        <span class="wp-reign-record"
-                          >${translateText("world_page.detail_reign", {
-                            wins: entry.wins,
-                            battles: entry.battles,
-                          })}</span
-                        >
-                      </li>`,
-                  )}
-                </ol>`
-            : nothing}
-          ${theatre.maps.length > 0
-            ? html`<p class="wp-drawer-maps">
-                ${translateText("world_page.detail_battlefields", {
-                  maps: theatre.maps
-                    .map(
-                      (entry) =>
-                        `${this.battlefieldName(entry.map)} (${entry.battles})`,
-                    )
-                    .join(", "),
-                })}
-              </p>`
-            : nothing}
-        </div>
-      </aside>`;
-  }
 }
-
-const WORLD_PAGE_CSS = `
-.wp-root{--wp-ocean:#071225;--wp-ink:#edf1f7;--wp-dim:#a4afbf;--wp-faint:#6f7d90;--wp-line:rgba(148,170,200,.14);--wp-glass:rgba(8,15,28,.78);--wp-gold:#f5c45e;--wp-display:"PW Overpass",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
-.wp-main{display:block;padding-bottom:3rem}
-.wp-wrap{width:100%;max-width:1240px;margin:0 auto;padding-inline:clamp(16px,3vw,28px)}
-.wp-loading{display:flex;align-items:center;justify-content:center;gap:.75rem;min-height:60vh;color:var(--wp-dim);font:600 14px/1 var(--wp-display);letter-spacing:.08em;text-transform:uppercase}
-.wp-loading-globe{width:28px;height:28px;color:var(--color-info,#56c7f5);animation:wp-spin 3s linear infinite}
-@keyframes wp-spin{to{transform:rotate(360deg)}}
-.wp-hero{position:relative;padding:clamp(20px,3vw,36px) 0 28px;background:radial-gradient(120% 90% at 50% -10%,#14305a 0%,#0b1a33 38%,#071225 70%,#050c19 100%);border-bottom:1px solid var(--wp-line);overflow:hidden}
-.wp-hero::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(60% 50% at 50% 55%,transparent 60%,rgba(3,7,15,.55) 100%)}
-.wp-hero-head{position:relative;z-index:2}
-.wp-eyebrow{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;font:700 11px/1.2 var(--wp-display);letter-spacing:.16em;text-transform:uppercase;color:var(--wp-dim)}
-.wp-feed{display:inline-flex;align-items:center;gap:.45rem;padding:.3rem .6rem;border-radius:999px;border:1px solid var(--wp-line);letter-spacing:.08em}
-.wp-feed i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
-.wp-feed-live{color:#fecaca;border-color:rgba(239,68,68,.5)}
-.wp-feed-live i{background:#ef4444;box-shadow:0 0 0 0 rgba(239,68,68,.6);animation:wp-ping 1.8s ease-out infinite}
-.wp-feed-paused{color:#fbd38d;border-color:rgba(251,191,36,.4)}
-@keyframes wp-ping{0%{box-shadow:0 0 0 0 rgba(239,68,68,.6)}80%,100%{box-shadow:0 0 0 7px rgba(239,68,68,0)}}
-.wp-headline{margin:.55rem 0 0;font:700 clamp(30px,5.2vw,62px)/1.02 var(--wp-display);letter-spacing:-.01em;color:var(--wp-ink);text-wrap:balance;max-width:20ch}
-.wp-headline-name{color:var(--banner);text-shadow:0 0 28px color-mix(in srgb,var(--banner) 45%,transparent)}
-.wp-stats{display:flex;flex-wrap:wrap;gap:.5rem;margin:1rem 0 0;padding:0;list-style:none}
-.wp-stats li{display:inline-flex;align-items:center;gap:.4rem;padding:.4rem .7rem;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--wp-line);font-size:13px;color:var(--wp-dim);font-variant-numeric:tabular-nums}
-.wp-stats li svg{width:15px;height:15px}
-.wp-stat-hot{color:#fecaca!important;border-color:rgba(239,68,68,.35)!important}
-.wp-stat-crown{color:var(--wp-gold)!important;border-color:rgba(245,196,94,.35)!important}
-.wp-since{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem;margin-top:1rem;padding:.6rem .8rem;border-radius:10px;background:rgba(245,196,94,.08);border:1px solid rgba(245,196,94,.32);font-size:13.5px;color:var(--wp-ink)}
-.wp-since-dot{width:8px;height:8px;border-radius:50%;background:var(--wp-gold);box-shadow:0 0 12px var(--wp-gold)}
-.wp-since-list{display:flex;flex-wrap:wrap;gap:.35rem}
-.wp-since-front{display:inline-flex;align-items:center;gap:.35rem;padding:.2rem .5rem;border-radius:999px;border:1px solid var(--wp-line);background:rgba(0,0,0,.25);color:var(--wp-ink);font-size:12.5px;cursor:pointer}
-.wp-since-front:hover{border-color:rgba(245,196,94,.6)}
-.wp-since-dismiss{margin-left:auto;background:none;border:0;color:var(--wp-dim);font-size:12.5px;text-decoration:underline;cursor:pointer}
-.wp-stage-scroll{position:relative;z-index:1;margin-top:clamp(14px,2vw,22px);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:rgba(148,170,200,.25) transparent}
-.wp-stage{position:relative;width:100%;max-width:1440px;margin:0 auto;aspect-ratio:500/218;min-width:760px;user-select:none;-webkit-user-select:none;touch-action:pan-x pan-y}
-.wp-graticule{position:absolute;inset:0;width:100%;height:100%}
-.wp-graticule line{stroke:rgba(140,175,230,.09);stroke-width:.12;vector-effect:non-scaling-stroke}
-.wp-graticule .wp-equator{stroke:rgba(140,175,230,.18);stroke-dasharray:4 6}
-.wp-stage canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges}
-.wp-glow{filter:blur(12px) saturate(1.5) brightness(1.15);opacity:.5;transform:scale(1.012)}
-.wp-map{filter:drop-shadow(0 1px 0 rgba(0,0,0,.55)) drop-shadow(0 0 6px rgba(0,0,0,.35))}
-.wp-labels{position:absolute;inset:0;pointer-events:none}
-.wp-label{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;align-items:center;gap:.45rem;padding:.28rem .7rem .28rem .3rem;border-radius:999px;background:var(--wp-glass);border:1px solid color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 8px 22px -10px rgba(0,0,0,.9);color:var(--wp-ink);font-family:var(--wp-display);white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);transition:transform .18s ease,box-shadow .18s ease,opacity .3s;animation:wp-rise .5s ease both;animation-delay:1.1s}
-.wp-label:hover,.wp-label[data-focus]{transform:translate(-50%,-50%) scale(1.06);z-index:3;box-shadow:0 10px 26px -10px rgba(0,0,0,.9),0 0 0 1px var(--banner),0 0 22px -4px color-mix(in srgb,var(--banner) 60%,transparent)}
-.wp-label:focus-visible{outline:2px solid #fff;outline-offset:2px}
-.wp-label[data-state="unclaimed"]{border-style:dashed;border-color:rgba(148,163,184,.4);padding-left:.7rem;opacity:.72}
-.wp-label[data-state="quiet"]{opacity:.78;border-style:dashed}
-.wp-label[data-changed]{box-shadow:0 0 0 2px rgba(255,244,214,.85),0 0 24px rgba(245,196,94,.5)}
-@keyframes wp-rise{from{opacity:0;transform:translate(-50%,-30%)}to{opacity:1}}
-.wp-label-text{display:flex;flex-direction:column;line-height:1.05}
-.wp-label-front{font-size:9px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--wp-dim)}
-.wp-label-holder{font-size:12.5px;font-weight:700;max-width:15ch;overflow:hidden;text-overflow:ellipsis}
-.wp-label-siege{display:inline-flex;width:18px;height:18px;padding:3px;border-radius:50%;background:var(--rival);color:#0b1220;animation:wp-throb 1.6s ease-in-out infinite}
-.wp-label-siege svg{width:100%;height:100%}
-@keyframes wp-throb{50%{transform:scale(1.15)}}
-.wp-emblem{display:inline-flex;align-items:center;justify-content:center;width:var(--size);height:var(--size);flex:none;border-radius:50%;overflow:hidden;background:rgba(0,0,0,.35);box-shadow:0 0 0 2px var(--banner)}
-.wp-emblem svg{width:100%;height:100%;display:block}
-.wp-emblem-blank{background:var(--banner);color:#0b1220;font:700 calc(var(--size)*.5)/1 var(--wp-display)}
-.wp-crown{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:.1rem;width:132px;padding:.55rem .5rem .6rem;border-radius:18px;background:radial-gradient(circle at 50% 22%,rgba(245,196,94,.16),rgba(8,15,28,.85) 62%);border:1px solid rgba(245,196,94,.45);box-shadow:0 18px 40px -18px rgba(0,0,0,.95),inset 0 1px 0 rgba(255,255,255,.06);color:var(--wp-ink);font-family:var(--wp-display);cursor:pointer;text-align:center;animation:wp-rise .6s ease both;animation-delay:1.2s;transition:transform .18s ease}
-.wp-crown:hover{transform:translate(-50%,-50%) scale(1.04)}
-.wp-crown-icon{width:26px;height:26px;color:var(--wp-gold);filter:drop-shadow(0 0 8px rgba(245,196,94,.6))}
-.wp-crown-ring{padding:3px;border-radius:50%;background:conic-gradient(from 210deg,#f5c45e,#fff3c4,#c8932f,#f5c45e);margin:.15rem 0 .2rem}
-.wp-crown-ring .wp-emblem{box-shadow:none}
-.wp-crown-title{font-size:9px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--wp-gold)}
-.wp-crown-holder{font-size:13.5px;font-weight:700;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-crown-sub{font-size:10px;color:var(--wp-faint)}
-.wp-crown-siege{display:inline-flex;align-items:center;gap:.25rem;font-size:10.5px;color:#fecaca}
-.wp-crown-siege svg{width:12px;height:12px}
-.wp-legend{position:absolute;left:1.2%;bottom:3%;display:flex;flex-wrap:wrap;gap:.35rem .9rem;max-width:46%;padding:.45rem .7rem;border-radius:10px;background:rgba(5,10,20,.6);border:1px solid var(--wp-line);font-size:11px;color:var(--wp-dim);pointer-events:none;backdrop-filter:blur(4px)}
-.wp-legend span{display:inline-flex;align-items:center;gap:.35rem;white-space:nowrap}
-.wp-legend i{display:inline-block;width:16px;height:10px;border-radius:2px}
-.wp-key-held{background:linear-gradient(90deg,#ff9a3d,#5d8cf0)}
-.wp-key-siege{background:repeating-linear-gradient(-45deg,#ff5d5b 0 3px,#3ab8f5 3px 6px)}
-.wp-key-quiet{background:#52606f}
-.wp-key-unclaimed{background:#28323f;outline:1px dashed rgba(148,163,184,.45)}
-.wp-powerbar{display:flex;gap:3px;margin-top:18px;height:38px;border-radius:12px;overflow:hidden;background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 1px var(--wp-line)}
-.wp-power{display:flex;align-items:center;gap:.4rem;min-width:0;padding:0 .55rem;background:linear-gradient(180deg,color-mix(in srgb,var(--banner) 92%,#fff),var(--banner));color:#0b1220;font:700 12.5px/1 var(--wp-display);transition:flex-grow .6s ease}
-.wp-power .wp-emblem{box-shadow:0 0 0 1.5px rgba(11,18,32,.55)}
-.wp-power-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.wp-power b{margin-left:auto;font-variant-numeric:tabular-nums}
-.wp-power-unclaimed{background:repeating-linear-gradient(-45deg,rgba(148,163,184,.12) 0 6px,rgba(148,163,184,.06) 6px 12px);color:var(--wp-dim)}
-.wp-section{padding-top:clamp(36px,5vw,56px)}
-.wp-section-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.25rem 1.5rem;margin-bottom:1rem}
-.wp-section-title{margin:0;font:700 clamp(20px,2.2vw,26px)/1.1 var(--wp-display);letter-spacing:.06em;text-transform:uppercase;color:var(--wp-ink)}
-.wp-section-intro{margin:0;max-width:60ch;font-size:14px;color:var(--wp-dim)}
-.wp-front-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px;margin:0;padding:0;list-style:none}
-.wp-front{position:relative;display:flex;flex-direction:column;min-width:0;border-radius:14px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border:1px solid var(--wp-line);transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}
-.wp-front:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 18px 40px -26px color-mix(in srgb,var(--banner) 70%,transparent)}
-.wp-front-hit{position:absolute;inset:0;z-index:1;background:none;border:0;cursor:pointer;border-radius:14px}
-.wp-front-hit:focus-visible{outline:2px solid var(--banner);outline-offset:-2px}
-.wp-front a{position:relative;z-index:2}
-.wp-front-art{position:relative;height:96px;background:linear-gradient(135deg,color-mix(in srgb,var(--banner) 30%,#0b1a33),#0a1628);overflow:hidden}
-.wp-front-art img{width:100%;height:100%;object-fit:cover;opacity:.55;filter:saturate(.9) contrast(1.05);transform:scale(1.04);transition:transform .5s ease,opacity .3s}
-.wp-front:hover .wp-front-art img{transform:scale(1.09);opacity:.68}
-.wp-front-art::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 20%,rgba(10,22,40,.92)),linear-gradient(90deg,color-mix(in srgb,var(--banner) 34%,transparent),transparent 70%)}
-.wp-front[data-state="contested"] .wp-front-art::before{content:"";position:absolute;left:0;right:0;top:0;height:4px;z-index:1;background:repeating-linear-gradient(90deg,var(--banner) 0 14px,var(--rival) 14px 28px);background-size:28px 4px;animation:wp-march 1.2s linear infinite}
-@keyframes wp-march{to{background-position:28px 0}}
-.wp-front[data-state="quiet"] .wp-front-art img,.wp-front[data-state="unclaimed"] .wp-front-art img{filter:grayscale(.85) brightness(.8)}
-.wp-front[data-state="unclaimed"] .wp-front-art{background:linear-gradient(135deg,#1b2433,#0a1628)}
-.wp-front-body{display:flex;flex-direction:column;gap:.55rem;padding:.2rem 1rem 1rem;margin-top:-34px;position:relative}
-.wp-front-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
-.wp-front-name{margin:0;display:flex;align-items:center;gap:.4rem;font:700 17px/1.1 var(--wp-display);letter-spacing:.05em;text-transform:uppercase;color:var(--wp-ink);text-shadow:0 1px 8px rgba(0,0,0,.6)}
-.wp-front-crownicon{display:inline-flex;width:18px;height:18px;color:var(--wp-gold)}
-.wp-chip{display:inline-flex;align-items:center;padding:.22rem .5rem;border-radius:999px;font:700 10px/1 var(--wp-display);letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--wp-line);color:var(--wp-dim);background:rgba(6,12,22,.7);white-space:nowrap}
-.wp-chip[data-state="held"]{color:color-mix(in srgb,var(--banner) 80%,#fff);border-color:color-mix(in srgb,var(--banner) 50%,transparent)}
-.wp-chip[data-state="contested"]{color:#fecaca;border-color:rgba(239,68,68,.55);background:rgba(127,29,29,.35)}
-.wp-chip[data-state="quiet"]{color:#cbd5e1}
-.wp-front-holder{display:flex;align-items:center;gap:.65rem;min-width:0}
-.wp-front-holdertext{flex:1;min-width:0}
-.wp-front-holdername{font:700 15px/1.2 var(--wp-display);color:var(--wp-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-agent-link{color:inherit;text-decoration:none;position:relative;z-index:2}
-.wp-agent-link:hover{text-decoration:underline;text-decoration-color:var(--banner,currentColor);text-underline-offset:3px}
-.wp-front-since{font-size:12px;color:var(--wp-faint)}
-.wp-front-line{margin:0;font-size:13px;color:var(--wp-dim)}
-.wp-siege-line{display:inline-flex;align-items:center;gap:.35rem;color:#fecaca}
-.wp-siege-line svg{width:14px;height:14px;flex:none}
-.wp-front-empty{margin:.2rem 0 0;font-size:13px;color:var(--wp-faint)}
-.wp-form{display:grid;grid-template-columns:repeat(12,1fr);gap:3px;margin:.1rem 0 0;padding:0;list-style:none}
-.wp-form li{min-width:0}
-.wp-form-cell,.wp-form-empty{display:block;height:14px;border-radius:3px}
-.wp-form-cell{background:var(--c);box-shadow:inset 0 -2px 0 rgba(0,0,0,.25);transition:transform .15s}
-.wp-form-cell:hover{transform:scaleY(1.35)}
-.wp-form-nowin{background:transparent;box-shadow:inset 0 0 0 1px rgba(148,163,184,.4)}
-.wp-form-empty{background:rgba(148,163,184,.06)}
-.wp-front-foot{margin:0;font-size:11.5px;color:var(--wp-faint);font-variant-numeric:tabular-nums}
-.wp-front-crown{border-color:rgba(245,196,94,.32);background:linear-gradient(180deg,rgba(245,196,94,.07),rgba(255,255,255,.015))}
-.wp-columns{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px;padding-top:clamp(36px,5vw,56px)}
-@media (max-width:900px){.wp-columns{grid-template-columns:minmax(0,1fr)}}
-.wp-panel{min-width:0;padding:1.1rem 1.1rem 1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
-.wp-panel .wp-section-title{margin-bottom:.8rem}
-.wp-dispatches{margin:0;padding:0;list-style:none}
-.wp-dispatch{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:.75rem;align-items:start;padding:.75rem 0;border-top:1px solid var(--wp-line)}
-.wp-dispatch:first-child{border-top:0;padding-top:.2rem}
-.wp-dispatch-icon{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:color-mix(in srgb,var(--banner) 18%,transparent);color:var(--banner);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--banner) 40%,transparent)}
-.wp-dispatch-icon svg{width:18px;height:18px}
-.wp-dispatch[data-kind="siege"] .wp-dispatch-icon{color:#fca5a5;background:rgba(239,68,68,.12);box-shadow:inset 0 0 0 1px rgba(239,68,68,.35)}
-.wp-dispatch-title{margin:0;font:700 14px/1.3 var(--wp-display);color:var(--wp-ink)}
-.wp-dispatch-detail{margin:.15rem 0 0;font-size:12.5px;color:var(--wp-faint)}
-.wp-dispatch-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.3rem;font-size:12px;color:var(--wp-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
-.wp-dispatch-link{display:inline-flex;align-items:center;gap:.25rem;color:var(--color-info,#56c7f5);text-decoration:none;font-weight:600}
-.wp-dispatch-link svg{width:13px;height:13px}
-.wp-dispatch-link:hover{text-decoration:underline}
-.wp-more{margin-top:.6rem;background:none;border:1px solid var(--wp-line);border-radius:8px;padding:.45rem .8rem;color:var(--wp-dim);font-size:12.5px;cursor:pointer}
-.wp-more:hover{color:var(--wp-ink);border-color:rgba(148,170,200,.35)}
-.wp-muted{color:var(--wp-faint);font-size:13px}
-.wp-powers{width:100%;border-collapse:collapse;font-size:13px}
-.wp-powers th,.wp-powers td{padding:.55rem .35rem;border-top:1px solid var(--wp-line);text-align:left;vertical-align:middle;font-weight:400}
-.wp-powers thead th{border-top:0;font:700 10px/1.2 var(--wp-display);letter-spacing:.12em;text-transform:uppercase;color:var(--wp-faint);padding-top:0}
-.wp-powers tbody th{font-weight:700;color:var(--wp-ink);overflow-wrap:anywhere}
-.wp-num{text-align:right!important;font-variant-numeric:tabular-nums;color:var(--wp-dim)}
-.wp-power-agent{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
-.wp-power-crown{display:inline-flex;width:16px;height:16px;color:var(--wp-gold)}
-.wp-front-chips{display:flex;flex-wrap:wrap;gap:.25rem}
-.wp-front-chip{padding:.18rem .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
-.wp-front-chip:hover{background:color-mix(in srgb,var(--banner) 24%,transparent)}
-.wp-history{display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:16px;padding:1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
-@media (max-width:820px){.wp-history{grid-template-columns:minmax(0,1fr)}}
-.wp-history-chart{position:relative;min-width:0}
-.wp-history-chart svg{display:block;width:100%;height:260px}
-.wp-history-layer{stroke:rgba(5,12,25,.6);stroke-width:1;vector-effect:non-scaling-stroke}
-.wp-history-grid{stroke:rgba(148,170,200,.12);stroke-dasharray:3 5;vector-effect:non-scaling-stroke}
-.wp-history-cursor{stroke:#fff;stroke-width:1.5;vector-effect:non-scaling-stroke}
-.wp-history-axis{display:flex;justify-content:space-between;margin-top:.35rem;font-size:11.5px;color:var(--wp-faint)}
-.wp-history-tip{position:absolute;top:18px;transform:translateX(-50%);display:flex;flex-direction:column;gap:.2rem;min-width:150px;padding:.55rem .65rem;border-radius:10px;background:rgba(5,10,20,.92);border:1px solid var(--wp-line);font-size:12px;color:var(--wp-ink);pointer-events:none;box-shadow:0 12px 30px -12px rgba(0,0,0,.9)}
-.wp-tip-row{display:flex;align-items:center;gap:.4rem;color:var(--wp-dim)}
-.wp-tip-row svg{width:13px;height:13px;color:var(--wp-gold)}
-.wp-tip-row i{width:9px;height:9px;border-radius:2px;flex:none}
-.wp-tip-row b{margin-left:auto;color:var(--wp-ink)}
-.wp-history-legend{display:flex;flex-direction:column;gap:.45rem;margin:0;padding:0;list-style:none;font-size:12.5px;color:var(--wp-dim)}
-.wp-history-legend li{display:flex;align-items:center;gap:.5rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-history-legend i{width:12px;height:12px;border-radius:3px;flex:none}
-.wp-legend-crown{background:linear-gradient(135deg,#f5c45e,#c8932f)}
-.wp-legend-others{background:rgba(148,163,184,.35)}
-@media (max-width:820px){.wp-history-legend{flex-direction:row;flex-wrap:wrap}}
-.wp-rules{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-@media (max-width:820px){.wp-rules{grid-template-columns:minmax(0,1fr)}}
-.wp-rule{padding:1.1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
-.wp-rule h3{margin:.6rem 0 .35rem;font:700 15px/1.25 var(--wp-display);color:var(--wp-ink)}
-.wp-rule p{margin:0;font-size:13.5px;line-height:1.55;color:var(--wp-dim)}
-.wp-rule-icon{display:inline-flex;width:34px;height:34px;padding:7px;border-radius:10px;color:var(--color-info,#56c7f5);background:rgba(86,199,245,.1);box-shadow:inset 0 0 0 1px rgba(86,199,245,.3)}
-.wp-rule-icon-crown{color:var(--wp-gold);background:rgba(245,196,94,.1);box-shadow:inset 0 0 0 1px rgba(245,196,94,.3)}
-.wp-data-note{margin:1rem 0 0;font-size:12.5px;color:var(--wp-faint)}
-.wp-drawer-backdrop{position:fixed;inset:0;z-index:60;background:rgba(2,6,14,.55);backdrop-filter:blur(2px);animation:wp-fade .2s ease both}
-.wp-drawer{position:fixed;z-index:61;top:0;right:0;bottom:0;width:min(460px,100vw);display:flex;flex-direction:column;background:#0b1526;border-left:1px solid var(--wp-line);box-shadow:-30px 0 60px -30px rgba(0,0,0,.9);overflow-y:auto;animation:wp-slide .28s cubic-bezier(.2,.8,.2,1) both}
-@media (max-width:640px){.wp-drawer{top:auto;left:0;width:100vw;max-height:88vh;border-left:0;border-top:1px solid var(--wp-line);border-radius:18px 18px 0 0;animation-name:wp-sheet}}
-@keyframes wp-fade{from{opacity:0}}
-@keyframes wp-slide{from{transform:translateX(40px);opacity:0}}
-@keyframes wp-sheet{from{transform:translateY(40px);opacity:0}}
-.wp-drawer-art{position:relative;height:150px;flex:none;background:linear-gradient(135deg,color-mix(in srgb,var(--banner) 35%,#0b1a33),#0b1526);overflow:hidden}
-.wp-drawer-art img{width:100%;height:100%;object-fit:cover;opacity:.6}
-.wp-drawer-art::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,#0b1526),linear-gradient(90deg,color-mix(in srgb,var(--banner) 40%,transparent),transparent 75%)}
-.wp-drawer-head{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;padding:0 1.2rem;margin-top:-56px;position:relative;z-index:1}
-.wp-drawer-title{margin:.45rem 0 0;font:700 30px/1 var(--wp-display);letter-spacing:.04em;text-transform:uppercase;color:var(--wp-ink);text-shadow:0 2px 14px rgba(0,0,0,.7)}
-.wp-drawer-close{display:inline-flex;width:38px;height:38px;padding:9px;border-radius:50%;border:1px solid var(--wp-line);background:rgba(5,10,20,.7);color:var(--wp-ink);cursor:pointer;align-self:flex-start;margin-top:.2rem}
-.wp-drawer-close:hover{border-color:rgba(148,170,200,.45)}
-.wp-drawer-close:focus-visible{outline:2px solid #fff;outline-offset:2px}
-.wp-drawer-body{display:flex;flex-direction:column;gap:.75rem;padding:1rem 1.2rem 2rem}
-.wp-drawer-holder{display:flex;align-items:center;gap:.9rem}
-.wp-kicker{font:700 10px/1.2 var(--wp-display);letter-spacing:.14em;text-transform:uppercase;color:var(--wp-faint)}
-.wp-drawer-holdername{font:700 20px/1.2 var(--wp-display);color:var(--wp-ink)}
-.wp-drawer-sub{margin:.8rem 0 .1rem;font:700 11px/1.2 var(--wp-display);letter-spacing:.14em;text-transform:uppercase;color:var(--wp-faint)}
-.wp-tally{display:flex;flex-direction:column;gap:.4rem;margin:0;padding:0;list-style:none}
-.wp-tally li{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) 24px;align-items:center;gap:.6rem;font-size:13px;color:var(--wp-ink)}
-.wp-tally-name{display:inline-flex;align-items:center;gap:.4rem;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.wp-tally-bar{height:8px;border-radius:99px;background:rgba(148,163,184,.12);overflow:hidden}
-.wp-tally-bar i{display:block;height:100%;border-radius:99px;background:var(--banner)}
-.wp-tally b{text-align:right;font-variant-numeric:tabular-nums}
-.wp-battles,.wp-reigns{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
-.wp-battle{display:grid;grid-template-columns:122px minmax(0,1fr) minmax(0,1.2fr) 16px;align-items:center;gap:.6rem;padding:.5rem .4rem;border-radius:8px;color:var(--wp-ink);text-decoration:none;font-size:12.5px;border-left:3px solid var(--banner)}
-.wp-battle:hover{background:rgba(255,255,255,.04)}
-.wp-battle-when{color:var(--wp-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
-.wp-battle-map{color:var(--wp-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-battle-winner{display:inline-flex;align-items:center;gap:.35rem;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-weight:600}
-.wp-battle-go svg{width:14px;height:14px;color:var(--wp-faint)}
-.wp-reigns li{display:grid;grid-template-columns:20px minmax(0,1fr) auto;grid-template-areas:"e n s" "e r r";align-items:center;column-gap:.6rem;padding:.45rem 0;border-top:1px solid var(--wp-line);font-size:12.5px}
-.wp-reigns li:first-child{border-top:0}
-.wp-reigns .wp-emblem{grid-area:e}
-.wp-reign-name{grid-area:n;font-weight:700;color:var(--wp-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-reign-span{grid-area:s;color:var(--wp-faint);font-variant-numeric:tabular-nums}
-.wp-reign-record{grid-area:r;color:var(--wp-faint)}
-.wp-drawer-maps{margin:.6rem 0 0;font-size:12.5px;color:var(--wp-faint)}
-@media (max-width:640px){.wp-stage{min-width:820px}.wp-label{padding:.2rem .55rem .2rem .22rem;gap:.35rem}.wp-label-holder{display:none}.wp-label-front{font-size:9.5px;color:var(--wp-ink)}.wp-crown{width:112px}.wp-legend{display:none}.wp-power{justify-content:center;gap:.3rem;padding:0 .3rem}.wp-power-name{display:none}.wp-power b{margin-left:0}.wp-battle{grid-template-columns:104px minmax(0,1fr) 16px}.wp-battle-map{display:none}.wp-powers-conquests{display:none}}
-@media (prefers-reduced-motion:reduce){.wp-root *{animation:none!important;transition:none!important}}
-`;
