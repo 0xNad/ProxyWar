@@ -122,9 +122,10 @@ describe("home-page", () => {
     await settle(el);
     const clock = el.querySelector(".hp-clock-desktop");
     expect(clock?.querySelector(".hp-pill-live")).not.toBeNull();
-    expect(text(clock)).toContain("Last battle 22 min ago");
-    expect(text(clock)).toContain("41 battles in the last 24 h");
-    expect(text(clock)).toContain("Day 75 of the war");
+    // Whole words when copied or read aloud, not "LiveLast battle".
+    expect(text(clock)).toBe(
+      "Live Last battle 22 min ago 41 battles in the last 24 h Day 75 of the war",
+    );
     // The configured round schedule is never offered as proof of activity.
     expect(text(el)).not.toMatch(/every 40 min|around the clock/);
   });

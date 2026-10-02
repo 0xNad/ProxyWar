@@ -1,6 +1,62 @@
 import { getMapName, translateText } from "../Utils";
+import { preciseAge } from "./HomePresentation";
 import type { WorldEvent, WorldTheatreId } from "./WorldModelSchema";
 import { battlefieldKey } from "./WorldPresentation";
+
+/** The page's language, for `Intl` formatting. */
+export function pageLocale(): string | undefined {
+  return typeof document === "undefined"
+    ? undefined
+    : document.documentElement.lang || undefined;
+}
+
+/** "Sep 28", or "Sep 28, 09:37 PM" with the time, in the page's language. */
+export function formatDate(iso: string, withTime = false): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "—";
+  return new Intl.DateTimeFormat(pageLocale(), {
+    month: "short",
+    day: "numeric",
+    ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
+  }).format(new Date(time));
+}
+
+/**
+ * How long ago, the same on every world page: "just now", "57 min ago",
+ * "1 h 21 min ago", "3 h ago", "2 days ago", then "on Sep 12".
+ */
+export function formatAge(iso: string, now: number): string {
+  const age = preciseAge(iso, now);
+  switch (age.key) {
+    case "now":
+      return translateText("home_page.age_now");
+    case "minutes":
+      return translateText("home_page.age_minutes", { count: age.minutes });
+    case "hours_minutes":
+      return translateText("home_page.age_hours_minutes", {
+        hours: age.hours,
+        minutes: age.minutes,
+      });
+    case "hours":
+      return translateText("home_page.age_hours", { count: age.hours });
+    case "days":
+      return translateText("home_page.age_days", { count: age.days });
+    case "date":
+      return translateText("home_page.age_date", { date: formatDate(iso) });
+  }
+}
+
+/** A list in the page's language: "Asia, Europe and Africa". */
+export function formatList(items: readonly string[]): string {
+  try {
+    return new Intl.ListFormat(pageLocale(), {
+      style: "long",
+      type: "conjunction",
+    }).format(items);
+  } catch {
+    return items.join(", ");
+  }
+}
 
 /**
  * A battlefield's display name ("GiantWorldMap" → "Giant World Map"),

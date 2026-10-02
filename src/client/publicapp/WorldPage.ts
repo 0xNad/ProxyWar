@@ -1,4 +1,11 @@
-import { html, LitElement, nothing, svg, TemplateResult } from "lit";
+import {
+  html,
+  LitElement,
+  nothing,
+  svg,
+  type PropertyValues,
+  type TemplateResult,
+} from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { assetUrl } from "../../core/AssetUrls";
@@ -24,6 +31,7 @@ import {
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
+import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
 import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
@@ -42,14 +50,19 @@ import {
   frontPaints,
   frontSwatch,
   parseVisitSnapshot,
-  relativeAge,
   UNCLAIMED_HEX,
   visitSnapshot,
   WORLD_REGION_IDS,
   worldVerdict,
   type FrontDisplayState,
 } from "./WorldPresentation";
-import { battlefieldName, eventSentence } from "./WorldText";
+import {
+  battlefieldName,
+  eventSentence,
+  formatAge,
+  formatDate,
+  formatList,
+} from "./WorldText";
 
 /**
  * `/world` — the persistent world map over the league. Every league battle
@@ -67,10 +80,11 @@ type LoadState = "loading" | "ready" | "error";
 const REFRESH_MS = 2 * 60 * 1000;
 const REVEAL_MS = 1400;
 const FRAME_MS = 40;
-const STRIPE_CYCLE_MS = 2600;
 const VISIT_KEY = "proxywar.world.lastVisit";
 const STYLE_ELEMENT_ID = "world-page-styles";
 const DISPATCHES_COLLAPSED = 10;
+/** The map stops growing here; past it the page has margins. */
+const STAGE_MAX_WIDTH = 1440;
 /** The ocean behind the map; banners darker than 3:1 on it get an ink edge. */
 const OCEAN = "#071225";
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
@@ -172,6 +186,7 @@ export class WorldPage extends LitElement {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private mapVisible = true;
   private observer: IntersectionObserver | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private returnFocus: HTMLElement | null = null;
 
   createRenderRoot() {
@@ -202,6 +217,8 @@ export class WorldPage extends LitElement {
     this.revealTimer = null;
     this.observer?.disconnect();
     this.observer = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     window.removeEventListener("hashchange", this.onHashChange);
     document.removeEventListener("keydown", this.onKeyDown);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
@@ -244,7 +261,7 @@ export class WorldPage extends LitElement {
     }
   }
 
-  protected updated(): void {
+  protected updated(changed: PropertyValues): void {
     if (this.loadState !== "ready") return;
     const stage = this.querySelector<HTMLElement>(".wp-stage");
     if (
@@ -258,8 +275,45 @@ export class WorldPage extends LitElement {
       });
       this.observer.observe(stage);
     }
+    const wrap = this.querySelector<HTMLElement>(".wp-stage-wrap");
+    if (
+      wrap !== null &&
+      this.resizeObserver === null &&
+      "ResizeObserver" in window
+    ) {
+      this.resizeObserver = new ResizeObserver(() => this.layoutMap());
+      this.resizeObserver.observe(wrap);
+      void document.fonts?.ready.then(() => this.layoutMap());
+    }
+    // Label text changes with the data; hovering only scales a label.
+    if (changed.has("model") || changed.has("loadState")) this.layoutMap();
     this.paint(performance.now());
     this.schedule();
+  }
+
+  /**
+   * Whole tile multiples when the width is close to one, so every tile is
+   * the same size and the siege hatching never shimmers; then labels are
+   * pushed apart where they overlap and kept on screen. The hero clips the
+   * few pixels of ocean a snapped map overhangs.
+   */
+  private layoutMap(): void {
+    const wrap = this.querySelector<HTMLElement>(".wp-stage-wrap");
+    const stage = this.querySelector<HTMLElement>(".wp-stage");
+    if (wrap === null || stage === null) return;
+    const space = wrap.clientWidth;
+    if (space === 0) return;
+    const width = pixelMapWidth(
+      Math.min(space, STAGE_MAX_WIDTH),
+      WORLD_GRID_WIDTH,
+    );
+    stage.style.maxWidth = "none";
+    stage.style.width = `${width}px`;
+    stage.style.marginLeft = `${Math.round((space - width) / 2)}px`;
+    separateLabels(
+      [...this.querySelectorAll<HTMLElement>(".wp-label, .wp-crown")],
+      wrap.getBoundingClientRect(),
+    );
   }
 
   // ------------------------------------------------------------------ canvas
@@ -281,10 +335,13 @@ export class WorldPage extends LitElement {
       revealed: (id) => reveal >= (order.indexOf(id) + 1) / order.length,
       changed: reveal >= 1 ? this.changed : [],
     });
-    const phase = reducedMotion()
-      ? 0
-      : (time % STRIPE_CYCLE_MS) / STRIPE_CYCLE_MS;
-    paintWorldFrame(this.image.data, { fronts, focus: this.hoverFront, phase });
+    // A still frame, as on the front page: the reveal is the page's one
+    // motion, and a map that keeps moving claims a liveness nobody measured.
+    paintWorldFrame(this.image.data, {
+      fronts,
+      focus: this.hoverFront,
+      phase: 0,
+    });
     context.putImageData(this.image, 0, 0);
     const glowKey = `${model.generatedAt}|${this.hoverFront}|${Math.min(1, Math.floor(reveal * 10) / 10)}`;
     if (glowKey !== this.glowKey) {
@@ -299,15 +356,10 @@ export class WorldPage extends LitElement {
     return Math.min(1, (time - this.revealStart) / REVEAL_MS);
   }
 
+  /** Only the reveal animates; afterwards the map repaints on change alone. */
   private needsAnimation(time: number): boolean {
     if (reducedMotion() || this.model === null) return false;
-    if (this.revealProgress(time) < 1) return true;
-    if (this.changed.length > 0) return true;
-    return this.model.theatres.some(
-      (theatre) =>
-        theatre.id !== "crown" &&
-        frontDisplayState(theatre, this.now) === "contested",
-    );
+    return this.revealProgress(time) < 1;
   }
 
   private schedule(): void {
@@ -432,30 +484,11 @@ export class WorldPage extends LitElement {
   }
 
   private age(iso: string | null): string {
-    if (iso === null) return "—";
-    const age = relativeAge(iso, this.now);
-    switch (age.unit) {
-      case "now":
-        return translateText("world_page.age_now");
-      case "m":
-        return translateText("world_page.age_minutes", { count: age.value });
-      case "h":
-        return translateText("world_page.age_hours", { count: age.value });
-      case "d":
-        return translateText("world_page.age_days", { count: age.value });
-      default:
-        return this.date(iso);
-    }
+    return iso === null ? "—" : formatAge(iso, this.now);
   }
 
   private date(iso: string, withTime = false): string {
-    const time = Date.parse(iso);
-    if (!Number.isFinite(time)) return "—";
-    return new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
-      month: "short",
-      day: "numeric",
-      ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
-    }).format(new Date(time));
+    return formatDate(iso, withTime);
   }
 
   private emblem(name: string | null, size: number): TemplateResult {
@@ -620,12 +653,15 @@ export class WorldPage extends LitElement {
                         ? "home_page.live_pill"
                         : "home_page.paused_pill",
                     )}</span
-                  >${translateText(
-                    feed.kind === "live"
-                      ? "world_page.feed_live"
-                      : "world_page.feed_paused",
-                    { age: this.age(feed.lastBattleAt) },
-                  )}</span
+                  >
+                  <span
+                    >${translateText(
+                      feed.kind === "live"
+                        ? "world_page.feed_live"
+                        : "world_page.feed_paused",
+                      { age: this.age(feed.lastBattleAt) },
+                    )}</span
+                  ></span
                 >`}
           </div>
           <h1 id="wp-headline" class="wp-headline">${headline}</h1>
@@ -707,14 +743,7 @@ export class WorldPage extends LitElement {
   }
 
   private list(items: readonly string[]): string {
-    try {
-      return new Intl.ListFormat(document.documentElement.lang || undefined, {
-        style: "long",
-        type: "conjunction",
-      }).format(items);
-    } catch {
-      return items.join(", ");
-    }
+    return formatList(items);
   }
 
   private renderSinceVisit() {
@@ -1557,7 +1586,7 @@ export class WorldPage extends LitElement {
         </div>
         <ul class="wp-history-legend" role="list">
           <li>
-            <i class="wp-legend-crown"></i>${translateText(
+            <i class="wp-history-crown"></i>${translateText(
               "world_page.history_crown",
             )}
           </li>
@@ -1570,7 +1599,7 @@ export class WorldPage extends LitElement {
           )}
           ${totals.size > top.length
             ? html`<li>
-                <i class="wp-legend-others"></i>${translateText(
+                <i class="wp-history-others"></i>${translateText(
                   "world_page.history_others",
                 )}
               </li>`
@@ -2014,8 +2043,8 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-history-legend{display:flex;flex-direction:column;gap:.45rem;margin:0;padding:0;list-style:none;font-size:12.5px;color:var(--wp-dim)}
 .wp-history-legend li{display:flex;align-items:center;gap:.5rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wp-history-legend i{width:12px;height:12px;border-radius:3px;flex:none}
-.wp-legend-crown{background:none;box-shadow:inset 0 0 0 2px var(--wp-ink);border-radius:50%!important}
-.wp-legend-others{background:rgba(148,163,184,.35)}
+.wp-history-crown{background:none;box-shadow:inset 0 0 0 2px var(--wp-ink);border-radius:50%!important}
+.wp-history-others{background:rgba(148,163,184,.35)}
 @media (max-width:820px){.wp-history-legend{flex-direction:row;flex-wrap:wrap}}
 .wp-rules{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 @media (max-width:820px){.wp-rules{grid-template-columns:minmax(0,1fr)}}

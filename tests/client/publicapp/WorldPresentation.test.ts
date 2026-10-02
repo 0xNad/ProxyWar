@@ -8,7 +8,6 @@ import {
   frontSwatch,
   hueOf,
   parseVisitSnapshot,
-  relativeAge,
   UNCLAIMED_HEX,
   visitSnapshot,
   WORLD_BANNER_PALETTE,
@@ -94,23 +93,6 @@ describe("front states and verdict", () => {
     expect(feedState(worldFixture({ lastBattleAt: null }), NOW).kind).toBe(
       "empty",
     );
-  });
-
-  it("formats compact ages", () => {
-    expect(relativeAge("2026-09-29T22:09:30.000Z", NOW).unit).toBe("now");
-    expect(relativeAge("2026-09-29T21:58:00.000Z", NOW)).toMatchObject({
-      unit: "m",
-      value: 12,
-    });
-    expect(relativeAge("2026-09-29T17:10:00.000Z", NOW)).toMatchObject({
-      unit: "h",
-      value: 5,
-    });
-    expect(relativeAge("2026-09-26T22:10:00.000Z", NOW)).toMatchObject({
-      unit: "d",
-      value: 3,
-    });
-    expect(relativeAge("2026-08-01T00:00:00.000Z", NOW).unit).toBe("date");
   });
 });
 

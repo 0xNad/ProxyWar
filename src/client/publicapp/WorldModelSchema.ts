@@ -26,12 +26,19 @@ export const WORLD_THEATRE_IDS = [
 export const WorldTheatreIdSchema = z.enum(WORLD_THEATRE_IDS);
 export type WorldTheatreId = z.infer<typeof WorldTheatreIdSchema>;
 
+/**
+ * A battle's link exactly as the server writes it, `/match/<encoded id>`.
+ * Both world pages bind it straight into `href`, so another origin, a
+ * `javascript:` URL or a path outside `/match/` fails validation.
+ */
+const MatchHrefSchema = z.string().regex(/^\/match\/[^/?#\\\s]+$/);
+
 const WorldBattleSchema = z.object({
   episodeRequestId: z.string(),
   map: z.string(),
   winner: z.string().nullable(),
   at: z.string(),
-  href: z.string(),
+  href: MatchHrefSchema,
 });
 export type WorldBattle = z.infer<typeof WorldBattleSchema>;
 
@@ -72,7 +79,7 @@ const WorldEventSchema = z.object({
   rival: z.string().nullable(),
   agentWins: z.number(),
   rivalWins: z.number(),
-  href: z.string(),
+  href: MatchHrefSchema,
 });
 export type WorldEvent = z.infer<typeof WorldEventSchema>;
 

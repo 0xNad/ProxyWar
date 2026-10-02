@@ -107,6 +107,10 @@ describe("world-page", () => {
     expect(asia?.dataset.state).toBe("contested");
     expect(text(asia)).toBe("Asia (under siege) Matt Van");
     expect(text(el.querySelector(".wp-crown"))).toContain("relh");
+    // Ages read the same as on the front page.
+    expect(text(el.querySelector(".wp-feed"))).toBe(
+      "Live Last battle 22 min ago",
+    );
 
     expect(el.querySelectorAll(".wp-row")).toHaveLength(11);
     expect(el.querySelectorAll(".wp-dispatch")).toHaveLength(2);
@@ -389,6 +393,27 @@ describe("world-page", () => {
       localStorage.getItem("proxywar.world.lastVisit") ?? "{}",
     );
     expect(stored.holders.asia).toBe("Matt Van");
+  });
+
+  it("refuses a world.json whose battle link points anywhere but /match/", async () => {
+    const base = worldFixture();
+    for (const href of [
+      "javascript:alert(1)",
+      "https://elsewhere.test/match/x",
+      "//elsewhere.test/match/x",
+    ]) {
+      serve({
+        ...base,
+        events: base.events.map((event) => ({ ...event, href })),
+      } satisfies WorldModel);
+      const el = mount();
+      await settle(el);
+      expect(text(el.querySelector('[role="alert"]'))).toContain(
+        "The world map could not be loaded.",
+      );
+      expect(el.querySelector(`a[href="${href}"]`)).toBeNull();
+      el.remove();
+    }
   });
 
   it("shows a retryable error when world.json cannot be loaded or fails validation", async () => {

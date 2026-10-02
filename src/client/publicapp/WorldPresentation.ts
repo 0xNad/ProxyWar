@@ -289,24 +289,6 @@ export function worldVerdict(model: WorldModel): WorldVerdict {
   return { kind: "leader", name: topName, fronts: topCount, claimed };
 }
 
-/** Compact relative time: "just now", "12m", "5h", "3d", or a date past a week. */
-export function relativeAge(
-  iso: string,
-  now: number,
-): { unit: "now" | "m" | "h" | "d" | "date"; value: number; date: Date } {
-  const time = Date.parse(iso);
-  const date = new Date(Number.isFinite(time) ? time : now);
-  const seconds = Math.max(0, Math.round((now - date.getTime()) / 1000));
-  if (seconds < 60) return { unit: "now", value: 0, date };
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return { unit: "m", value: minutes, date };
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return { unit: "h", value: hours, date };
-  const days = Math.round(hours / 24);
-  if (days <= 7) return { unit: "d", value: days, date };
-  return { unit: "date", value: days, date };
-}
-
 export const WORLD_REGION_IDS: readonly WorldTheatreId[] = [
   "north_america",
   "south_america",

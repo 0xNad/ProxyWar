@@ -18,7 +18,6 @@ import {
   frontsInState,
   holderGroups,
   leaderCaveats,
-  preciseAge,
   regionFronts,
   warDay,
   watchEvent,
@@ -31,6 +30,7 @@ import {
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
+import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
 import { mix, paintWorldFrame, SEA, worldGrid } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
@@ -54,7 +54,14 @@ import {
   UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
-import { eventSentence, frontInText } from "./WorldText";
+import {
+  eventSentence,
+  formatAge,
+  formatDate,
+  formatList,
+  frontInText,
+  pageLocale,
+} from "./WorldText";
 
 /**
  * The front page: the war table. The first screen answers the one question
@@ -368,55 +375,13 @@ export class HomePage extends LitElement {
     if (wrap === null || map === null) return;
     const available = wrap.clientWidth;
     if (available === 0) return;
-    const scale = available / WORLD_GRID_WIDTH;
-    const whole = Math.round(scale);
-    const width =
-      whole >= 2 && Math.abs(whole - scale) / scale <= 0.05
-        ? whole * WORLD_GRID_WIDTH
-        : available;
+    const width = pixelMapWidth(available, WORLD_GRID_WIDTH);
     map.style.width = `${width}px`;
     map.style.marginLeft = `${Math.round((available - width) / 2)}px`;
-    const labels = [
-      ...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal"),
-    ];
-    for (const label of labels) {
-      label.style.marginLeft = "0px";
-      label.style.marginTop = "0px";
-    }
-    const bounds = wrap.getBoundingClientRect();
-    const pad = 8;
-    const placed: DOMRect[] = [];
-    for (const label of labels) {
-      const rect = label.getBoundingClientRect();
-      if (rect.width === 0) continue;
-      let dx = 0;
-      if (rect.right > bounds.right - pad) dx = bounds.right - pad - rect.right;
-      if (rect.left + dx < bounds.left + pad)
-        dx = bounds.left + pad - rect.left;
-      // Greedy: a label that lands on one already placed moves down past it.
-      let dy = 0;
-      for (let pass = 0; pass < 4; pass++) {
-        const top = rect.top + dy;
-        const left = rect.left + dx;
-        const hit = placed.find(
-          (other) =>
-            left < other.right + 4 &&
-            left + rect.width > other.left - 4 &&
-            top < other.bottom + 4 &&
-            top + rect.height > other.top - 4,
-        );
-        if (hit === undefined) break;
-        const below = hit.bottom + 4 - top;
-        // Pushing past the map's bottom edge would clip it: go above instead.
-        dy +=
-          rect.bottom + dy + below > bounds.bottom - pad
-            ? hit.top - 4 - (rect.bottom + dy)
-            : below;
-      }
-      if (dx !== 0) label.style.marginLeft = `${Math.round(dx)}px`;
-      if (dy !== 0) label.style.marginTop = `${Math.round(dy)}px`;
-      placed.push(label.getBoundingClientRect());
-    }
+    separateLabels(
+      [...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal")],
+      wrap.getBoundingClientRect(),
+    );
   }
 
   // ------------------------------------------------------------- helpers
@@ -481,18 +446,11 @@ export class HomePage extends LitElement {
   }
 
   private locale(): string | undefined {
-    return document.documentElement.lang || undefined;
+    return pageLocale();
   }
 
   private list(items: readonly string[]): string {
-    try {
-      return new Intl.ListFormat(this.locale(), {
-        style: "long",
-        type: "conjunction",
-      }).format(items);
-    } catch {
-      return items.join(", ");
-    }
+    return formatList(items);
   }
 
   /** A list whose items are templates (bold front names, linked agents). */
@@ -506,33 +464,11 @@ export class HomePage extends LitElement {
   }
 
   private date(iso: string): string {
-    const time = Date.parse(iso);
-    if (!Number.isFinite(time)) return "—";
-    return new Intl.DateTimeFormat(this.locale(), {
-      month: "short",
-      day: "numeric",
-    }).format(new Date(time));
+    return formatDate(iso);
   }
 
   private age(iso: string): string {
-    const age = preciseAge(iso, this.now);
-    switch (age.key) {
-      case "now":
-        return translateText("home_page.age_now");
-      case "minutes":
-        return translateText("home_page.age_minutes", { count: age.minutes });
-      case "hours_minutes":
-        return translateText("home_page.age_hours_minutes", {
-          hours: age.hours,
-          minutes: age.minutes,
-        });
-      case "hours":
-        return translateText("home_page.age_hours", { count: age.hours });
-      case "days":
-        return translateText("home_page.age_days", { count: age.days });
-      case "date":
-        return translateText("home_page.age_date", { date: this.date(iso) });
-    }
+    return formatAge(iso, this.now);
   }
 
   /** A translated sentence with templates (names, links) spliced in. */
@@ -795,23 +731,30 @@ export class HomePage extends LitElement {
       return html`<span>${translateText("home_page.clock_no_battles")}</span>`;
     }
     const day = this.lastDayCount(model, feed.lastBattleAt);
+    // Spaces between the parts: the flex gap separates them on screen, the
+    // spaces in the text (copied or read aloud).
     if (feed.kind === "paused") {
       return html`<span class="hp-pill hp-pill-paused"
           >${translateText("home_page.paused_pill")}</span
-        ><span
+        >
+        <span
           >${translateText("home_page.clock_paused", {
             age: this.age(feed.lastBattleAt),
           })}</span
-        ><span>${day}</span>`;
+        >
+        <span>${day}</span>`;
     }
     const warDayNumber = warDay(model, this.now);
     return html`<span class="hp-pill hp-pill-live"
         >${translateText("home_page.live_pill")}</span
-      ><span
+      >
+      <span
         >${translateText("home_page.clock_last_battle", {
           age: this.age(feed.lastBattleAt),
         })}</span
-      ><span>${day}</span>${warDayNumber === null || compact
+      >
+      <span>${day}</span>
+      ${warDayNumber === null || compact
         ? nothing
         : html`<span
             >${translateText("home_page.clock_day", {

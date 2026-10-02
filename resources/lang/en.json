@@ -2420,10 +2420,6 @@
     "in_text_crown": "the Crown"
   },
   "world_page": {
-    "age_days": "{count}d ago",
-    "age_hours": "{count}h ago",
-    "age_minutes": "{count}m ago",
-    "age_now": "just now",
     "crown_aria": "The Crown, held by {holder}. Open its history.",
     "crown_aria_vacant": "The Crown is vacant. Open its history.",
     "crown_siege_by": "Under siege by {challenger}",
