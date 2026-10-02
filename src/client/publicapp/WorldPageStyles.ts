@@ -242,5 +242,9 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
   .wp-dispatch-text{grid-column:1}
   .wp-dispatch-watch{grid-column:2;grid-row:1/3;align-self:center}
 }
+@media (max-width:359px){
+  /* The narrowest phones: a holding may wrap rather than widen the page. */
+  .wp-powers .wp-legend-front{white-space:normal}
+}
 @media (prefers-reduced-motion:reduce){.wp-root *{animation:none!important;transition:none!important}}
 `;
