@@ -2,7 +2,6 @@ import {
   html,
   LitElement,
   nothing,
-  svg,
   type PropertyValues,
   type TemplateResult,
 } from "lit";
@@ -29,7 +28,6 @@ import { CROWN_GLYPH } from "./WorldGlyphs";
 import { renderHistory, type HistoryFocus } from "./WorldHistory";
 import {
   WORLD_GRID_ANCHORS,
-  WORLD_GRID_GRATICULE,
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
@@ -157,7 +155,6 @@ export class WorldPage extends LitElement {
   /** Reveal progress of the last frame actually painted. */
   private paintedReveal = 0;
   private revealTimer: ReturnType<typeof setTimeout> | null = null;
-  private glowKey = "";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   private mapVisible = true;
@@ -235,7 +232,6 @@ export class WorldPage extends LitElement {
       this.model = model;
       this.loadState = "ready";
       if (initial) this.onHashChange();
-      this.glowKey = "";
       document.title = translateText("world_page.document_title");
     } catch {
       if (initial || this.model === null) this.loadState = "error";
@@ -342,12 +338,6 @@ export class WorldPage extends LitElement {
       phase: 0,
     });
     context.putImageData(this.image, 0, 0);
-    const glowKey = `${model.generatedAt}|${this.hoverFront}|${Math.min(1, Math.floor(reveal * 10) / 10)}`;
-    if (glowKey !== this.glowKey) {
-      this.glowKey = glowKey;
-      const glow = this.querySelector<HTMLCanvasElement>("canvas.wp-glow");
-      glow?.getContext("2d")?.putImageData(this.image, 0, 0);
-    }
   }
 
   private revealProgress(time: number): number {
@@ -695,14 +685,12 @@ export class WorldPage extends LitElement {
               })}
             </li>
             <li class=${contested > 0 ? "wp-stat-hot" : ""}>
-              ${unsafeSVG(ICONS.swords)}
               ${translateText("world_page.stat_contested", {
                 count: contested,
               })}
             </li>
             ${crown?.holder
               ? html`<li class="wp-stat-crown">
-                  ${CROWN_GLYPH}
                   ${translateText(
                     frontDisplayState(crown, this.now) === "contested"
                       ? "world_page.stat_crown_siege"
@@ -818,26 +806,6 @@ export class WorldPage extends LitElement {
           }}
           @click=${(event: MouseEvent) => this.onStageClick(event)}
         >
-          <svg
-            class="wp-graticule"
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-            aria-hidden="true"
-          >
-            ${WORLD_GRID_GRATICULE.meridians.map(
-              (x) => svg`<line x1=${x} x2=${x} y1="0" y2="100"></line>`,
-            )}
-            ${WORLD_GRID_GRATICULE.parallels.map(
-              (y) =>
-                svg`<line class=${y === WORLD_GRID_GRATICULE.equator ? "wp-equator" : ""} x1="0" x2="100" y1=${y} y2=${y}></line>`,
-            )}
-          </svg>
-          <canvas
-            class="wp-glow"
-            width=${WORLD_GRID_WIDTH}
-            height=${WORLD_GRID_HEIGHT}
-            aria-hidden="true"
-          ></canvas>
           <canvas
             class="wp-map"
             width=${WORLD_GRID_WIDTH}

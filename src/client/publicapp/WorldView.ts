@@ -39,8 +39,6 @@ export const STATUS_KEYS: Record<FrontDisplayState, string> = {
 
 /** Line icons, injected as trusted markup (they are constants). */
 export const ICONS = {
-  swords:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l10 10M20 4L10 14"/><path d="M6.5 15.5l2 2M17.5 15.5l-2 2"/><path d="M4 20l3.5-3.5M20 20l-3.5-3.5"/></svg>',
   flag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/></svg>',
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21s-6-5.4-6-11a6 6 0 1 1 12 0c0 5.6-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></svg>',
   close:
