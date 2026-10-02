@@ -19,6 +19,12 @@ import {
  * differently.
  */
 
+/**
+ * The class on a lead's second weak spot, which both pages hide on narrow
+ * screens. Their stylesheets interpolate it, so a rename reaches both.
+ */
+export const CAVEAT_MORE_CLASS = "hp-caveat-more";
+
 /** What a page lends the verdict: its names, dates and clock. */
 export interface VerdictView {
   readonly now: number;
@@ -89,7 +95,8 @@ export function verdictLength(
 /**
  * The sentence under the headline: how many fronts the lead rests on and
  * which, then up to two weak spots (a siege, a front gone quiet). The
- * second weak spot is marked `hp-caveat-more` so narrow screens can drop it.
+ * second weak spot is marked `CAVEAT_MORE_CLASS` so narrow screens can
+ * drop it.
  */
 export function renderSupport(
   view: VerdictView,
@@ -108,7 +115,7 @@ export function renderSupport(
       );
       const caveats = leaderCaveats(model, verdict.name, view.now).map(
         (caveat, index) =>
-          html` <span class=${index > 0 ? "hp-caveat-more" : ""}
+          html` <span class=${index > 0 ? CAVEAT_MORE_CLASS : ""}
             >${caveat.kind === "siege"
               ? translateText("home_page.caveat_siege", {
                   front: frontInText(caveat.front.id),

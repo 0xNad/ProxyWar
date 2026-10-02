@@ -273,18 +273,23 @@ describe("world-page", () => {
     expect(el.querySelector(".wp-battle-map")).toBeNull();
     expect(
       [...el.querySelectorAll(".wp-reign-span")].map((span) => text(span)),
-    ).toEqual(["Sep 28 – now", "Sep 25 – Sep 28"]);
-    // The front's own strip and its day-by-day reigns, as on the page.
+    ).toEqual(["Sep 28 – now", "Sep 25 – 28"]);
+    // The front's own strip and its day-by-day reigns, as on the page. The
+    // strip is decoration here: the tally and the battle list say it all.
     expect(
-      el.querySelector(".wp-drawer .wp-strip")?.getAttribute("aria-label"),
-    ).toBe(
-      "The last 5 battles: Matt Van won 2, relh won 2, and 1 with no winner",
-    );
+      el.querySelector(".wp-drawer .wp-strip")?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
     const solo = el.querySelector(".wp-drawer .wp-tl-solo");
-    expect(solo?.getAttribute("aria-hidden")).toBe("true");
+    const bar = solo?.querySelector('[aria-hidden="true"]');
     expect(
-      [...(solo?.querySelectorAll(".wp-tl-run") ?? [])].map((run) => text(run)),
+      [...(bar?.querySelectorAll(".wp-tl-run") ?? [])].map(
+        (run) => run.textContent?.trim() ?? "",
+      ),
     ).toEqual(["Alpha", "Matt Van"]);
+    // The bar's words: the list of rulers keeps only the latest reigns.
+    expect(text(solo)).toBe(
+      "Who held it at the end of each day since Sep 27. 2 agents have held it, Matt Van the longest: 2 days so far, since Sep 28.",
+    );
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await settle(el);
@@ -302,11 +307,18 @@ describe("world-page", () => {
           ? theatre
           : {
               ...asia,
-              reigns: asia.reigns.map((reign) =>
-                reign.to === null
-                  ? reign
-                  : { ...reign, from: "2026-09-28T02:00:00.000Z" },
-              ),
+              reigns: [
+                ...asia.reigns.map((reign) =>
+                  reign.to === null
+                    ? reign
+                    : { ...reign, from: "2026-09-28T02:00:00.000Z" },
+                ),
+                {
+                  ...asia.reigns[1],
+                  from: "2025-10-02T10:00:00.000Z",
+                  to: "2026-09-25T10:00:00.000Z",
+                },
+              ],
               window: asia.window.map((battle, index) =>
                 index === 0 ? { ...battle, map: "Baikal" } : battle,
               ),
@@ -318,10 +330,53 @@ describe("world-page", () => {
     await settle(el);
     expect(
       [...el.querySelectorAll(".wp-reign-span")].map((span) => text(span)),
-    ).toEqual(["Sep 28 – now", "Sep 28"]);
+    ).toEqual(["Sep 28 – now", "Sep 28", "Oct 2, 2025 – Sep 25, 2026"]);
     expect(
       [...el.querySelectorAll(".wp-battle-map")].map((map) => text(map)),
     ).toEqual(["Asia", "Asia", "Asia", "Asia", "Baikal"]);
+  });
+
+  it("lists rulers only when there are some, and words a front with one holder", async () => {
+    window.history.replaceState(null, "", "/world#front-crown");
+    let el = mount();
+    await settle(el);
+    // No recorded reigns yet, so no empty list under the heading.
+    expect(el.querySelector(".wp-reigns")).toBeNull();
+    expect(text(el.querySelector(".wp-tl-solo"))).toBe(
+      "Who held it at the end of each day since Sep 27. 2 agents have held it, relh the longest: 2 days so far, since Sep 28.",
+    );
+    el.remove();
+    window.history.replaceState(null, "", "/world#front-oceania");
+    el = mount();
+    await settle(el);
+    expect(text(el.querySelector(".wp-tl-solo"))).toBe(
+      "Who held it at the end of each day since Sep 27. Only Alpha has held it, since Sep 27.",
+    );
+  });
+
+  it("says one win, not one wins, when a siege is level at one each", async () => {
+    const model = worldFixture();
+    for (const theatre of model.theatres) {
+      if (theatre.id === "asia") {
+        Object.assign(theatre, { holderWins: 1, challengerWins: 1 });
+      }
+      if (theatre.id === "europe") {
+        Object.assign(theatre, {
+          status: "held",
+          holder: "Matt Van",
+          lastBattleAt: "2026-09-29T10:00:00.000Z",
+        });
+      }
+    }
+    serve(model);
+    const el = mount();
+    await settle(el);
+    expect(text(el.querySelector(".wp-support"))).toBe(
+      "It holds 2 of the 10 fronts: Europe and Asia. In Asia, relh has drawn level at 1 win each.",
+    );
+    expect(text(find(el, ".wp-row-race", "level"))).toBe(
+      "relh is level at 1 win each",
+    );
   });
 
   it("names every holder under the map, with each front's state in words", async () => {
@@ -788,24 +843,37 @@ describe("world-page", () => {
     const visibility = vi
       .spyOn(document, "visibilityState", "get")
       .mockReturnValue("hidden");
-    window.history.replaceState(null, "", "/world#front-asia");
-    let el = mount();
-    await settle(el);
-    // A hidden tab runs no animation clock: the sheet must simply be there.
-    expect(el.querySelector(".wp-drawer")?.classList).not.toContain(
-      "wp-drawer-enter",
-    );
-    el.remove();
-    visibility.mockReturnValue("visible");
-    window.history.replaceState(null, "", "/world");
-    el = mount();
-    await settle(el);
-    find<HTMLButtonElement>(el, ".hp-mark", "Asia")?.click();
-    await settle(el);
-    expect(el.querySelector(".wp-drawer")?.classList).toContain(
-      "wp-drawer-enter",
-    );
-    visibility.mockRestore();
+    const open = async () => {
+      window.history.replaceState(null, "", "/world");
+      const el = mount();
+      await settle(el);
+      find<HTMLButtonElement>(el, ".hp-mark", "Asia")?.click();
+      await settle(el);
+      const animated = el
+        .querySelector(".wp-drawer")
+        ?.classList.contains("wp-drawer-enter");
+      el.remove();
+      return animated;
+    };
+    try {
+      // A hidden tab runs no animation clock: the sheet must simply be there.
+      expect(await open()).toBe(false);
+      visibility.mockReturnValue("visible");
+      expect(await open()).toBe(true);
+      // Nor does it move for a visitor who asked for less motion.
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn((query: string) => ({
+          matches: query.includes("prefers-reduced-motion"),
+          media: query,
+          addEventListener: () => undefined,
+          removeEventListener: () => undefined,
+        })),
+      );
+      expect(await open()).toBe(false);
+    } finally {
+      visibility.mockRestore();
+    }
   });
 
   it("opens the front named in the URL hash", async () => {

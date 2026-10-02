@@ -180,33 +180,61 @@ export function renderHistory(
 
 /**
  * One front's reigns as a single bar with month ticks, for its sheet: the
- * blocks of its row in "The war so far", without the pointer and keyboard
- * reading, since the sheet's list of rulers says the same in words.
+ * blocks of its row in "The war so far". Its caption says in words what the
+ * bar shows, so the bar itself is decoration. The sheet's list of rulers
+ * cannot stand in for it: it keeps only the latest reigns, and a reign
+ * within one day never reaches an end-of-day bar.
  */
 export function renderFrontTimeline(view: WorldView, id: WorldTheatreId) {
   const days = view.model.timeline;
   const n = days.length;
   if (n < 2) return nothing;
   const row = historyRows(days).find((entry) => entry.id === id);
-  if (row === undefined || row.reigns.every((reign) => reign.holder === null)) {
-    return nothing;
-  }
-  return html`<div class="wp-tl-solo" aria-hidden="true">
-    ${renderBar(
-      view,
-      row,
-      n,
-      null,
-      () => "",
-      () => 0,
-    )}
-    <div class="wp-tl-axis">
-      ${monthTicks(days).map(
-        (tick) =>
-          html`<span style="--at:${tick.index / n}">${tick.label}</span>`,
+  const held = (row?.reigns ?? []).filter(
+    (reign): reign is HistoryReign & { holder: string } =>
+      reign.holder !== null,
+  );
+  if (row === undefined || held.length === 0) return nothing;
+  // The longest reign; of equals, the latest.
+  const longest = held.reduce((best, reign) =>
+    reign.to - reign.from >= best.to - best.from ? reign : best,
+  );
+  const holders = new Set(held.map((reign) => reign.holder)).size;
+  const params = {
+    date: formatLeagueDay(days[0].day),
+    count: holders,
+    name: view.label(longest.holder),
+    days: longest.to - longest.from + 1,
+    from: formatLeagueDay(days[longest.from].day),
+  };
+  return html`<figure class="wp-tl-solo">
+    <div aria-hidden="true">
+      ${renderBar(
+        view,
+        row,
+        n,
+        null,
+        () => "",
+        () => 0,
       )}
+      <div class="wp-tl-axis">
+        ${monthTicks(days).map(
+          (tick) =>
+            html`<span style="--at:${tick.index / n}">${tick.label}</span>`,
+        )}
+      </div>
     </div>
-  </div>`;
+    <figcaption class="wp-tl-caption">
+      ${translateText(
+        holders === 1
+          ? "world_page.sheet_days_one"
+          : longest.to === n - 1
+            ? "world_page.sheet_days_ongoing"
+            : "world_page.sheet_days",
+        params,
+      )}
+    </figcaption>
+  </figure>`;
 }
 
 function renderBar(

@@ -39,6 +39,24 @@ export function formatDate(iso: string, withTime = false): string {
 }
 
 /**
+ * Two moments as a range in the page's language: "Sep 24 – 27", one date
+ * when both fall on the same day, and years when they differ.
+ */
+export function formatDateRange(from: string, to: string): string {
+  const start = Date.parse(from);
+  const end = Date.parse(to);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
+  const format = dateFormat({ month: "short", day: "numeric" });
+  try {
+    return format.formatRange(new Date(start), new Date(end));
+  } catch {
+    const first = format.format(new Date(start));
+    const last = format.format(new Date(end));
+    return first === last ? first : `${first} – ${last}`;
+  }
+}
+
+/**
  * A league day ("2026-10-01", a UTC date) as "Oct 1" in any time zone:
  * formatting it as a moment in the visitor's zone would call it Oct 2 in
  * Auckland.

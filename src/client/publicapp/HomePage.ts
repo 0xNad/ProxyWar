@@ -66,6 +66,7 @@ import {
   splice,
 } from "./WorldText";
 import {
+  CAVEAT_MORE_CLASS,
   leadUnderline,
   renderSupport,
   renderVerdict,
@@ -1203,7 +1204,7 @@ const HOME_PAGE_CSS = `
 .hp-verdict[data-length="xl"]{font-size:36px}
 .hp-verdict[data-length="s"] .hp-lead,.hp-verdict[data-length="m"] .hp-lead{white-space:nowrap}
 .hp-lead{text-decoration:underline;text-decoration-color:var(--lead,var(--hp-ink-2));text-decoration-thickness:.075em;text-underline-offset:.13em;text-decoration-skip-ink:none}
-.hp-support{margin:8px 0 0;max-width:75ch;font-size:18px;line-height:1.45;color:var(--hp-ink-2)}
+.hp-support{margin:8px 0 0;max-width:75ch;font-size:18px;line-height:1.45;color:var(--hp-ink-2);overflow-wrap:anywhere}
 .hp-support b{color:var(--hp-ink);font-weight:700}
 .hp-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px 28px;margin-top:16px}
 .hp-actions{display:flex;flex-wrap:wrap;gap:12px}
@@ -1304,7 +1305,7 @@ const HOME_PAGE_CSS = `
   .hp-verdict[data-length="l"],.hp-verdict[data-length="xl"]{font-size:30px}
   .hp-verdict[data-length="m"] .hp-lead{white-space:normal}
   .hp-support{font-size:16px}
-  .hp-caveat-more{display:none}
+  .${CAVEAT_MORE_CLASS}{display:none}
   .hp-hud .hp-row{display:none}
   .hp-clock-phone{display:flex;gap:4px 12px;margin-top:10px}
   .hp-phone-actions{display:flex;flex-direction:column;gap:10px;padding:14px var(--hp-gutter) 0}
