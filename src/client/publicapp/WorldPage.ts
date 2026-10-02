@@ -150,6 +150,8 @@ export class WorldPage extends LitElement {
   private observer: IntersectionObserver | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private returnFocus: HTMLElement | null = null;
+  /** Whether the open sheet slides in: only when someone can watch it. */
+  private drawerAnimates = false;
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES, "wp-root");
@@ -402,6 +404,7 @@ export class WorldPage extends LitElement {
     const next = id !== undefined && known === true ? id : null;
     if (next === this.selected) return;
     this.selected = next;
+    this.drawerAnimates = this.canAnimate();
     // A link straight to a front opens its sheet with focus inside, as a
     // click does.
     if (next !== null) {
@@ -415,12 +418,21 @@ export class WorldPage extends LitElement {
     if (event.key === "Escape" && this.selected !== null) this.closeFront();
   };
 
+  /**
+   * Motion only where it can play: a hidden tab runs no animation clock, so
+   * a sheet that slid in there would sit on its first, invisible frame.
+   */
+  private canAnimate(): boolean {
+    return document.visibilityState === "visible" && !reducedMotion();
+  }
+
   private openFront(id: WorldTheatreId): void {
     this.returnFocus =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
     this.selected = id;
+    this.drawerAnimates = this.canAnimate();
     history.replaceState(null, "", `#front-${id}`);
     void this.updateComplete.then(() =>
       this.querySelector<HTMLElement>(".wp-drawer-close")?.focus(),
@@ -584,7 +596,9 @@ export class WorldPage extends LitElement {
         })}
         ${renderRules(view)}
       </main>
-      ${this.selected !== null ? renderDrawer(view, this.selected) : nothing}
+      ${this.selected !== null
+        ? renderDrawer(view, this.selected, this.drawerAnimates)
+        : nothing}
     `;
   }
 

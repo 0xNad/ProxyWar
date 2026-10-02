@@ -178,6 +178,37 @@ export function renderHistory(
   </section>`;
 }
 
+/**
+ * One front's reigns as a single bar with month ticks, for its sheet: the
+ * blocks of its row in "The war so far", without the pointer and keyboard
+ * reading, since the sheet's list of rulers says the same in words.
+ */
+export function renderFrontTimeline(view: WorldView, id: WorldTheatreId) {
+  const days = view.model.timeline;
+  const n = days.length;
+  if (n < 2) return nothing;
+  const row = historyRows(days).find((entry) => entry.id === id);
+  if (row === undefined || row.reigns.every((reign) => reign.holder === null)) {
+    return nothing;
+  }
+  return html`<div class="wp-tl-solo" aria-hidden="true">
+    ${renderBar(
+      view,
+      row,
+      n,
+      null,
+      () => "",
+      () => 0,
+    )}
+    <div class="wp-tl-axis">
+      ${monthTicks(days).map(
+        (tick) =>
+          html`<span style="--at:${tick.index / n}">${tick.label}</span>`,
+      )}
+    </div>
+  </div>`;
+}
+
 function renderBar(
   view: WorldView,
   row: HistoryRow,

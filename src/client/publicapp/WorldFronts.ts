@@ -167,7 +167,7 @@ export function stateWord(display: FrontDisplayState): string | null {
  * colour, the nearest challenger's in theirs, anyone else's in slate, and
  * a battle without a winner struck through. Its label gives the counts.
  */
-function renderStrip(
+export function renderStrip(
   view: WorldView,
   theatre: WorldTheatre,
   model: WorldModel,
