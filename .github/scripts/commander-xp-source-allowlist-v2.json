@@ -209,6 +209,7 @@
   "src/client/publicapp/WorldModelSchema.ts",
   "src/client/publicapp/WorldPage.ts",
   "src/client/publicapp/WorldPageStyles.ts",
+  "src/client/publicapp/WorldPlacards.ts",
   "src/client/publicapp/WorldPresentation.ts",
   "src/client/publicapp/WorldText.ts",
   "src/client/publicapp/WorldView.ts",

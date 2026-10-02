@@ -21,6 +21,7 @@ import {
   crownFront,
   frontsInState,
   holderGroups,
+  type RegionFront,
 } from "./HomePresentation";
 import { renderDrawer } from "./WorldDrawer";
 import { renderFronts, stateWord, unclaimedLine } from "./WorldFronts";
@@ -43,6 +44,7 @@ import {
   type WorldTheatreId,
 } from "./WorldModelSchema";
 import { ensureWorldStyles } from "./WorldPageStyles";
+import { renderPlacards, type PlacardView } from "./WorldPlacards";
 import {
   assignBannerColors,
   changedSinceVisit,
@@ -308,7 +310,7 @@ export class WorldPage extends LitElement {
     stage.style.width = `${width}px`;
     stage.style.marginLeft = `${Math.round((space - width) / 2)}px`;
     separateLabels(
-      [...this.querySelectorAll<HTMLElement>(".wp-label, .wp-crown")],
+      [...this.querySelectorAll<HTMLElement>(".hp-mark, .hp-open, .hp-seal")],
       wrap.getBoundingClientRect(),
     );
   }
@@ -806,7 +808,6 @@ export class WorldPage extends LitElement {
   }
 
   private renderMap(model: WorldModel) {
-    const crown = model.theatres.find((theatre) => theatre.id === "crown");
     return html`
       <div class="wp-stage-wrap">
         <div
@@ -844,131 +845,85 @@ export class WorldPage extends LitElement {
             role="img"
             aria-label=${translateText("world_page.map_label")}
           ></canvas>
-          <div class="wp-labels">
-            ${WORLD_REGION_IDS.map((id) => {
-              const theatre = model.theatres.find((entry) => entry.id === id);
-              return theatre === undefined
-                ? nothing
-                : this.renderLabel(theatre);
-            })}
-            ${crown !== undefined ? this.renderCrownMedallion(crown) : nothing}
-          </div>
+          ${renderPlacards(this.placardView(), model)}
         </div>
       </div>
     `;
   }
 
-  private renderLabel(theatre: WorldTheatre) {
-    const anchor = WORLD_GRID_ANCHORS[theatre.id];
-    const display = frontDisplayState(theatre, this.now);
-    const name = this.frontName(theatre.id);
-    let aria: string;
-    if (theatre.holder === null) {
-      aria = translateText("world_page.label_aria_unclaimed", { front: name });
-    } else if (display === "contested") {
-      aria = translateText("world_page.label_aria_contested", {
-        front: name,
-        holder: this.label(theatre.holder),
-        challenger: this.label(theatre.challenger),
-      });
-    } else if (display === "quiet" && theatre.lastBattleAt !== null) {
-      aria = translateText("world_page.label_aria_quiet", {
-        front: name,
-        holder: this.label(theatre.holder),
-        date: this.date(theatre.lastBattleAt),
-      });
-    } else {
-      aria = translateText("world_page.label_aria_held", {
-        front: name,
-        holder: this.label(theatre.holder),
-      });
-    }
-    const state = stateWord(display);
-    return html`<button
-      type="button"
-      class="wp-label"
-      aria-haspopup="dialog"
-      data-state=${display}
-      ?data-focus=${this.hoverFront === theatre.id}
-      ?data-changed=${this.changed.includes(theatre.id)}
-      style="left:${anchor.x}%;top:${anchor.y}%;--banner:${this.bannerColor(
-        theatre.holder,
-      )};--rival:${this.bannerColor(theatre.challenger)}"
-      aria-label=${aria}
-      @pointerenter=${() => {
-        this.hoverFront = theatre.id;
-      }}
-      @focus=${() => {
-        this.hoverFront = theatre.id;
-      }}
-      @blur=${() => {
-        this.hoverFront = null;
-      }}
-      @click=${(event: Event) => {
-        event.stopPropagation();
-        this.openFront(theatre.id);
-      }}
-    >
-      ${theatre.holder !== null ? this.emblem(theatre.holder, 22) : nothing}
-      <span class="wp-label-text">
-        <span class="wp-label-front"
-          >${state === null
-            ? name
-            : translateText("world_page.front_with_state", {
-                front: name,
-                state,
-              })}</span
-        >
-        <span class="wp-label-holder"
-          >${theatre.holder === null
-            ? unclaimedLine(theatre)
-            : this.label(theatre.holder)}</span
-        >
-      </span>
-    </button>`;
+  /**
+   * What the shared placards need from `/world`: each opens its front's
+   * sheet, highlights its front on the map while pointed at, and is marked
+   * when it changed hands since the last visit.
+   */
+  private placardView(): PlacardView {
+    return {
+      now: this.now,
+      label: (name) => this.label(name),
+      colorOf: (name) => this.bannerColor(name),
+      swatch: (front) => this.swatch(front),
+      lowContrast: (name) => this.lowContrast(name),
+      emblem: (name) => this.flag(name),
+      frontName: (id) => this.frontName(id),
+      age: (iso) => this.age(iso),
+      date: (iso) => this.date(iso),
+      target: (id) => ({ open: () => this.openFront(id) }),
+      placardAria: (front, holder) => this.placardAria(front, holder),
+      openAria: (front) =>
+        translateText("world_page.label_aria_unclaimed", {
+          front: this.frontName(front.id),
+        }),
+      openLine: (front) => unclaimedLine(front),
+      sealAria: (holder) =>
+        holder === null
+          ? translateText("world_page.crown_aria_vacant")
+          : translateText("world_page.crown_aria", {
+              holder: this.label(holder),
+            }),
+      // The Crown holds no land: there is nothing on the map to light up.
+      focusFront: (id) => {
+        this.hoverFront = id === "crown" ? null : id;
+      },
+      changed: this.changed,
+    };
   }
 
-  private renderCrownMedallion(crown: WorldTheatre) {
-    const anchor = WORLD_GRID_ANCHORS.crown;
-    const display = frontDisplayState(crown, this.now);
-    return html`<button
-      type="button"
-      class="wp-crown"
-      aria-haspopup="dialog"
-      data-state=${display}
-      style="left:${anchor.x}%;top:${anchor.y}%;--banner:${this.bannerColor(
-        crown.holder,
+  private placardAria(front: RegionFront, holder: string): string {
+    const name = this.frontName(front.id);
+    const display = frontDisplayState(front, this.now);
+    if (display === "contested" && front.challenger !== null) {
+      return translateText("world_page.label_aria_contested", {
+        front: name,
+        holder: this.label(holder),
+        challenger: this.label(front.challenger),
+      });
+    }
+    if (display === "quiet" && front.lastBattleAt !== null) {
+      return translateText("world_page.label_aria_quiet", {
+        front: name,
+        holder: this.label(holder),
+        date: this.date(front.lastBattleAt),
+      });
+    }
+    return translateText("world_page.label_aria_held", {
+      front: name,
+      holder: this.label(holder),
+    });
+  }
+
+  /** An agent's pixel emblem as an image, as the placards frame it. */
+  private flag(name: string | null): TemplateResult | typeof nothing {
+    const agent = name === null ? undefined : this.agents.get(name);
+    if (!agent?.emblemSvg) return nothing;
+    return html`<img
+      src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+        agent.emblemSvg,
       )}"
-      aria-label=${crown.holder === null
-        ? translateText("world_page.crown_aria_vacant")
-        : translateText("world_page.crown_aria", {
-            holder: this.label(crown.holder),
-          })}
-      @click=${(event: Event) => {
-        event.stopPropagation();
-        this.openFront("crown");
-      }}
-    >
-      <span class="wp-crown-icon">${CROWN_GLYPH}</span>
-      <span class="wp-crown-ring">${this.emblem(crown.holder, 44)}</span>
-      <span class="wp-crown-title"
-        >${translateText("world_page.crown_title")}</span
-      >
-      <span class="wp-crown-holder"
-        >${crown.holder === null
-          ? translateText("world_page.crown_vacant")
-          : this.label(crown.holder)}</span
-      >
-      ${display === "contested" && crown.challenger !== null
-        ? html`<span class="wp-crown-siege"
-            >${translateText("world_page.crown_siege_by", {
-              challenger: this.label(crown.challenger),
-            })}</span
-          >`
-        : html`<span class="wp-crown-sub"
-            >${translateText("world_page.crown_sub")}</span
-          >`}
-    </button>`;
+      alt=""
+      width="26"
+      height="26"
+      decoding="async"
+    />`;
   }
 
   // ------------------------------------------------------ legend and key

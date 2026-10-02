@@ -2422,9 +2422,6 @@
   "world_page": {
     "crown_aria": "The Crown, held by {holder}. Open its history.",
     "crown_aria_vacant": "The Crown is vacant. Open its history.",
-    "crown_siege_by": "Under siege by {challenger}",
-    "crown_sub": "Decided on whole-world maps",
-    "crown_title": "The Crown",
     "crown_vacant": "Vacant",
     "data_note": "Built from {count, plural, one {# league battle} other {# league battles}} recorded since {date}. A battle that ends without a winner still takes its place in a front's window.",
     "detail_battlefield": "{map} ({count, plural, one {# battle} other {# battles}})",

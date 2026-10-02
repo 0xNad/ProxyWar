@@ -1,4 +1,5 @@
 import { ensurePublicFonts } from "./PublicFonts";
+import { ensurePlacardStyles } from "./WorldPlacards";
 import { UNCLAIMED_HEX } from "./WorldPresentation";
 
 const STYLE_ELEMENT_ID = "world-page-styles";
@@ -7,6 +8,7 @@ const STYLE_ELEMENT_ID = "world-page-styles";
 export function ensureWorldStyles(): void {
   if (typeof document === "undefined") return;
   ensurePublicFonts();
+  ensurePlacardStyles();
   if (document.getElementById(STYLE_ELEMENT_ID) !== null) return;
   const style = document.createElement("style");
   style.id = STYLE_ELEMENT_ID;
@@ -52,28 +54,9 @@ const WORLD_PAGE_CSS = `
 .wp-stage canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges}
 .wp-glow{filter:blur(12px) saturate(1.5) brightness(1.15);opacity:.5;transform:scale(1.012)}
 .wp-map{filter:drop-shadow(0 1px 0 rgba(0,0,0,.55)) drop-shadow(0 0 6px rgba(0,0,0,.35))}
-.wp-labels{position:absolute;inset:0;pointer-events:none}
-.wp-label{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;align-items:center;gap:.45rem;padding:.28rem .7rem .28rem .3rem;border-radius:22px;background:var(--wp-glass);border:1px solid color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 8px 22px -10px rgba(0,0,0,.9);color:var(--wp-ink);font-family:var(--wp-display);white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);transition:transform .18s ease,box-shadow .18s ease}
-.wp-label:hover,.wp-label[data-focus]{transform:translate(-50%,-50%) scale(1.06);z-index:3;box-shadow:0 10px 26px -10px rgba(0,0,0,.9),0 0 0 1px var(--banner),0 0 22px -4px color-mix(in srgb,var(--banner) 60%,transparent)}
-.wp-label:focus-visible{outline:2px solid #fff;outline-offset:2px}
-.wp-label[data-state="unclaimed"]{border-style:dashed;border-color:rgba(148,163,184,.4);padding-left:.7rem;opacity:.72}
-.wp-label[data-state="quiet"]{opacity:.78;border-style:dashed}
-.wp-label[data-changed]{box-shadow:0 0 0 2px var(--wp-ink)}
-.wp-label-text{display:flex;flex-direction:column;line-height:1.05}
-.wp-label-front{font-size:11px;font-weight:400;color:var(--wp-dim)}
-.wp-label-holder{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-width:17ch;overflow:hidden;white-space:normal;overflow-wrap:anywhere;font-size:12.5px;font-weight:700;line-height:1.1}
 .wp-emblem{display:inline-flex;align-items:center;justify-content:center;width:var(--size);height:var(--size);flex:none;border-radius:50%;overflow:hidden;background:rgba(0,0,0,.35);box-shadow:0 0 0 2px var(--banner)}
 .wp-emblem svg,.wp-emblem img{width:100%;height:100%;display:block;image-rendering:pixelated}
 .wp-emblem-blank{background:var(--banner);color:#0b1220;font:700 calc(var(--size)*.5)/1 var(--wp-display)}
-.wp-crown{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:.1rem;width:132px;padding:.55rem .5rem .6rem;border-radius:4px;background:rgb(4 10 23/.92);border:1px solid var(--wp-line);color:var(--wp-ink);font-family:var(--wp-display);cursor:pointer;text-align:center;transition:transform .18s ease}
-.wp-crown:hover{transform:translate(-50%,-50%) scale(1.04)}
-.wp-crown-icon{width:22px;height:13px;margin-bottom:.2rem;color:var(--wp-ink)}
-.wp-crown-ring{display:flex;padding:3px;border-radius:50%;background:var(--banner);margin:.15rem 0 .2rem}
-.wp-crown-ring .wp-emblem{box-shadow:none}
-.wp-crown-title{font-size:12px;font-weight:400;color:var(--wp-dim)}
-.wp-crown-holder{font-size:13.5px;font-weight:700;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-crown-sub{font-size:11.5px;color:var(--wp-dim)}
-.wp-crown-siege{font-size:11.5px;line-height:1.3;color:var(--wp-ink)}
 .wp-guide{position:relative;z-index:2;margin-top:10px}
 .wp-sw{display:inline-block;flex:none;width:12px;height:12px;margin-right:6px;background:var(--paint)}
 .wp-sw-open{box-shadow:inset 0 0 0 1px #46556c}
@@ -236,18 +219,10 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-reign-record{grid-area:r;color:var(--wp-faint)}
 .wp-drawer-maps{margin:.6rem 0 0;font-size:12.5px;color:var(--wp-faint)}
 @media (max-width:1179px){
-  .wp-label{display:none}
-  .wp-crown{width:44px;height:44px;padding:0;gap:0;justify-content:center;border:0;background:none}
-  .wp-crown:hover{transform:translate(-50%,-50%)}
-  .wp-crown-title,.wp-crown-holder,.wp-crown-sub,.wp-crown-siege{display:none}
-  .wp-crown-icon{position:absolute;left:50%;top:-3px;width:12px;height:8px;margin:0;transform:translateX(-50%)}
-  .wp-crown-ring{margin:0;padding:2px}
-  .wp-crown .wp-emblem{width:24px;height:24px}
   .wp-legend{display:block;columns:2;column-gap:40px}
 }
 @media (max-width:759px){
   .wp-legend{columns:1}
-  .wp-crown .wp-emblem{width:20px;height:20px}
 }
 @media (max-width:640px){
   .wp-battle{grid-template-columns:104px minmax(0,1fr)}

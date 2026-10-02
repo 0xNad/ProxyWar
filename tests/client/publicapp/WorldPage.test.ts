@@ -101,12 +101,16 @@ describe("world-page", () => {
       expect.objectContaining({ cache: "no-store" }),
     );
     expect(el.querySelector("canvas.wp-map")).not.toBeNull();
-    const labels = el.querySelectorAll(".wp-label");
+    // The front page's placards: held fronts tagged, unclaimed ones lettered.
+    const labels = el.querySelectorAll(".hp-mark, .hp-open");
     expect(labels).toHaveLength(10);
-    const asia = find<HTMLElement>(el, ".wp-label", "Asia");
+    const asia = find<HTMLElement>(el, ".hp-mark", "Asia");
     expect(asia?.dataset.state).toBe("contested");
-    expect(text(asia)).toBe("Asia (under siege) Matt Van");
-    expect(text(el.querySelector(".wp-crown"))).toContain("relh");
+    expect(text(asia)).toBe("Matt Van Asia, under siege relh drew level, 2–2");
+    expect(asia?.getAttribute("aria-label")).toBe(
+      "Asia: held by Matt Van, under siege by relh. Open front.",
+    );
+    expect(text(el.querySelector(".hp-seal"))).toContain("relh");
     // Ages read the same as on the front page.
     expect(text(el.querySelector(".wp-feed"))).toBe(
       "Live Last battle 22 min ago",
@@ -195,7 +199,7 @@ describe("world-page", () => {
   it("opens a front's history from its label, says how it is held, and closes with Escape", async () => {
     const el = mount();
     await settle(el);
-    find<HTMLButtonElement>(el, ".wp-label", "Asia")?.click();
+    find<HTMLButtonElement>(el, ".hp-mark", "Asia")?.click();
     await settle(el);
 
     const dialog = el.querySelector<HTMLElement>('[role="dialog"]');
@@ -266,7 +270,7 @@ describe("world-page", () => {
     expect(text(el.querySelector(".wp-key"))).toContain(
       "Faded: no battle for 14+ days",
     );
-    expect(find(el, ".wp-label", "Oceania")?.getAttribute("aria-label")).toBe(
+    expect(find(el, ".hp-mark", "Oceania")?.getAttribute("aria-label")).toBe(
       "Oceania: held by Alpha, quiet since Sep 29. Open front.",
     );
     expect(
@@ -370,7 +374,7 @@ describe("world-page", () => {
     expect(row?.querySelector(".wp-strip")?.getAttribute("aria-label")).toBe(
       "The last 3 battles: 3 with no winner",
     );
-    expect(text(find(el, ".wp-label", "Africa"))).toBe(
+    expect(text(find(el, ".hp-open", "Africa"))).toBe(
       "Africa 3 battles, no winner yet",
     );
     row?.querySelector<HTMLButtonElement>(".wp-row-hit")?.click();
@@ -521,8 +525,8 @@ describe("world-page", () => {
     const el = mount();
     await settle(el);
     for (const selector of [
-      ".wp-label",
-      ".wp-crown",
+      ".hp-mark",
+      ".hp-seal",
       ".wp-legend-front",
       ".wp-row-hit",
     ]) {
@@ -577,7 +581,7 @@ describe("world-page", () => {
     const banner = el.querySelector(".wp-since");
     expect(banner).not.toBeNull();
     expect(banner?.querySelectorAll(".wp-since-front")).toHaveLength(1);
-    expect(text(el.querySelector(".wp-label[data-changed]"))).toContain("Asia");
+    expect(text(el.querySelector(".hp-mark[data-changed]"))).toContain("Asia");
     // The visit is recorded for next time.
     const stored = JSON.parse(
       localStorage.getItem("proxywar.world.lastVisit") ?? "{}",
