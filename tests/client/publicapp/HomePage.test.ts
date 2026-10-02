@@ -8,45 +8,15 @@
  * Uses the real `translateText()` against a minimal `<lang-selector>` that
  * carries the real English strings, so the assertions read like the page.
  */
-import {
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
-import englishTranslations from "../../../resources/lang/en.json";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../../../src/client/publicapp/HomePage";
 import type { HomePage } from "../../../src/client/publicapp/HomePage";
 import type { WorldModel } from "../../../src/client/publicapp/WorldModelSchema";
+import { installEnglish, removeEnglish } from "./EnglishLangSelector";
 import { worldFixture } from "./WorldFixtures";
 
 /** The fixture's moment: 22 minutes after its newest battle. */
 const NOW = new Date("2026-09-29T22:10:00.000Z");
-
-function flatten(
-  value: unknown,
-  prefix = "",
-  out: Record<string, string> = {},
-): Record<string, string> {
-  if (typeof value === "string") {
-    out[prefix] = value;
-  } else if (value !== null && typeof value === "object") {
-    for (const [key, child] of Object.entries(value)) {
-      flatten(child, prefix === "" ? key : `${prefix}.${key}`, out);
-    }
-  }
-  return out;
-}
-
-class FakeLangSelector extends HTMLElement {
-  currentLang = "en";
-  translations: Record<string, string> | undefined =
-    flatten(englishTranslations);
-  defaultTranslations: Record<string, string> | undefined = this.translations;
-}
 
 /** In-memory `localStorage`, independent of whether Node/jsdom provides one. */
 function memoryStorage(): Storage {
@@ -66,12 +36,6 @@ function memoryStorage(): Storage {
     },
   };
 }
-
-beforeAll(() => {
-  if (!customElements.get("lang-selector")) {
-    customElements.define("lang-selector", FakeLangSelector);
-  }
-});
 
 function serve(model: unknown) {
   vi.stubGlobal(
@@ -112,13 +76,13 @@ function leaderFixture(): WorldModel {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"], now: NOW });
   vi.stubGlobal("localStorage", memoryStorage());
-  document.head.append(document.createElement("lang-selector"));
+  installEnglish();
   serve(leaderFixture());
 });
 
 afterEach(() => {
   document.body.innerHTML = "";
-  document.head.querySelectorAll("lang-selector").forEach((el) => el.remove());
+  removeEnglish();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });

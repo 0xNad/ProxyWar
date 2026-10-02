@@ -293,6 +293,7 @@
   "tests/client/ReplayLoadingScreen.test.ts",
   "tests/client/publicapp/AppShellChrome.test.ts",
   "tests/client/publicapp/BuildPage.test.ts",
+  "tests/client/publicapp/EnglishLangSelector.ts",
   "tests/client/publicapp/HomePage.test.ts",
   "tests/client/publicapp/HomePresentation.test.ts",
   "tests/client/publicapp/LegalInfoPage.test.ts",

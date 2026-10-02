@@ -28,7 +28,6 @@ import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
-  type WorldBattle,
   type WorldEvent,
   type WorldModel,
   type WorldTheatre,
@@ -50,7 +49,7 @@ import {
   worldVerdict,
   type FrontDisplayState,
 } from "./WorldPresentation";
-import { battlefieldName } from "./WorldText";
+import { battlefieldName, eventSentence } from "./WorldText";
 
 /**
  * `/world` — the persistent world map over the league. Every league battle
@@ -106,8 +105,6 @@ const ICONS = {
   swords:
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l10 10M20 4L10 14"/><path d="M6.5 15.5l2 2M17.5 15.5l-2 2"/><path d="M4 20l3.5-3.5M20 20l-3.5-3.5"/></svg>',
   flag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/></svg>',
-  shield:
-    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6z"/><path d="M9 12l2 2 4-4" stroke-linecap="round"/></svg>',
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21s-6-5.4-6-11a6 6 0 1 1 12 0c0 5.6-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></svg>',
   close:
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -683,18 +680,41 @@ export class WorldPage extends LitElement {
     params: Record<string, string | number>,
     names: readonly string[],
   ): TemplateResult {
-    const parts = translateText(key, params).split(NAME_MARKER_PATTERN);
-    return html`${parts.map((part, index) => {
-      if (index % 2 === 0) return part;
-      const name = names[Number(part)];
-      return name === undefined
-        ? nothing
-        : html`<span
+    return this.spliced(
+      key,
+      params,
+      names.map(
+        (name) =>
+          html`<span
             class="wp-headline-name"
             style="--banner:${this.bannerColor(name)}"
             >${this.label(name)}</span
-          >`;
-    })}`;
+          >`,
+      ),
+    );
+  }
+
+  /** A translated sentence with templates spliced in at `nameMarker`s. */
+  private spliced(
+    key: string,
+    params: Record<string, string | number>,
+    parts: readonly TemplateResult[],
+  ): TemplateResult {
+    const pieces = translateText(key, params).split(NAME_MARKER_PATTERN);
+    return html`${pieces.map((piece, index) =>
+      index % 2 === 0 ? piece : (parts[Number(piece)] ?? nothing),
+    )}`;
+  }
+
+  private list(items: readonly string[]): string {
+    try {
+      return new Intl.ListFormat(document.documentElement.lang || undefined, {
+        style: "long",
+        type: "conjunction",
+      }).format(items);
+    } catch {
+      return items.join(", ");
+    }
   }
 
   private renderSinceVisit() {
@@ -789,19 +809,28 @@ export class WorldPage extends LitElement {
     const anchor = WORLD_GRID_ANCHORS[theatre.id];
     const display = frontDisplayState(theatre, this.now);
     const name = this.frontName(theatre.id);
-    const aria =
-      theatre.holder === null
-        ? translateText("world_page.label_aria_unclaimed", { front: name })
-        : display === "contested"
-          ? translateText("world_page.label_aria_contested", {
-              front: name,
-              holder: this.label(theatre.holder),
-              challenger: this.label(theatre.challenger),
-            })
-          : translateText("world_page.label_aria_held", {
-              front: name,
-              holder: this.label(theatre.holder),
-            });
+    let aria: string;
+    if (theatre.holder === null) {
+      aria = translateText("world_page.label_aria_unclaimed", { front: name });
+    } else if (display === "contested") {
+      aria = translateText("world_page.label_aria_contested", {
+        front: name,
+        holder: this.label(theatre.holder),
+        challenger: this.label(theatre.challenger),
+      });
+    } else if (display === "quiet" && theatre.lastBattleAt !== null) {
+      aria = translateText("world_page.label_aria_quiet", {
+        front: name,
+        holder: this.label(theatre.holder),
+        date: this.date(theatre.lastBattleAt),
+      });
+    } else {
+      aria = translateText("world_page.label_aria_held", {
+        front: name,
+        holder: this.label(theatre.holder),
+      });
+    }
+    const state = this.stateWord(display);
     return html`<button
       type="button"
       class="wp-label"
@@ -828,20 +857,20 @@ export class WorldPage extends LitElement {
     >
       ${theatre.holder !== null ? this.emblem(theatre.holder, 22) : nothing}
       <span class="wp-label-text">
-        <span class="wp-label-front">${name}</span>
+        <span class="wp-label-front"
+          >${state === null
+            ? name
+            : translateText("world_page.front_with_state", {
+                front: name,
+                state,
+              })}</span
+        >
         <span class="wp-label-holder"
           >${theatre.holder === null
-            ? translateText("world_page.label_unclaimed")
+            ? this.unclaimedLine(theatre)
             : this.label(theatre.holder)}</span
         >
       </span>
-      ${display === "contested"
-        ? html`<span
-            class="wp-label-siege"
-            title=${this.label(theatre.challenger)}
-            >${unsafeSVG(ICONS.swords)}</span
-          >`
-        : nothing}
     </button>`;
   }
 
@@ -875,9 +904,11 @@ export class WorldPage extends LitElement {
           ? translateText("world_page.crown_vacant")
           : this.label(crown.holder)}</span
       >
-      ${display === "contested"
+      ${display === "contested" && crown.challenger !== null
         ? html`<span class="wp-crown-siege"
-            >${unsafeSVG(ICONS.swords)} ${this.label(crown.challenger)}</span
+            >${translateText("world_page.crown_siege_by", {
+              challenger: this.label(crown.challenger),
+            })}</span
           >`
         : html`<span class="wp-crown-sub"
             >${translateText("world_page.crown_sub")}</span
@@ -933,7 +964,7 @@ export class WorldPage extends LitElement {
                 style="--paint:${UNCLAIMED_HEX}"
               ></i
               ><span class="wp-legend-name wp-legend-muted"
-                >${translateText("world_page.legend_never_fought")}</span
+                >${translateText("world_page.legend_unclaimed")}</span
               ></span
             ><span class="wp-legend-fronts"
               >${open.map((front) => this.legendFront(front, false))}</span
@@ -945,13 +976,10 @@ export class WorldPage extends LitElement {
 
   /** One front in the legend: its map swatch, its name, its state in words. */
   private legendFront(front: WorldTheatre, withSwatch = true) {
-    const display = frontDisplayState(front, this.now);
-    const state =
-      display === "contested"
-        ? translateText("world_page.legend_siege")
-        : display === "quiet"
-          ? translateText("world_page.legend_quiet")
-          : null;
+    const state = this.stateWord(frontDisplayState(front, this.now));
+    const name = html`<span class="wp-legend-front-name"
+      >${this.frontName(front.id)}</span
+    >`;
     // The Crown holds no land, so it has nothing on the map to highlight.
     const onMap = front.id !== "crown";
     let mark: TemplateResult | typeof nothing = nothing;
@@ -980,12 +1008,15 @@ export class WorldPage extends LitElement {
         this.hoverFront = null;
       }}
     >
-      ${mark}<span class="wp-legend-front-name"
-        >${this.frontName(front.id)}</span
-      >${state === null
-        ? nothing
-        : // A no-break space: a flex item drops a plain leading space.
-          html`<span class="wp-legend-state">&nbsp;(${state})</span>`}
+      ${mark}<span class="wp-legend-front-text"
+        >${state === null
+          ? name
+          : this.spliced(
+              "world_page.front_with_state",
+              { front: nameMarker(0), state },
+              [name],
+            )}</span
+      >
     </button>`;
   }
 
@@ -1026,6 +1057,11 @@ export class WorldPage extends LitElement {
 
   // -------------------------------------------------------------- fronts
 
+  /**
+   * Every front as one row: its state in words, who holds it and how close
+   * the race is, its last battles as a strip, and when it was last fought
+   * over. The whole row opens the front's history.
+   */
   private renderFronts(model: WorldModel) {
     const rank: Record<FrontDisplayState, number> = {
       contested: 0,
@@ -1055,114 +1091,88 @@ export class WorldPage extends LitElement {
           ${translateText("world_page.fronts_intro", {
             window: model.windowSize,
           })}
+          ${translateText("world_page.fronts_strip_intro")}
         </p>
       </div>
-      <ul class="wp-front-grid" role="list">
-        ${crown !== undefined ? this.renderFrontCard(crown, model) : nothing}
-        ${regions.map((theatre) => this.renderFrontCard(theatre, model))}
-      </ul>
+      <div class="wp-fronts-head" aria-hidden="true">
+        <span>${translateText("world_page.fronts_head_front")}</span>
+        <span>${translateText("world_page.fronts_head_holder")}</span>
+        <span
+          >${translateText("world_page.fronts_head_form", {
+            count: model.windowSize,
+          })}</span
+        >
+        <span>${translateText("world_page.fronts_head_last")}</span>
+      </div>
+      <ol class="wp-fronts" role="list">
+        ${crown !== undefined ? this.renderFrontRow(crown, model) : nothing}
+        ${regions.map((theatre) => this.renderFrontRow(theatre, model))}
+      </ol>
     </section>`;
   }
 
-  private renderFrontCard(theatre: WorldTheatre, model: WorldModel) {
+  private renderFrontRow(theatre: WorldTheatre, model: WorldModel) {
     const display = frontDisplayState(theatre, this.now);
     const name = this.frontName(theatre.id);
-    const thumb = this.thumbnail(theatre);
-    const isCrown = theatre.id === "crown";
-    const emptySlots = Math.max(0, model.windowSize - theatre.window.length);
-    return html`<li
-      class="wp-front ${isCrown ? "wp-front-crown" : ""}"
-      data-state=${display}
-      style="--banner:${this.bannerColor(
-        theatre.holder,
-      )};--rival:${this.bannerColor(theatre.challenger)}"
-    >
+    return html`<li class="wp-row" data-state=${display}>
       <button
         type="button"
-        class="wp-front-hit"
+        class="wp-row-hit"
         aria-label=${translateText("world_page.front_open", { front: name })}
         @click=${() => this.openFront(theatre.id)}
       ></button>
-      <div class="wp-front-art" aria-hidden="true">
-        ${thumb !== null
-          ? html`<img
-              src=${thumb}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              @error=${(event: Event) => {
-                (event.target as HTMLElement).hidden = true;
-              }}
-            />`
-          : nothing}
+      <div class="wp-row-front">
+        ${theatre.id === "crown"
+          ? html`<span class="wp-row-crown">${CROWN_GLYPH}</span>`
+          : html`<i
+              class="wp-sw ${this.lowContrast(theatre.holder) ? "wp-low" : ""}"
+              style="--paint:${this.swatch(theatre)}"
+            ></i>`}
+        <h3 class="wp-row-name">${name}</h3>
+        <span class="wp-row-state">${translateText(STATUS_KEYS[display])}</span>
       </div>
-      <div class="wp-front-body">
-        <div class="wp-front-head">
-          <h3 class="wp-front-name">
-            ${isCrown
-              ? html`<span class="wp-front-crownicon">${CROWN_GLYPH}</span>`
-              : nothing}${name}
-          </h3>
-          <span class="wp-chip" data-state=${display}
-            >${translateText(STATUS_KEYS[display])}</span
-          >
-        </div>
+      <div class="wp-row-holder">
         ${theatre.holder === null
-          ? html`<p class="wp-front-empty">
-              ${translateText("world_page.front_unclaimed_body", {
-                maps: theatre.battlefields
-                  .slice(0, 2)
-                  .map((map) => this.battlefieldName(map))
-                  .join(" / "),
-              })}
-            </p>`
-          : html`<div class="wp-front-holder">
-                ${this.emblem(theatre.holder, 30)}
-                <div class="wp-front-holdertext">
-                  <div class="wp-front-holdername">
-                    ${this.agentLink(theatre.holder)}
-                  </div>
-                  <div class="wp-front-since">
-                    ${theatre.heldSince !== null
-                      ? translateText("world_page.front_held_since", {
+          ? html`<span class="wp-row-empty"
+              >${this.unclaimedLine(theatre)}</span
+            >`
+          : html`${this.emblem(theatre.holder, 28)}
+              <span class="wp-row-holdertext">
+                <span class="wp-row-holdername"
+                  ><b>${this.label(theatre.holder)}</b>${theatre.heldSince !==
+                  null
+                    ? html` <span class="wp-row-since"
+                        >${translateText("world_page.row_since", {
                           date: this.date(theatre.heldSince),
-                        })
-                      : nothing}
-                  </div>
-                </div>
-              </div>
-              <p class="wp-front-line">
-                ${this.contestLine(theatre, display)}
-              </p>`}
-        ${theatre.battleCount > 0
-          ? html`<ol
-              class="wp-form"
-              aria-label=${translateText("world_page.front_form", {
-                count: model.windowSize,
-              })}
-            >
-              ${Array.from(
-                { length: emptySlots },
-                () => html`<li class="wp-form-empty"></li>`,
-              )}
-              ${theatre.window.map((battle) => this.renderFormCell(battle))}
-            </ol>`
-          : nothing}
-        <p class="wp-front-foot">
-          ${theatre.battleCount > 0
-            ? html`${translateText("world_page.front_battles", {
-                count: theatre.battleCount,
-              })}
-              ·
-              ${translateText("world_page.front_last_battle", {
-                age: this.age(theatre.lastBattleAt),
-              })}`
-            : translateText("world_page.front_no_battles")}
-        </p>
+                        })}</span
+                      >`
+                    : nothing}</span
+                >
+                <span class="wp-row-race"
+                  >${this.contestLine(theatre, display)}</span
+                >
+              </span>`}
+      </div>
+      <div class="wp-row-form">${this.renderStrip(theatre, model)}</div>
+      <div class="wp-row-last">
+        ${theatre.lastBattleAt === null
+          ? nothing
+          : html`<span class="wp-row-age"
+                >${this.age(theatre.lastBattleAt)}</span
+              ><span class="wp-row-age-phone"
+                >${translateText("world_page.row_last_battle", {
+                  age: this.age(theatre.lastBattleAt),
+                })}</span
+              ><span class="wp-row-count"
+                >${translateText("world_page.front_battles", {
+                  count: theatre.battleCount,
+                })}</span
+              >`}
       </div>
     </li>`;
   }
 
+  /** How close the race for a held front is, in words. */
   private contestLine(theatre: WorldTheatre, display: FrontDisplayState) {
     if (theatre.challenger === null) {
       return translateText("world_page.front_unchallenged", {
@@ -1171,12 +1181,10 @@ export class WorldPage extends LitElement {
       });
     }
     if (display === "contested") {
-      return html`<span class="wp-siege-line"
-        >${unsafeSVG(ICONS.swords)}${translateText("world_page.front_level", {
-          challenger: this.label(theatre.challenger),
-          wins: theatre.holderWins,
-        })}</span
-      >`;
+      return translateText("world_page.front_level", {
+        challenger: this.label(theatre.challenger),
+        wins: theatre.holderWins,
+      });
     }
     return translateText("world_page.front_lead", {
       holderWins: theatre.holderWins,
@@ -1185,17 +1193,88 @@ export class WorldPage extends LitElement {
     });
   }
 
-  private renderFormCell(battle: WorldBattle) {
-    const title = `${this.date(battle.at, true)} · ${this.battlefieldName(battle.map)} · ${this.label(battle.winner)}`;
-    return html`<li>
-      <a
-        href=${battle.href}
-        class="wp-form-cell ${battle.winner === null ? "wp-form-nowin" : ""}"
-        style="--c:${this.bannerColor(battle.winner)}"
-        title=${title}
-        aria-label=${title}
-      ></a>
-    </li>`;
+  /** An unclaimed front either saw no battle or no winner yet. */
+  private unclaimedLine(theatre: WorldTheatre): string {
+    return theatre.battleCount === 0
+      ? translateText("world_page.front_no_battles")
+      : translateText("world_page.front_no_winner", {
+          count: theatre.battleCount,
+        });
+  }
+
+  /** The state a front's name carries in brackets, or none while plainly held. */
+  private stateWord(display: FrontDisplayState): string | null {
+    if (display === "contested") {
+      return translateText("world_page.legend_siege");
+    }
+    if (display === "quiet") return translateText("world_page.legend_quiet");
+    return null;
+  }
+
+  /**
+   * A front's last battles, oldest first: the holder's wins in their
+   * colour, the nearest challenger's in theirs, anyone else's in slate, and
+   * a battle without a winner struck through. Its label gives the counts.
+   */
+  private renderStrip(theatre: WorldTheatre, model: WorldModel) {
+    if (theatre.window.length === 0) return nothing;
+    const { holder, challenger } = theatre;
+    // Counted from the cells themselves, so the label always matches them.
+    let holderWins = 0;
+    let challengerWins = 0;
+    let others = 0;
+    let none = 0;
+    for (const battle of theatre.window) {
+      if (battle.winner === null) none += 1;
+      else if (battle.winner === holder) holderWins += 1;
+      else if (battle.winner === challenger) challengerWins += 1;
+      else others += 1;
+    }
+    const counts: string[] = [];
+    if (holder !== null) {
+      counts.push(
+        translateText("world_page.strip_wins", {
+          name: this.label(holder),
+          count: holderWins,
+        }),
+      );
+    }
+    if (challenger !== null) {
+      counts.push(
+        translateText("world_page.strip_wins", {
+          name: this.label(challenger),
+          count: challengerWins,
+        }),
+      );
+    }
+    if (others > 0) {
+      counts.push(translateText("world_page.strip_others", { count: others }));
+    }
+    if (none > 0) {
+      counts.push(translateText("world_page.strip_none", { count: none }));
+    }
+    const empty = Math.max(0, model.windowSize - theatre.window.length);
+    return html`<span
+      class="wp-strip"
+      role="img"
+      aria-label=${translateText("world_page.strip_aria", {
+        count: theatre.window.length,
+        summary: this.list(counts),
+      })}
+      style="--cells:${Math.max(model.windowSize, theatre.window.length)}"
+    >
+      ${Array.from(
+        { length: empty },
+        () => html`<i class="wp-strip-empty"></i>`,
+      )}
+      ${theatre.window.map((battle) => {
+        if (battle.winner === null) return html`<i class="wp-strip-none"></i>`;
+        if (battle.winner !== holder && battle.winner !== challenger) {
+          return html`<i class="wp-strip-other"></i>`;
+        }
+        return html`<i style="--cell:${this.bannerColor(battle.winner)}"></i>`;
+      })}
+    </span>`;
   }
 
   // -------------------------------------------------------------- dispatches
@@ -1208,12 +1287,17 @@ export class WorldPage extends LitElement {
       <h2 id="wp-dispatches-title" class="wp-section-title">
         ${translateText("world_page.dispatches_title")}
       </h2>
+      <p class="wp-panel-intro">
+        ${translateText("world_page.dispatches_definition", {
+          window: model.windowSize,
+        })}
+      </p>
       ${model.events.length === 0
         ? html`<p class="wp-muted">
             ${translateText("world_page.dispatches_empty")}
           </p>`
         : html`<ol class="wp-dispatches" role="list">
-            ${events.map((event) => this.renderDispatch(event, model))}
+            ${events.map((event) => this.renderDispatch(event))}
           </ol>`}
       ${model.events.length > DISPATCHES_COLLAPSED
         ? html`<button
@@ -1233,67 +1317,40 @@ export class WorldPage extends LitElement {
     </section>`;
   }
 
-  private renderDispatch(event: WorldEvent, model: WorldModel) {
-    const front = this.frontName(event.theatreId);
-    const agent = this.label(event.agent);
-    const rival = this.label(event.rival);
-    const isCrown = event.theatreId === "crown";
-    let icon: TemplateResult;
-    let title: string;
-    let detail: string;
-    switch (event.kind) {
-      case "conquest":
-        title = isCrown
-          ? translateText("world_page.event_conquest_crown", { agent, rival })
-          : translateText("world_page.event_conquest", { agent, front, rival });
-        detail = translateText("world_page.event_detail_conquest", {
-          agentWins: event.agentWins,
-          rivalWins: event.rivalWins,
-          window: model.windowSize,
-        });
-        icon = isCrown ? CROWN_GLYPH : html`${unsafeSVG(ICONS.flag)}`;
-        break;
-      case "siege":
-        title = translateText("world_page.event_siege", { agent, front });
-        detail = translateText("world_page.event_detail_siege", {
-          rival,
-          wins: event.agentWins,
-        });
-        icon = html`${unsafeSVG(ICONS.swords)}`;
-        break;
-      case "held":
-        title = translateText("world_page.event_held", { agent, front });
-        detail = translateText("world_page.event_detail_held", {
-          rival,
-          agentWins: event.agentWins,
-          rivalWins: event.rivalWins,
-        });
-        icon = html`${unsafeSVG(ICONS.shield)}`;
-        break;
-      default:
-        title = translateText("world_page.event_claim", { agent, front });
-        detail = translateText("world_page.event_detail_claim");
-        icon = html`${unsafeSVG(ICONS.pin)}`;
-    }
-    return html`<li
-      class="wp-dispatch"
-      data-kind=${event.kind}
-      style="--banner:${this.bannerColor(event.agent)}"
-    >
-      <span class="wp-dispatch-icon">${icon}</span>
-      <div class="wp-dispatch-body">
-        <p class="wp-dispatch-title">${title}</p>
-        <p class="wp-dispatch-detail">${detail}</p>
-        <p class="wp-dispatch-detail">${this.battlefieldName(event.map)}</p>
-      </div>
-      <div class="wp-dispatch-meta">
+  /** One event in the front page's words; the whole row watches the battle. */
+  private renderDispatch(event: WorldEvent) {
+    const { key, params } = eventSentence(event, (name) => this.label(name));
+    const sentence = translateText(key, {
+      ...params,
+      agent: this.label(event.agent),
+    });
+    return html`<li>
+      <a
+        class="wp-dispatch"
+        href=${event.href}
+        aria-label=${translateText("world_page.watch_event_aria", {
+          event: sentence,
+        })}
+      >
         <time datetime=${event.at} title=${this.date(event.at, true)}
           >${this.age(event.at)}</time
         >
-        <a href=${event.href} class="wp-dispatch-link"
-          >${translateText("world_page.event_battle_link")}</a
+        <span class="wp-dispatch-text"
+          ><i
+            class="wp-dispatch-chip ${this.lowContrast(event.agent)
+              ? "wp-low"
+              : ""}"
+            style="--chip:${this.bannerColor(event.agent)}"
+            aria-hidden="true"
+          ></i
+          >${this.spliced(key, { ...params, agent: nameMarker(0) }, [
+            html`<b>${this.label(event.agent)}</b>`,
+          ])}</span
         >
-      </div>
+        <span class="wp-dispatch-watch" aria-hidden="true"
+          >${translateText("world_page.event_battle_link")}</span
+        >
+      </a>
     </li>`;
   }
 
@@ -1644,12 +1701,19 @@ export class WorldPage extends LitElement {
         <div class="wp-drawer-body">
           ${theatre.holder === null
             ? html`<p class="wp-front-empty">
-                ${translateText("world_page.front_unclaimed_body", {
-                  maps: theatre.battlefields
-                    .slice(0, 2)
-                    .map((map) => this.battlefieldName(map))
-                    .join(" / "),
-                })}
+                ${translateText(
+                  theatre.battleCount === 0
+                    ? "world_page.front_unclaimed_body"
+                    : "world_page.front_unclaimed_tried",
+                  {
+                    count: theatre.battleCount,
+                    maps: this.list(
+                      theatre.battlefields.map((map) =>
+                        this.battlefieldName(map),
+                      ),
+                    ),
+                  },
+                )}
               </p>`
             : html`<div class="wp-drawer-holder">
                   ${this.emblem(theatre.holder, 56)}
@@ -1660,20 +1724,21 @@ export class WorldPage extends LitElement {
                     <div class="wp-drawer-holdername">
                       ${this.agentLink(theatre.holder)}
                     </div>
-                    <div class="wp-front-since">
-                      ${theatre.heldSince !== null
-                        ? translateText("world_page.front_held_since", {
+                    ${theatre.heldSince !== null
+                      ? html`<div class="wp-drawer-since">
+                          ${translateText("world_page.front_held_since", {
                             date: this.date(theatre.heldSince),
-                          })
-                        : nothing}
-                      ${reign !== undefined
-                        ? html` ·
-                          ${translateText("world_page.detail_reign", {
+                          })}
+                        </div>`
+                      : nothing}
+                    ${reign !== undefined
+                      ? html`<div class="wp-drawer-since">
+                          ${translateText("world_page.detail_reign_current", {
                             wins: reign.wins,
                             battles: reign.battles,
-                          })}`
-                        : nothing}
-                    </div>
+                          })}
+                        </div>`
+                      : nothing}
                   </div>
                 </div>
                 <p class="wp-front-line">
@@ -1827,8 +1892,6 @@ const WORLD_PAGE_CSS = `
 .wp-label-text{display:flex;flex-direction:column;line-height:1.05}
 .wp-label-front{font-size:11px;font-weight:400;color:var(--wp-dim)}
 .wp-label-holder{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-width:17ch;overflow:hidden;white-space:normal;overflow-wrap:anywhere;font-size:12.5px;font-weight:700;line-height:1.1}
-.wp-label-siege{display:inline-flex;width:18px;height:18px;padding:3px;border-radius:50%;background:var(--rival);color:#0b1220}
-.wp-label-siege svg{width:100%;height:100%}
 .wp-emblem{display:inline-flex;align-items:center;justify-content:center;width:var(--size);height:var(--size);flex:none;border-radius:50%;overflow:hidden;background:rgba(0,0,0,.35);box-shadow:0 0 0 2px var(--banner)}
 .wp-emblem svg,.wp-emblem img{width:100%;height:100%;display:block;image-rendering:pixelated}
 .wp-emblem-blank{background:var(--banner);color:#0b1220;font:700 calc(var(--size)*.5)/1 var(--wp-display)}
@@ -1840,8 +1903,7 @@ const WORLD_PAGE_CSS = `
 .wp-crown-title{font-size:12px;font-weight:400;color:var(--wp-dim)}
 .wp-crown-holder{font-size:13.5px;font-weight:700;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wp-crown-sub{font-size:11.5px;color:var(--wp-dim)}
-.wp-crown-siege{display:inline-flex;align-items:center;gap:.25rem;font-size:11.5px;color:var(--wp-ink)}
-.wp-crown-siege svg{width:12px;height:12px}
+.wp-crown-siege{font-size:11.5px;line-height:1.3;color:var(--wp-ink)}
 .wp-guide{position:relative;z-index:2;margin-top:10px}
 .wp-sw{display:inline-block;flex:none;width:12px;height:12px;margin-right:6px;background:var(--paint)}
 .wp-sw-open{box-shadow:inset 0 0 0 1px #46556c}
@@ -1858,72 +1920,72 @@ const WORLD_PAGE_CSS = `
 .wp-legend-front{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0;border:0;background:none;color:var(--wp-ink);font:400 13px/1.2 var(--wp-display);white-space:nowrap;cursor:pointer}
 /* 44px tap targets without 44px lines: a wrapped row stays compact. */
 a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;inset:-6px -4px}
-.wp-legend-front-name{text-decoration:underline;text-decoration-color:#46556c;text-underline-offset:3px}
+.wp-legend-front-name{color:var(--wp-ink);text-decoration:underline;text-decoration-color:#46556c;text-underline-offset:3px}
 .wp-legend-front:hover .wp-legend-front-name{text-decoration-color:var(--wp-ink)}
 .wp-legend-front:focus-visible{outline:2px solid var(--wp-ink);outline-offset:2px}
-.wp-legend-state{color:var(--wp-dim)}
+.wp-legend-front-text{color:var(--wp-dim)}
 .wp-legend-front-crown{display:inline-flex;width:14px;height:8px;margin-right:6px;color:var(--wp-ink)}
 .wp-section{padding-top:clamp(36px,5vw,56px)}
 .wp-section-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.25rem 1.5rem;margin-bottom:1rem}
 .wp-section-title{margin:0;font:700 24px/1.2 var(--wp-display);color:var(--wp-ink)}
-.wp-section-intro{margin:0;max-width:60ch;font-size:14px;color:var(--wp-dim)}
-.wp-front-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px;margin:0;padding:0;list-style:none}
-.wp-front{position:relative;display:flex;flex-direction:column;min-width:0;border-radius:14px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border:1px solid var(--wp-line);transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}
-.wp-front:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 18px 40px -26px color-mix(in srgb,var(--banner) 70%,transparent)}
-.wp-front-hit{position:absolute;inset:0;z-index:1;background:none;border:0;cursor:pointer;border-radius:14px}
-.wp-front-hit:focus-visible{outline:2px solid var(--banner);outline-offset:-2px}
-.wp-front a{position:relative;z-index:2}
-.wp-front-art{position:relative;height:96px;background:linear-gradient(135deg,color-mix(in srgb,var(--banner) 30%,#0b1a33),#0a1628);overflow:hidden}
-.wp-front-art img{width:100%;height:100%;object-fit:cover;opacity:.55;filter:saturate(.9) contrast(1.05);transform:scale(1.04);transition:transform .5s ease,opacity .3s}
-.wp-front:hover .wp-front-art img{transform:scale(1.09);opacity:.68}
-.wp-front-art::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 20%,rgba(10,22,40,.92)),linear-gradient(90deg,color-mix(in srgb,var(--banner) 34%,transparent),transparent 70%)}
-.wp-front[data-state="contested"] .wp-front-art::before{content:"";position:absolute;left:0;right:0;top:0;height:4px;z-index:1;background:repeating-linear-gradient(90deg,var(--banner) 0 14px,var(--rival) 14px 28px);background-size:28px 4px}
-.wp-front[data-state="quiet"] .wp-front-art img,.wp-front[data-state="unclaimed"] .wp-front-art img{filter:grayscale(.85) brightness(.8)}
-.wp-front[data-state="unclaimed"] .wp-front-art{background:linear-gradient(135deg,#1b2433,#0a1628)}
-.wp-front-body{display:flex;flex-direction:column;gap:.55rem;padding:.2rem 1rem 1rem;margin-top:-34px;position:relative}
-.wp-front-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
-.wp-front-name{margin:0;display:flex;align-items:center;gap:.4rem;font:700 18px/1.15 var(--wp-display);color:var(--wp-ink);text-shadow:0 1px 8px rgba(0,0,0,.6)}
-.wp-front-crownicon{display:inline-flex;width:18px;height:10px;color:var(--wp-ink)}
+.wp-section-intro{margin:0;max-width:62ch;font-size:14px;line-height:1.5;color:var(--wp-dim)}
+.wp-fronts-head{display:none}
+.wp-fronts{margin:0;padding:0;list-style:none;border-top:1px solid var(--wp-line)}
+.wp-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"front last" "holder holder" "form form";gap:10px 16px;padding:14px 0 16px;border-bottom:1px solid var(--wp-line)}
+.wp-row:hover{background:rgba(255,255,255,.025)}
+.wp-row-hit{position:absolute;inset:0;z-index:1;width:100%;height:100%;padding:0;border:0;background:none;cursor:pointer}
+.wp-row-hit:focus-visible{outline:2px solid var(--wp-ink);outline-offset:-2px}
+.wp-row-front{grid-area:front;display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;min-width:0}
+.wp-row-front .wp-sw{margin-right:0}
+.wp-row-crown{display:inline-flex;flex:none;width:12px;height:7px;color:var(--wp-ink)}
+.wp-row-name{margin:0;font:700 17px/1.25 var(--wp-display);color:var(--wp-ink)}
+.wp-row-state{flex-basis:100%;padding-left:22px;font-size:13px;color:var(--wp-dim)}
+.wp-row[data-state="contested"] .wp-row-state{color:var(--wp-ink);font-weight:700}
+.wp-row-holder{grid-area:holder;display:flex;align-items:flex-start;gap:10px;min-width:0}
+.wp-row-holdertext{display:flex;flex-direction:column;gap:2px;min-width:0}
+.wp-row-holdername{font-size:15px;line-height:1.3;color:var(--wp-ink);overflow-wrap:anywhere}
+.wp-row-since{font-size:13px;color:var(--wp-dim);white-space:nowrap}
+.wp-row-race{font-size:14px;line-height:1.4;color:var(--wp-dim)}
+.wp-row-empty{font-size:14px;color:var(--wp-dim)}
+.wp-row-form{grid-area:form;min-width:0}
+.wp-row-last{grid-area:last;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:13px;color:var(--wp-dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+.wp-row-age{display:none}
+.wp-row-count{font-size:12px}
+.wp-strip{display:grid;grid-template-columns:repeat(var(--cells),minmax(0,1fr));gap:3px;max-width:420px}
+.wp-strip i{display:block;height:14px;border-radius:2px;background:var(--cell,${UNCLAIMED_HEX})}
+.wp-strip .wp-strip-none{background:linear-gradient(to top right,transparent calc(50% - .5px),#46556c calc(50% - .5px),#46556c calc(50% + .5px),transparent calc(50% + .5px));box-shadow:inset 0 0 0 1px #46556c}
+.wp-strip .wp-strip-empty{background:none;box-shadow:inset 0 0 0 1px rgba(148,163,184,.14)}
+@media (min-width:900px){
+  .wp-fronts-head,.wp-row{grid-template-columns:minmax(9rem,12rem) minmax(0,1fr) minmax(10rem,15rem) 7.5rem;column-gap:28px}
+  .wp-fronts-head{display:grid;padding:0 0 8px;font-size:13px;color:var(--wp-dim)}
+  .wp-fronts-head span:last-child{text-align:right}
+  .wp-row{grid-template-areas:"front holder form last";align-items:center;padding:12px 0}
+  .wp-row-age{display:inline}
+  .wp-row-age-phone{display:none}
+}
 .wp-chip{display:inline-flex;align-items:center;padding:.15rem .5rem;border-radius:2px;font:700 12px/1.3 var(--wp-display);border:1px solid var(--wp-line);color:var(--wp-dim);background:rgba(6,12,22,.7);white-space:nowrap}
 .wp-chip[data-state="held"]{color:color-mix(in srgb,var(--banner) 80%,#fff);border-color:color-mix(in srgb,var(--banner) 50%,transparent)}
 .wp-chip[data-state="contested"]{color:var(--wp-ink);border-color:var(--wp-dim)}
 .wp-chip[data-state="quiet"]{color:#cbd5e1}
-.wp-front-holder{display:flex;align-items:center;gap:.65rem;min-width:0}
-.wp-front-holdertext{flex:1;min-width:0}
-.wp-front-holdername{font:700 15px/1.2 var(--wp-display);color:var(--wp-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wp-agent-link{color:inherit;text-decoration:none;position:relative;z-index:2}
 .wp-agent-link:hover{text-decoration:underline;text-decoration-color:var(--banner,currentColor);text-underline-offset:3px}
-.wp-front-since{font-size:12px;color:var(--wp-faint)}
-.wp-front-line{margin:0;font-size:13px;color:var(--wp-dim)}
-.wp-siege-line{display:inline-flex;align-items:center;gap:.35rem;color:#fecaca}
-.wp-siege-line svg{width:14px;height:14px;flex:none}
-.wp-front-empty{margin:.2rem 0 0;font-size:13px;color:var(--wp-faint)}
-.wp-form{display:grid;grid-template-columns:repeat(12,1fr);gap:3px;margin:.1rem 0 0;padding:0;list-style:none}
-.wp-form li{min-width:0}
-.wp-form-cell,.wp-form-empty{display:block;height:14px;border-radius:3px}
-.wp-form-cell{background:var(--c);box-shadow:inset 0 -2px 0 rgba(0,0,0,.25);transition:transform .15s}
-.wp-form-cell:hover{transform:scaleY(1.35)}
-.wp-form-nowin{background:transparent;box-shadow:inset 0 0 0 1px rgba(148,163,184,.4)}
-.wp-form-empty{background:rgba(148,163,184,.06)}
-.wp-front-foot{margin:0;font-size:11.5px;color:var(--wp-faint);font-variant-numeric:tabular-nums}
-.wp-front-crown{border-color:color-mix(in srgb,var(--banner) 45%,transparent)}
+.wp-front-line{margin:0;font-size:14px;color:var(--wp-dim)}
+.wp-front-empty{margin:.2rem 0 0;font-size:14px;line-height:1.5;color:var(--wp-dim)}
 .wp-columns{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px;padding-top:clamp(36px,5vw,56px)}
 @media (max-width:900px){.wp-columns{grid-template-columns:minmax(0,1fr)}}
 .wp-panel{min-width:0;padding:1.1rem 1.1rem 1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
-.wp-panel .wp-section-title{margin-bottom:.8rem}
-.wp-dispatches{margin:0;padding:0;list-style:none}
-.wp-dispatch{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:.75rem;align-items:start;padding:.75rem 0;border-top:1px solid var(--wp-line)}
-.wp-dispatch:first-child{border-top:0;padding-top:.2rem}
-.wp-dispatch-icon{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:color-mix(in srgb,var(--banner) 18%,transparent);color:var(--banner);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--banner) 40%,transparent)}
-.wp-dispatch-icon svg{width:18px;height:18px}
-.wp-dispatch[data-kind="siege"] .wp-dispatch-icon{color:#fca5a5;background:rgba(239,68,68,.12);box-shadow:inset 0 0 0 1px rgba(239,68,68,.35)}
-.wp-dispatch-title{margin:0;font:700 14px/1.3 var(--wp-display);color:var(--wp-ink)}
-.wp-dispatch-detail{margin:.15rem 0 0;font-size:12.5px;color:var(--wp-faint)}
-.wp-dispatch-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.3rem;font-size:12px;color:var(--wp-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
-.wp-dispatch-link{display:inline-flex;align-items:center;min-height:32px;color:var(--wp-ink);text-decoration:underline;text-decoration-color:#5b6b82;text-underline-offset:3px;font-weight:700}
-.wp-dispatch-link:hover{text-decoration-color:var(--wp-ink)}
-.wp-more{margin-top:.6rem;background:none;border:1px solid var(--wp-line);border-radius:8px;padding:.45rem .8rem;color:var(--wp-dim);font-size:12.5px;cursor:pointer}
-.wp-more:hover{color:var(--wp-ink);border-color:rgba(148,170,200,.35)}
+.wp-panel .wp-section-title{margin-bottom:.4rem}
+.wp-panel-intro{margin:0 0 .8rem;font-size:13px;color:var(--wp-dim)}
+.wp-dispatches{margin:0;padding:0;list-style:none;border-top:1px solid var(--wp-line)}
+.wp-dispatch{display:grid;grid-template-columns:6.5em minmax(0,1fr) auto;gap:2px 16px;align-items:baseline;min-height:44px;padding:11px 0 12px;border-bottom:1px solid var(--wp-line);color:var(--wp-ink);text-decoration:none}
+.wp-dispatch time{font-size:13px;color:var(--wp-dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+.wp-dispatch-text{font-size:15px;line-height:1.45}
+.wp-dispatch-chip{display:inline-block;width:10px;height:10px;margin-right:8px;background:var(--chip)}
+.wp-dispatch-watch{font-size:13px;font-weight:700;color:var(--wp-dim)}
+.wp-dispatch:hover .wp-dispatch-watch{color:var(--wp-ink);text-decoration:underline;text-underline-offset:3px}
+.wp-dispatch:focus-visible{outline:2px solid var(--wp-ink);outline-offset:2px}
+.wp-more{min-height:44px;margin-top:.8rem;padding:0 16px;background:none;border:1px solid #46556c;border-radius:2px;color:var(--wp-ink);font:700 14px/1 var(--wp-display);cursor:pointer}
+.wp-more:hover{border-color:var(--wp-ink)}
 .wp-muted{color:var(--wp-faint);font-size:13px}
 .wp-powers{width:100%;border-collapse:collapse;font-size:13px}
 .wp-powers th,.wp-powers td{padding:.55rem .35rem;border-top:1px solid var(--wp-line);text-align:left;vertical-align:middle;font-weight:400}
@@ -1933,8 +1995,9 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-power-agent{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
 .wp-power-crown{display:inline-flex;width:16px;height:9px;color:var(--wp-ink)}
 .wp-front-chips{display:flex;flex-wrap:wrap;gap:.25rem}
-.wp-front-chip{padding:.18rem .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
+.wp-front-chip{position:relative;padding:.18rem .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
 .wp-front-chip:hover{background:color-mix(in srgb,var(--banner) 24%,transparent)}
+.wp-front-chip::after{content:"";position:absolute;inset:-9px -2px}
 .wp-history{display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:16px;padding:1rem;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid var(--wp-line)}
 @media (max-width:820px){.wp-history{grid-template-columns:minmax(0,1fr)}}
 .wp-history-chart{position:relative;min-width:0}
@@ -1979,20 +2042,21 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
 .wp-drawer-body{display:flex;flex-direction:column;gap:.75rem;padding:1rem 1.2rem 2rem}
 .wp-drawer-holder{display:flex;align-items:center;gap:.9rem}
 .wp-kicker{font:400 13px/1.3 var(--wp-display);color:var(--wp-dim)}
+.wp-drawer-since{font-size:13px;color:var(--wp-dim)}
 .wp-drawer-holdername{font:700 20px/1.2 var(--wp-display);color:var(--wp-ink)}
 .wp-drawer-sub{margin:.8rem 0 .1rem;font:700 15px/1.3 var(--wp-display);color:var(--wp-ink)}
 .wp-tally{display:flex;flex-direction:column;gap:.4rem;margin:0;padding:0;list-style:none}
 .wp-tally li{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) 24px;align-items:center;gap:.6rem;font-size:13px;color:var(--wp-ink)}
-.wp-tally-name{display:inline-flex;align-items:center;gap:.4rem;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.wp-tally-name{display:inline-flex;align-items:center;gap:.4rem;min-width:0;overflow-wrap:anywhere}
 .wp-tally-bar{height:8px;border-radius:99px;background:rgba(148,163,184,.12);overflow:hidden}
 .wp-tally-bar i{display:block;height:100%;border-radius:99px;background:var(--banner)}
 .wp-tally b{text-align:right;font-variant-numeric:tabular-nums}
 .wp-battles,.wp-reigns{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
-.wp-battle{display:grid;grid-template-columns:122px minmax(0,1fr) minmax(0,1.2fr);align-items:center;gap:.6rem;padding:.5rem .4rem;border-radius:8px;color:var(--wp-ink);text-decoration:none;font-size:12.5px;border-left:3px solid var(--banner)}
+.wp-battle{display:grid;grid-template-columns:122px minmax(0,1fr) minmax(0,1.2fr);align-items:center;gap:.6rem;min-height:44px;padding:.5rem .4rem;border-radius:8px;color:var(--wp-ink);text-decoration:none;font-size:12.5px;border-left:3px solid var(--banner)}
 .wp-battle:hover{background:rgba(255,255,255,.04)}
 .wp-battle-when{color:var(--wp-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
 .wp-battle-map{color:var(--wp-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wp-battle-winner{display:inline-flex;align-items:center;gap:.35rem;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-weight:600}
+.wp-battle-winner{display:inline-flex;align-items:center;gap:.35rem;min-width:0;overflow-wrap:anywhere;font-weight:600}
 .wp-reigns li{display:grid;grid-template-columns:20px minmax(0,1fr) auto;grid-template-areas:"e n s" "e r r";align-items:center;column-gap:.6rem;padding:.45rem 0;border-top:1px solid var(--wp-line);font-size:12.5px}
 .wp-reigns li:first-child{border-top:0}
 .wp-reigns .wp-emblem{grid-area:e}
@@ -2014,6 +2078,15 @@ a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;ins
   .wp-legend{columns:1}
   .wp-crown .wp-emblem{width:20px;height:20px}
 }
-@media (max-width:640px){.wp-battle{grid-template-columns:104px minmax(0,1fr)}.wp-battle-map{display:none}.wp-powers-conquests{display:none}}
+@media (max-width:640px){
+  .wp-battle{grid-template-columns:104px minmax(0,1fr)}
+  .wp-battle-map,.wp-powers-conquests{display:none}
+  .wp-panel{padding:0;border:0;border-radius:0;background:none}
+  .wp-columns{row-gap:48px}
+  .wp-dispatch{grid-template-columns:minmax(0,1fr) auto;gap:2px 16px}
+  .wp-dispatch time{grid-column:1}
+  .wp-dispatch-text{grid-column:1}
+  .wp-dispatch-watch{grid-column:2;grid-row:1/3;align-self:center}
+}
 @media (prefers-reduced-motion:reduce){.wp-root *{animation:none!important;transition:none!important}}
 `;

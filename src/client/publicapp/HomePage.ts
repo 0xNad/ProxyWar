@@ -43,7 +43,6 @@ import {
 import {
   assignBannerColors,
   bannerColorOf,
-  battlefieldKey,
   changedSinceVisit,
   feedState,
   frontDisplayState,
@@ -55,7 +54,7 @@ import {
   UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
-import { battlefieldName } from "./WorldText";
+import { eventSentence, frontInText } from "./WorldText";
 
 /**
  * The front page: the war table. The first screen answers the one question
@@ -112,26 +111,6 @@ const PLACARD_PLACEMENT: Partial<
   middle_east: { dy: 1.5 },
   east_asia: { align: "right", dx: 2.5, dy: 7.5, leader: true },
 };
-
-/** Dispatch sentences per event kind; `onMap` adds "on {map}". */
-const EVENT_KEYS: Record<
-  WorldEvent["kind"],
-  { readonly plain: string; readonly onMap: string }
-> = {
-  conquest: {
-    plain: "home_page.event_conquest",
-    onMap: "home_page.event_conquest_on",
-  },
-  claim: { plain: "home_page.event_claim", onMap: "home_page.event_claim_on" },
-  siege: { plain: "home_page.event_siege", onMap: "home_page.event_siege_on" },
-  held: { plain: "home_page.event_held", onMap: "home_page.event_held_on" },
-};
-
-/** A hold whose last challenger's wins have aged out of the window. */
-const HELD_UNOPPOSED_KEYS = {
-  plain: "home_page.event_held_unopposed",
-  onMap: "home_page.event_held_unopposed_on",
-} as const;
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
@@ -501,10 +480,6 @@ export class HomePage extends LitElement {
     return translateText(`world_page.front_${id}`);
   }
 
-  private frontInText(id: WorldTheatreId): string {
-    return translateText(`home_page.in_text_${id}`);
-  }
-
   private locale(): string | undefined {
     return document.documentElement.lang || undefined;
   }
@@ -770,12 +745,12 @@ export class HomePage extends LitElement {
             html` <span class=${index > 0 ? "hp-caveat-more" : ""}
               >${caveat.kind === "siege"
                 ? translateText("home_page.caveat_siege", {
-                    front: this.frontInText(caveat.front.id),
+                    front: frontInText(caveat.front.id),
                     challenger: this.label(caveat.front.challenger ?? ""),
                     wins: caveat.front.holderWins,
                   })
                 : translateText("home_page.caveat_quiet", {
-                    front: this.frontInText(caveat.front.id),
+                    front: frontInText(caveat.front.id),
                     date: this.date(caveat.front.lastBattleAt ?? ""),
                   })}</span
             >`,
@@ -890,7 +865,7 @@ export class HomePage extends LitElement {
   private watchLabel(event: WorldEvent): string {
     const params = {
       agent: this.label(event.agent),
-      front: this.frontInText(event.theatreId),
+      front: frontInText(event.theatreId),
     };
     switch (event.kind) {
       case "conquest":
@@ -1212,23 +1187,7 @@ export class HomePage extends LitElement {
   }
 
   private renderEvent(event: WorldEvent) {
-    // "on Pangaea" only when the map is not the front's namesake map.
-    const onMap =
-      battlefieldKey(event.map) !== event.theatreId.replace(/_/g, "");
-    const keys =
-      event.rival !== null || event.kind === "claim"
-        ? EVENT_KEYS[event.kind]
-        : event.kind === "held"
-          ? HELD_UNOPPOSED_KEYS
-          : EVENT_KEYS.claim;
-    const key = onMap ? keys.onMap : keys.plain;
-    const params = {
-      front: this.frontInText(event.theatreId),
-      map: battlefieldName(event.map),
-      wins: event.agentWins,
-      rival: event.rival === null ? "" : this.label(event.rival),
-      rivalWins: event.rivalWins,
-    };
+    const { key, params } = eventSentence(event, (name) => this.label(name));
     const sentence = translateText(key, {
       ...params,
       agent: this.label(event.agent),
@@ -1442,11 +1401,11 @@ export class HomePage extends LitElement {
           ? translateText("home_page.example_tied", {
               wins: front.holderWins,
               holder: this.label(holder),
-              front: this.frontInText(front.id),
+              front: frontInText(front.id),
             })
           : translateText("home_page.example_lead", {
               holder: this.label(holder),
-              front: this.frontInText(front.id),
+              front: frontInText(front.id),
             })}
       </p>
     </figure>`;
