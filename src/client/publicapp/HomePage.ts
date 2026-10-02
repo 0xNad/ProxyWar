@@ -22,6 +22,7 @@ import {
   type RegionFront,
 } from "./HomePresentation";
 import { ensurePublicFonts } from "./PublicFonts";
+import { unclaimedLine } from "./WorldFronts";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_HEIGHT,
@@ -705,11 +706,14 @@ export class HomePage extends LitElement {
       date: (iso) => this.date(iso),
       target: (id) => ({ href: `/world#front-${id}` }),
       placardAria: (front, holder) => this.placardLabel(front, holder),
+      // Worded as on /world: "No battles yet", or the battles that ended
+      // without a winner, never "never fought" for a front that was.
       openAria: (front) =>
-        translateText("home_page.open_aria", {
+        translateText("home_page.open_aria_unclaimed", {
           front: this.frontName(front.id),
+          detail: unclaimedLine(front),
         }),
-      openLine: () => translateText("home_page.never_fought"),
+      openLine: (front) => unclaimedLine(front),
       sealAria: (crown) => {
         const holder = crown?.holder ?? null;
         if (holder === null) {
@@ -777,7 +781,7 @@ export class HomePage extends LitElement {
       ${open
         ? html`<li>
             <i class="hp-sw hp-sw-open" style="--frame:${UNCLAIMED_HEX}"></i
-            >${translateText("home_page.key_open")}
+            >${translateText("world_page.key_open")}
           </li>`
         : nothing}
     </ul>`;
@@ -852,7 +856,7 @@ export class HomePage extends LitElement {
                 style="--frame:${UNCLAIMED_HEX}"
               ></span
               ><span class="hp-legend-name hp-muted"
-                >${translateText("home_page.never_fought")}</span
+                >${translateText("world_page.legend_unclaimed")}</span
               ><span class="hp-legend-fronts hp-muted"
                 >${this.list(
                   open.map((front) => this.frontName(front.id)),
@@ -956,8 +960,8 @@ export class HomePage extends LitElement {
         frame: quiet === null ? UNCLAIMED_HEX : this.swatch(quiet),
       },
       {
-        title: translateText("home_page.rule_open_title"),
-        body: translateText("home_page.rule_open"),
+        title: translateText("world_page.status_unclaimed"),
+        body: translateText("home_page.rule_unclaimed"),
         frame: UNCLAIMED_HEX,
       },
       {

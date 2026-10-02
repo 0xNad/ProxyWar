@@ -182,7 +182,29 @@ describe("home-page", () => {
     expect(rows[0]).toContain("Matt Van");
     expect(rows[0]).toContain("Asia (under siege)");
     expect(rows.some((row) => row.includes("The Crown"))).toBe(true);
-    expect(rows[rows.length - 1]).toContain("Never fought");
+    expect(rows[rows.length - 1]).toContain("Unclaimed");
+  });
+
+  it("never calls a front that saw battles never fought", async () => {
+    const model = leaderFixture();
+    for (const theatre of model.theatres) {
+      if (theatre.id === "africa") theatre.battleCount = 3;
+    }
+    serve(model);
+    const el = mount();
+    await settle(el);
+    const africa = [...el.querySelectorAll(".hp-open")].find((open) =>
+      text(open).startsWith("Africa"),
+    );
+    expect(text(africa)).toBe("Africa 3 battles, no winner yet");
+    expect(africa?.getAttribute("aria-label")).toBe(
+      "Africa: unclaimed. 3 battles, no winner yet. Open it on the world map.",
+    );
+    const southAmerica = [...el.querySelectorAll(".hp-open")].find((open) =>
+      text(open).startsWith("South America"),
+    );
+    expect(text(southAmerica)).toBe("South America No battles yet");
+    expect(el.textContent).not.toMatch(/never fought/i);
   });
 
   it("opens the newest news from the watch button and links every dispatch", async () => {
