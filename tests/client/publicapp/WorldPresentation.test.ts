@@ -5,9 +5,11 @@ import {
   feedState,
   frontDisplayState,
   frontPaints,
+  frontSwatch,
   hueOf,
   parseVisitSnapshot,
   relativeAge,
+  UNCLAIMED_HEX,
   visitSnapshot,
   WORLD_BANNER_PALETTE,
   worldVerdict,
@@ -145,6 +147,46 @@ describe("frontPaints", () => {
 
     const hidden = frontPaints(model, colors, NOW, { revealed: () => false });
     expect(hidden.asia).toMatchObject({ fill: null, stripe: null });
+  });
+});
+
+describe("frontSwatch", () => {
+  const colors: Record<string, string> = {
+    "Matt Van": "#ff0000",
+    relh: "#0000ff",
+    Alpha: "#00ff00",
+  };
+  const colorOf = (name: string | null) =>
+    name === null ? "#64748b" : (colors[name] ?? "not a colour");
+  const front = (id: string) => {
+    const theatre = worldFixture().theatres.find((entry) => entry.id === id);
+    if (theatre === undefined) throw new Error(id);
+    return theatre;
+  };
+
+  it("paints a swatch the way the map paints the front", () => {
+    // Held: the holder's banner.
+    expect(frontSwatch(front("oceania"), colorOf, NOW)).toBe("#00ff00");
+    // Under siege: the holder hatched 85% of the way towards the challenger.
+    expect(frontSwatch(front("asia"), colorOf, NOW)).toBe(
+      "repeating-linear-gradient(135deg,#2600d9 0 2px,#ff0000 2px 7px)",
+    );
+    // Quiet: faded 62% of the way towards slate.
+    expect(
+      frontSwatch(
+        front("oceania"),
+        colorOf,
+        Date.parse("2026-10-20T00:00:00.000Z"),
+      ),
+    ).toBe("#208730");
+  });
+
+  it("falls back to unclaimed slate for empty fronts and unreadable colours", () => {
+    expect(frontSwatch(front("africa"), colorOf, NOW)).toBe(UNCLAIMED_HEX);
+    expect(frontSwatch(null, colorOf, NOW)).toBe(UNCLAIMED_HEX);
+    expect(
+      frontSwatch({ ...front("oceania"), holder: "Nobody" }, colorOf, NOW),
+    ).toBe(UNCLAIMED_HEX);
   });
 });
 

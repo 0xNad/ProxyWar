@@ -1,4 +1,12 @@
-import type { FrontPaint } from "./WorldMapRenderer";
+import {
+  mix,
+  QUIET_AMOUNT,
+  QUIET_RGB,
+  STRIPE_AMOUNT,
+  UNCLAIMED_RGB,
+  type FrontPaint,
+  type Rgb,
+} from "./WorldMapRenderer";
 import type {
   WorldAgent,
   WorldModel,
@@ -198,6 +206,40 @@ export function frontPaints(
     };
   }
   return paints;
+}
+
+export function rgbHex(rgb: Rgb): string {
+  return `#${rgb.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Land no agent holds, as a CSS colour. */
+export const UNCLAIMED_HEX = rgbHex(UNCLAIMED_RGB);
+
+/**
+ * CSS paint for a front's swatch, computed with the renderer's own maths so
+ * a key or legend swatch matches the map: the holder's banner, faded once
+ * quiet, hatched with the challenger's colour while under siege.
+ */
+export function frontSwatch(
+  front: WorldTheatre | null,
+  colorOf: (name: string | null) => string,
+  now: number,
+): string {
+  if (front === null || front.holder === null) return UNCLAIMED_HEX;
+  const display = frontDisplayState(front, now);
+  const holder = hexToRgb(colorOf(front.holder));
+  if (holder === null || display === "unclaimed") return UNCLAIMED_HEX;
+  if (display === "quiet") {
+    return rgbHex(mix(holder, QUIET_RGB, QUIET_AMOUNT));
+  }
+  if (display === "contested") {
+    const rival = hexToRgb(colorOf(front.challenger));
+    if (rival !== null) {
+      const stripe = rgbHex(mix(holder, rival, STRIPE_AMOUNT));
+      return `repeating-linear-gradient(135deg,${stripe} 0 2px,${rgbHex(holder)} 2px 7px)`;
+    }
+  }
+  return rgbHex(holder);
 }
 
 export type FeedState =

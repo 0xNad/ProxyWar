@@ -9,7 +9,15 @@ import {
   appShellHeader,
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
+import {
+  clearestSiege,
+  contrastRatio,
+  crownFront,
+  frontsInState,
+  holderGroups,
+} from "./HomePresentation";
 import { ensurePublicFonts } from "./PublicFonts";
+import { CROWN_GLYPH } from "./WorldGlyphs";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_GRATICULE,
@@ -33,8 +41,10 @@ import {
   feedState,
   frontDisplayState,
   frontPaints,
+  frontSwatch,
   parseVisitSnapshot,
   relativeAge,
+  UNCLAIMED_HEX,
   visitSnapshot,
   WORLD_REGION_IDS,
   worldVerdict,
@@ -62,6 +72,9 @@ const STRIPE_CYCLE_MS = 2600;
 const VISIT_KEY = "proxywar.world.lastVisit";
 const STYLE_ELEMENT_ID = "world-page-styles";
 const DISPATCHES_COLLAPSED = 10;
+/** The ocean behind the map; banners darker than 3:1 on it get an ink edge. */
+const OCEAN = "#071225";
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 /** Invisible-separator markers for names spliced into translated sentences. */
 const NAME_MARKER_PATTERN = /\u2063(\d+)\u2063/;
 function nameMarker(index: number): string {
@@ -90,8 +103,6 @@ const STATUS_KEYS: Record<FrontDisplayState, string> = {
 };
 
 const ICONS = {
-  crown:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 17.5h18l-1.7-9.8-5 4.4L12 4.5l-2.3 7.6-5-4.4z"/><rect x="3" y="19" width="18" height="2.2" rx="1.1" fill="currentColor"/></svg>',
   swords:
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l10 10M20 4L10 14"/><path d="M6.5 15.5l2 2M17.5 15.5l-2 2"/><path d="M4 20l3.5-3.5M20 20l-3.5-3.5"/></svg>',
   flag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/></svg>',
@@ -165,7 +176,6 @@ export class WorldPage extends LitElement {
   private mapVisible = true;
   private observer: IntersectionObserver | null = null;
   private returnFocus: HTMLElement | null = null;
-  private centredScroll = false;
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES, "wp-root");
@@ -250,15 +260,6 @@ export class WorldPage extends LitElement {
         if (this.mapVisible) this.schedule();
       });
       this.observer.observe(stage);
-    }
-    const scroller = this.querySelector<HTMLElement>(".wp-stage-scroll");
-    if (scroller !== null && !this.centredScroll) {
-      this.centredScroll = true;
-      if (scroller.scrollWidth > scroller.clientWidth) {
-        // Narrow screens pan the map; open on the Old World, where most fronts are.
-        scroller.scrollLeft =
-          (scroller.scrollWidth - scroller.clientWidth) * 0.62;
-      }
     }
     this.paint(performance.now());
     this.schedule();
@@ -401,9 +402,23 @@ export class WorldPage extends LitElement {
 
   // -------------------------------------------------------------- helpers
 
+  /** Always a `#rrggbb` colour: these values are written into style attributes. */
   private bannerColor(name: string | null): string {
     if (name === null) return "#64748b";
-    return this.colors.get(name) ?? this.agents.get(name)?.color ?? "#94a3b8";
+    const color = this.colors.get(name) ?? this.agents.get(name)?.color;
+    return color !== undefined && HEX_COLOR.test(color) ? color : "#94a3b8";
+  }
+
+  /** Below 3:1 on the ocean, a banner swatch gets an ink edge. */
+  private lowContrast(name: string | null): boolean {
+    if (name === null) return false;
+    const ratio = contrastRatio(this.bannerColor(name), OCEAN);
+    return ratio !== null && ratio < 3;
+  }
+
+  /** A front's paint as the map shows it, for swatches. */
+  private swatch(front: WorldTheatre | null): string {
+    return frontSwatch(front, (name) => this.bannerColor(name), this.now);
   }
 
   private label(name: string | null): string {
@@ -632,7 +647,7 @@ export class WorldPage extends LitElement {
             </li>
             ${crown?.holder
               ? html`<li class="wp-stat-crown">
-                  ${unsafeSVG(ICONS.crown)}
+                  ${CROWN_GLYPH}
                   ${translateText("world_page.stat_crown", {
                     name: this.label(crown.holder),
                   })}
@@ -649,7 +664,10 @@ export class WorldPage extends LitElement {
           </ul>
           ${this.renderSinceVisit()}
         </div>
-        ${this.renderMap(model)} ${this.renderPowerBar(model)}
+        ${this.renderMap(model)}
+        <div class="wp-wrap wp-guide">
+          ${this.renderLegend(model)} ${this.renderKey(model)}
+        </div>
       </section>
     `;
   }
@@ -717,7 +735,7 @@ export class WorldPage extends LitElement {
   private renderMap(model: WorldModel) {
     const crown = model.theatres.find((theatre) => theatre.id === "crown");
     return html`
-      <div class="wp-stage-scroll">
+      <div class="wp-stage-wrap">
         <div
           class="wp-stage"
           @pointermove=${(event: PointerEvent) => this.onStagePointer(event)}
@@ -761,28 +779,6 @@ export class WorldPage extends LitElement {
                 : this.renderLabel(theatre);
             })}
             ${crown !== undefined ? this.renderCrownMedallion(crown) : nothing}
-          </div>
-          <div class="wp-legend" aria-hidden="true">
-            <span
-              ><i class="wp-key-held"></i>${translateText(
-                "world_page.legend_held",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-siege"></i>${translateText(
-                "world_page.legend_siege",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-quiet"></i>${translateText(
-                "world_page.legend_quiet",
-              )}</span
-            >
-            <span
-              ><i class="wp-key-unclaimed"></i>${translateText(
-                "world_page.legend_unclaimed",
-              )}</span
-            >
           </div>
         </div>
       </div>
@@ -869,7 +865,7 @@ export class WorldPage extends LitElement {
         this.openFront("crown");
       }}
     >
-      <span class="wp-crown-icon">${unsafeSVG(ICONS.crown)}</span>
+      <span class="wp-crown-icon">${CROWN_GLYPH}</span>
       <span class="wp-crown-ring">${this.emblem(crown.holder, 44)}</span>
       <span class="wp-crown-title"
         >${translateText("world_page.crown_title")}</span
@@ -889,52 +885,143 @@ export class WorldPage extends LitElement {
     </button>`;
   }
 
-  private renderPowerBar(model: WorldModel) {
-    const regions = model.theatres.filter((theatre) => theatre.id !== "crown");
-    const counts = new Map<string, number>();
-    for (const theatre of regions) {
-      if (theatre.holder !== null) {
-        counts.set(theatre.holder, (counts.get(theatre.holder) ?? 0) + 1);
-      }
-    }
-    const segments = [...counts.entries()].sort(
-      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
-    );
-    const unclaimed =
-      regions.length - segments.reduce((sum, [, n]) => sum + n, 0);
-    return html`<div class="wp-wrap">
-      <div
-        class="wp-powerbar"
-        role="img"
-        aria-label=${translateText("world_page.powerbar_aria", {
-          summary: segments
-            .map(([name, count]) => `${this.label(name)} ${count}`)
-            .join(", "),
-        })}
-      >
-        ${segments.map(
-          ([name, count]) =>
-            html`<span
-              class="wp-power"
-              style="flex-grow:${count};--banner:${this.bannerColor(name)}"
-              title="${this.label(name)} · ${count}"
+  // ------------------------------------------------------ legend and key
+
+  /**
+   * Who holds what, under the map. Below 1180 px there is no room for
+   * placards on the map, so this is how a phone or tablet reads it: every
+   * holder named in full, every front's state in words, each front one tap
+   * from its history. Same order as the front page's legend.
+   */
+  private renderLegend(model: WorldModel) {
+    const crown = crownFront(model);
+    const crownHolder = crown?.holder ?? null;
+    const open = frontsInState(model, "unclaimed", this.now);
+    return html`<ul
+      class="wp-legend"
+      aria-label=${translateText("world_page.legend_aria")}
+    >
+      ${holderGroups(model).map(
+        (group) =>
+          html`<li>
+            <span class="wp-legend-who"
+              >${this.emblem(group.holder, 22)}${this.agentLink(
+                group.holder,
+                "wp-legend-name",
+              )}</span
+            ><span class="wp-legend-fronts"
+              >${group.fronts.map((front) => this.legendFront(front))}</span
             >
-              ${this.emblem(name, 18)}
-              <span class="wp-power-name">${this.label(name)}</span>
-              <b>${count}</b>
-            </span>`,
-        )}
-        ${unclaimed > 0
-          ? html`<span
-              class="wp-power wp-power-unclaimed"
-              style="flex-grow:${unclaimed}"
-              ><span class="wp-power-name"
-                >${translateText("world_page.powerbar_unclaimed")}</span
-              ><b>${unclaimed}</b></span
-            >`
-          : nothing}
-      </div>
-    </div>`;
+          </li>`,
+      )}
+      ${crown !== null
+        ? html`<li>
+            <span class="wp-legend-who"
+              >${this.emblem(crownHolder, 22)}${crownHolder === null
+                ? html`<span class="wp-legend-name wp-legend-muted"
+                    >${translateText("world_page.crown_vacant")}</span
+                  >`
+                : this.agentLink(crownHolder, "wp-legend-name")}</span
+            ><span class="wp-legend-fronts">${this.legendFront(crown)}</span>
+          </li>`
+        : nothing}
+      ${open.length > 0
+        ? html`<li>
+            <span class="wp-legend-who"
+              ><i
+                class="wp-sw wp-sw-flag wp-sw-open"
+                style="--paint:${UNCLAIMED_HEX}"
+              ></i
+              ><span class="wp-legend-name wp-legend-muted"
+                >${translateText("world_page.legend_never_fought")}</span
+              ></span
+            ><span class="wp-legend-fronts"
+              >${open.map((front) => this.legendFront(front, false))}</span
+            >
+          </li>`
+        : nothing}
+    </ul>`;
+  }
+
+  /** One front in the legend: its map swatch, its name, its state in words. */
+  private legendFront(front: WorldTheatre, withSwatch = true) {
+    const display = frontDisplayState(front, this.now);
+    const state =
+      display === "contested"
+        ? translateText("world_page.legend_siege")
+        : display === "quiet"
+          ? translateText("world_page.legend_quiet")
+          : null;
+    // The Crown holds no land, so it has nothing on the map to highlight.
+    const onMap = front.id !== "crown";
+    let mark: TemplateResult | typeof nothing = nothing;
+    if (!onMap) {
+      mark = html`<span class="wp-legend-front-crown">${CROWN_GLYPH}</span>`;
+    } else if (withSwatch) {
+      mark = html`<i
+        class="wp-sw ${this.lowContrast(front.holder) ? "wp-low" : ""}"
+        style="--paint:${this.swatch(front)}"
+      ></i>`;
+    }
+    return html`<button
+      type="button"
+      class="wp-legend-front"
+      @click=${() => this.openFront(front.id)}
+      @pointerenter=${() => {
+        if (onMap) this.hoverFront = front.id;
+      }}
+      @pointerleave=${() => {
+        this.hoverFront = null;
+      }}
+      @focus=${() => {
+        if (onMap) this.hoverFront = front.id;
+      }}
+      @blur=${() => {
+        this.hoverFront = null;
+      }}
+    >
+      ${mark}<span class="wp-legend-front-name"
+        >${this.frontName(front.id)}</span
+      >${state === null
+        ? nothing
+        : // A no-break space: a flex item drops a plain leading space.
+          html`<span class="wp-legend-state">&nbsp;(${state})</span>`}
+    </button>`;
+  }
+
+  /** How to read the map, with swatches painted like the map itself. */
+  private renderKey(model: WorldModel) {
+    const siege = clearestSiege(
+      model,
+      (name) => this.bannerColor(name),
+      this.now,
+    );
+    const quiet = frontsInState(model, "quiet", this.now)[0] ?? null;
+    const open = frontsInState(model, "unclaimed", this.now).length > 0;
+    if (siege === null && quiet === null && !open) return nothing;
+    return html`<p
+      class="wp-key"
+      aria-label=${translateText("world_page.key_aria")}
+    >
+      ${siege !== null
+        ? html`<span
+            ><i class="wp-sw" style="--paint:${this.swatch(siege)}"></i
+            >${translateText("world_page.key_siege")}</span
+          >`
+        : nothing}
+      ${quiet !== null
+        ? html`<span
+            ><i class="wp-sw" style="--paint:${this.swatch(quiet)}"></i
+            >${translateText("world_page.key_quiet")}</span
+          >`
+        : nothing}
+      ${open
+        ? html`<span
+            ><i class="wp-sw wp-sw-open" style="--paint:${UNCLAIMED_HEX}"></i
+            >${translateText("world_page.key_open")}</span
+          >`
+        : nothing}
+    </p>`;
   }
 
   // -------------------------------------------------------------- fronts
@@ -1013,9 +1100,7 @@ export class WorldPage extends LitElement {
         <div class="wp-front-head">
           <h3 class="wp-front-name">
             ${isCrown
-              ? html`<span class="wp-front-crownicon"
-                  >${unsafeSVG(ICONS.crown)}</span
-                >`
+              ? html`<span class="wp-front-crownicon">${CROWN_GLYPH}</span>`
               : nothing}${name}
           </h3>
           <span class="wp-chip" data-state=${display}
@@ -1153,7 +1238,7 @@ export class WorldPage extends LitElement {
     const agent = this.label(event.agent);
     const rival = this.label(event.rival);
     const isCrown = event.theatreId === "crown";
-    let icon: string;
+    let icon: TemplateResult;
     let title: string;
     let detail: string;
     switch (event.kind) {
@@ -1166,7 +1251,7 @@ export class WorldPage extends LitElement {
           rivalWins: event.rivalWins,
           window: model.windowSize,
         });
-        icon = isCrown ? ICONS.crown : ICONS.flag;
+        icon = isCrown ? CROWN_GLYPH : html`${unsafeSVG(ICONS.flag)}`;
         break;
       case "siege":
         title = translateText("world_page.event_siege", { agent, front });
@@ -1174,7 +1259,7 @@ export class WorldPage extends LitElement {
           rival,
           wins: event.agentWins,
         });
-        icon = ICONS.swords;
+        icon = html`${unsafeSVG(ICONS.swords)}`;
         break;
       case "held":
         title = translateText("world_page.event_held", { agent, front });
@@ -1183,19 +1268,19 @@ export class WorldPage extends LitElement {
           agentWins: event.agentWins,
           rivalWins: event.rivalWins,
         });
-        icon = ICONS.shield;
+        icon = html`${unsafeSVG(ICONS.shield)}`;
         break;
       default:
         title = translateText("world_page.event_claim", { agent, front });
         detail = translateText("world_page.event_detail_claim");
-        icon = ICONS.pin;
+        icon = html`${unsafeSVG(ICONS.pin)}`;
     }
     return html`<li
       class="wp-dispatch"
       data-kind=${event.kind}
       style="--banner:${this.bannerColor(event.agent)}"
     >
-      <span class="wp-dispatch-icon">${unsafeSVG(icon)}</span>
+      <span class="wp-dispatch-icon">${icon}</span>
       <div class="wp-dispatch-body">
         <p class="wp-dispatch-title">${title}</p>
         <p class="wp-dispatch-detail">${detail}</p>
@@ -1262,7 +1347,7 @@ export class WorldPage extends LitElement {
                     ? html`<span
                         class="wp-power-crown"
                         title=${translateText("world_page.powers_crown")}
-                        >${unsafeSVG(ICONS.crown)}</span
+                        >${CROWN_GLYPH}</span
                       >`
                     : nothing}
                 </span>
@@ -1405,7 +1490,7 @@ export class WorldPage extends LitElement {
                 <b>${this.date(hoverDay.day + "T12:00:00Z")}</b>
                 ${hoverDay.holders.crown
                   ? html`<span class="wp-tip-row"
-                      >${unsafeSVG(ICONS.crown)}
+                      >${CROWN_GLYPH}
                       ${this.label(hoverDay.holders.crown)}</span
                     >`
                   : nothing}
@@ -1488,9 +1573,7 @@ export class WorldPage extends LitElement {
           </p>
         </article>
         <article class="wp-rule">
-          <span class="wp-rule-icon wp-rule-icon-crown"
-            >${unsafeSVG(ICONS.crown)}</span
-          >
+          <span class="wp-rule-icon wp-rule-icon-crown">${CROWN_GLYPH}</span>
           <h3>${translateText("world_page.rule_crown_title")}</h3>
           <p>${translateText("world_page.rule_crown_body")}</p>
         </article>
@@ -1698,6 +1781,7 @@ export class WorldPage extends LitElement {
 }
 
 const WORLD_PAGE_CSS = `
+:where(.wp-root) .crown-glyph{display:block;width:100%;height:100%}
 .wp-root{--wp-ocean:#071225;--wp-ink:#edf1f7;--wp-dim:#a4afbf;--wp-faint:#6f7d90;--wp-line:rgba(148,170,200,.14);--wp-glass:rgba(8,15,28,.78);--wp-display:"PW Overpass",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 .wp-main{display:block;padding-bottom:3rem}
 .wp-wrap{width:100%;max-width:1240px;margin:0 auto;padding-inline:clamp(16px,3vw,28px)}
@@ -1725,8 +1809,8 @@ const WORLD_PAGE_CSS = `
 .wp-since-front{display:inline-flex;align-items:center;gap:.35rem;padding:.2rem .5rem;border-radius:999px;border:1px solid var(--wp-line);background:rgba(0,0,0,.25);color:var(--wp-ink);font-size:12.5px;cursor:pointer}
 .wp-since-front:hover{border-color:var(--wp-ink)}
 .wp-since-dismiss{margin-left:auto;background:none;border:0;color:var(--wp-dim);font-size:12.5px;text-decoration:underline;cursor:pointer}
-.wp-stage-scroll{position:relative;z-index:1;margin-top:clamp(14px,2vw,22px);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:rgba(148,170,200,.25) transparent}
-.wp-stage{position:relative;width:100%;max-width:1440px;margin:0 auto;aspect-ratio:500/218;min-width:760px;user-select:none;-webkit-user-select:none;touch-action:pan-x pan-y}
+.wp-stage-wrap{position:relative;z-index:1;margin-top:clamp(14px,2vw,22px)}
+.wp-stage{position:relative;width:100%;max-width:1440px;margin:0 auto;aspect-ratio:500/218;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .wp-graticule{position:absolute;inset:0;width:100%;height:100%}
 .wp-graticule line{stroke:rgba(140,175,230,.09);stroke-width:.12;vector-effect:non-scaling-stroke}
 .wp-graticule .wp-equator{stroke:rgba(140,175,230,.18);stroke-dasharray:4 6}
@@ -1734,7 +1818,7 @@ const WORLD_PAGE_CSS = `
 .wp-glow{filter:blur(12px) saturate(1.5) brightness(1.15);opacity:.5;transform:scale(1.012)}
 .wp-map{filter:drop-shadow(0 1px 0 rgba(0,0,0,.55)) drop-shadow(0 0 6px rgba(0,0,0,.35))}
 .wp-labels{position:absolute;inset:0;pointer-events:none}
-.wp-label{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;align-items:center;gap:.45rem;padding:.28rem .7rem .28rem .3rem;border-radius:999px;background:var(--wp-glass);border:1px solid color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 8px 22px -10px rgba(0,0,0,.9);color:var(--wp-ink);font-family:var(--wp-display);white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);transition:transform .18s ease,box-shadow .18s ease}
+.wp-label{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;align-items:center;gap:.45rem;padding:.28rem .7rem .28rem .3rem;border-radius:22px;background:var(--wp-glass);border:1px solid color-mix(in srgb,var(--banner) 55%,transparent);box-shadow:0 8px 22px -10px rgba(0,0,0,.9);color:var(--wp-ink);font-family:var(--wp-display);white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);transition:transform .18s ease,box-shadow .18s ease}
 .wp-label:hover,.wp-label[data-focus]{transform:translate(-50%,-50%) scale(1.06);z-index:3;box-shadow:0 10px 26px -10px rgba(0,0,0,.9),0 0 0 1px var(--banner),0 0 22px -4px color-mix(in srgb,var(--banner) 60%,transparent)}
 .wp-label:focus-visible{outline:2px solid #fff;outline-offset:2px}
 .wp-label[data-state="unclaimed"]{border-style:dashed;border-color:rgba(148,163,184,.4);padding-left:.7rem;opacity:.72}
@@ -1742,7 +1826,7 @@ const WORLD_PAGE_CSS = `
 .wp-label[data-changed]{box-shadow:0 0 0 2px var(--wp-ink)}
 .wp-label-text{display:flex;flex-direction:column;line-height:1.05}
 .wp-label-front{font-size:11px;font-weight:400;color:var(--wp-dim)}
-.wp-label-holder{font-size:12.5px;font-weight:700;max-width:15ch;overflow:hidden;text-overflow:ellipsis}
+.wp-label-holder{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-width:17ch;overflow:hidden;white-space:normal;overflow-wrap:anywhere;font-size:12.5px;font-weight:700;line-height:1.1}
 .wp-label-siege{display:inline-flex;width:18px;height:18px;padding:3px;border-radius:50%;background:var(--rival);color:#0b1220}
 .wp-label-siege svg{width:100%;height:100%}
 .wp-emblem{display:inline-flex;align-items:center;justify-content:center;width:var(--size);height:var(--size);flex:none;border-radius:50%;overflow:hidden;background:rgba(0,0,0,.35);box-shadow:0 0 0 2px var(--banner)}
@@ -1750,27 +1834,35 @@ const WORLD_PAGE_CSS = `
 .wp-emblem-blank{background:var(--banner);color:#0b1220;font:700 calc(var(--size)*.5)/1 var(--wp-display)}
 .wp-crown{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:.1rem;width:132px;padding:.55rem .5rem .6rem;border-radius:4px;background:rgb(4 10 23/.92);border:1px solid var(--wp-line);color:var(--wp-ink);font-family:var(--wp-display);cursor:pointer;text-align:center;transition:transform .18s ease}
 .wp-crown:hover{transform:translate(-50%,-50%) scale(1.04)}
-.wp-crown-icon{width:22px;height:22px;color:var(--wp-ink)}
-.wp-crown-ring{padding:3px;border-radius:50%;background:var(--banner);margin:.15rem 0 .2rem}
+.wp-crown-icon{width:22px;height:13px;margin-bottom:.2rem;color:var(--wp-ink)}
+.wp-crown-ring{display:flex;padding:3px;border-radius:50%;background:var(--banner);margin:.15rem 0 .2rem}
 .wp-crown-ring .wp-emblem{box-shadow:none}
 .wp-crown-title{font-size:12px;font-weight:400;color:var(--wp-dim)}
 .wp-crown-holder{font-size:13.5px;font-weight:700;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wp-crown-sub{font-size:11.5px;color:var(--wp-dim)}
 .wp-crown-siege{display:inline-flex;align-items:center;gap:.25rem;font-size:11.5px;color:var(--wp-ink)}
 .wp-crown-siege svg{width:12px;height:12px}
-.wp-legend{position:absolute;left:1.2%;bottom:3%;display:flex;flex-wrap:wrap;gap:.35rem .9rem;max-width:46%;padding:.45rem .7rem;border-radius:10px;background:rgba(5,10,20,.6);border:1px solid var(--wp-line);font-size:11px;color:var(--wp-dim);pointer-events:none;backdrop-filter:blur(4px)}
-.wp-legend span{display:inline-flex;align-items:center;gap:.35rem;white-space:nowrap}
-.wp-legend i{display:inline-block;width:16px;height:10px;border-radius:2px}
-.wp-key-held{background:linear-gradient(90deg,#ff9a3d,#5d8cf0)}
-.wp-key-siege{background:repeating-linear-gradient(-45deg,#ff5d5b 0 3px,#3ab8f5 3px 6px)}
-.wp-key-quiet{background:#52606f}
-.wp-key-unclaimed{background:#28323f;outline:1px dashed rgba(148,163,184,.45)}
-.wp-powerbar{display:flex;gap:3px;margin-top:18px;height:38px;border-radius:12px;overflow:hidden;background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 1px var(--wp-line)}
-.wp-power{display:flex;align-items:center;gap:.4rem;min-width:0;padding:0 .55rem;background:linear-gradient(180deg,color-mix(in srgb,var(--banner) 92%,#fff),var(--banner));color:#0b1220;font:700 12.5px/1 var(--wp-display);transition:flex-grow .6s ease}
-.wp-power .wp-emblem{box-shadow:0 0 0 1.5px rgba(11,18,32,.55)}
-.wp-power-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.wp-power b{margin-left:auto;font-variant-numeric:tabular-nums}
-.wp-power-unclaimed{background:repeating-linear-gradient(-45deg,rgba(148,163,184,.12) 0 6px,rgba(148,163,184,.06) 6px 12px);color:var(--wp-dim)}
+.wp-guide{position:relative;z-index:2;margin-top:10px}
+.wp-sw{display:inline-block;flex:none;width:12px;height:12px;margin-right:6px;background:var(--paint)}
+.wp-sw-open{box-shadow:inset 0 0 0 1px #46556c}
+.wp-low{box-shadow:inset 0 0 0 1px var(--wp-ink)}
+.wp-key{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0;font-size:13px;line-height:1.5;color:var(--wp-dim)}
+.wp-key span{display:inline-flex;align-items:center}
+.wp-legend{display:none;margin:0 0 10px;padding:0;list-style:none}
+.wp-legend li{display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;min-height:44px;border-bottom:1px solid var(--wp-line);break-inside:avoid}
+.wp-legend-who{display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0}
+.wp-legend-name{position:relative;display:inline-flex;align-items:center;min-height:32px;font:700 14px/1.25 var(--wp-display);color:var(--wp-ink);overflow-wrap:anywhere}
+.wp-legend-muted{font-weight:400;color:var(--wp-dim)}
+.wp-sw-flag{width:22px;height:22px;margin-right:0}
+.wp-legend-fronts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:0 16px;margin-left:auto}
+.wp-legend-front{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0;border:0;background:none;color:var(--wp-ink);font:400 13px/1.2 var(--wp-display);white-space:nowrap;cursor:pointer}
+/* 44px tap targets without 44px lines: a wrapped row stays compact. */
+a.wp-legend-name::after,.wp-legend-front::after{content:"";position:absolute;inset:-6px -4px}
+.wp-legend-front-name{text-decoration:underline;text-decoration-color:#46556c;text-underline-offset:3px}
+.wp-legend-front:hover .wp-legend-front-name{text-decoration-color:var(--wp-ink)}
+.wp-legend-front:focus-visible{outline:2px solid var(--wp-ink);outline-offset:2px}
+.wp-legend-state{color:var(--wp-dim)}
+.wp-legend-front-crown{display:inline-flex;width:14px;height:8px;margin-right:6px;color:var(--wp-ink)}
 .wp-section{padding-top:clamp(36px,5vw,56px)}
 .wp-section-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.25rem 1.5rem;margin-bottom:1rem}
 .wp-section-title{margin:0;font:700 24px/1.2 var(--wp-display);color:var(--wp-ink)}
@@ -1791,7 +1883,7 @@ const WORLD_PAGE_CSS = `
 .wp-front-body{display:flex;flex-direction:column;gap:.55rem;padding:.2rem 1rem 1rem;margin-top:-34px;position:relative}
 .wp-front-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
 .wp-front-name{margin:0;display:flex;align-items:center;gap:.4rem;font:700 18px/1.15 var(--wp-display);color:var(--wp-ink);text-shadow:0 1px 8px rgba(0,0,0,.6)}
-.wp-front-crownicon{display:inline-flex;width:18px;height:18px;color:var(--wp-ink)}
+.wp-front-crownicon{display:inline-flex;width:18px;height:10px;color:var(--wp-ink)}
 .wp-chip{display:inline-flex;align-items:center;padding:.15rem .5rem;border-radius:2px;font:700 12px/1.3 var(--wp-display);border:1px solid var(--wp-line);color:var(--wp-dim);background:rgba(6,12,22,.7);white-space:nowrap}
 .wp-chip[data-state="held"]{color:color-mix(in srgb,var(--banner) 80%,#fff);border-color:color-mix(in srgb,var(--banner) 50%,transparent)}
 .wp-chip[data-state="contested"]{color:var(--wp-ink);border-color:var(--wp-dim)}
@@ -1839,7 +1931,7 @@ const WORLD_PAGE_CSS = `
 .wp-powers tbody th{font-weight:700;color:var(--wp-ink);overflow-wrap:anywhere}
 .wp-num{text-align:right!important;font-variant-numeric:tabular-nums;color:var(--wp-dim)}
 .wp-power-agent{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
-.wp-power-crown{display:inline-flex;width:16px;height:16px;color:var(--wp-ink)}
+.wp-power-crown{display:inline-flex;width:16px;height:9px;color:var(--wp-ink)}
 .wp-front-chips{display:flex;flex-wrap:wrap;gap:.25rem}
 .wp-front-chip{padding:.18rem .45rem;border-radius:6px;border:1px solid color-mix(in srgb,var(--banner) 45%,transparent);background:color-mix(in srgb,var(--banner) 12%,transparent);color:var(--wp-ink);font-size:11.5px;cursor:pointer;white-space:nowrap}
 .wp-front-chip:hover{background:color-mix(in srgb,var(--banner) 24%,transparent)}
@@ -1908,6 +2000,20 @@ const WORLD_PAGE_CSS = `
 .wp-reign-span{grid-area:s;color:var(--wp-faint);font-variant-numeric:tabular-nums}
 .wp-reign-record{grid-area:r;color:var(--wp-faint)}
 .wp-drawer-maps{margin:.6rem 0 0;font-size:12.5px;color:var(--wp-faint)}
-@media (max-width:640px){.wp-stage{min-width:820px}.wp-label{padding:.2rem .55rem .2rem .22rem;gap:.35rem}.wp-label-holder{display:none}.wp-label-front{font-size:11px;color:var(--wp-ink)}.wp-crown{width:112px}.wp-legend{display:none}.wp-power{justify-content:center;gap:.3rem;padding:0 .3rem}.wp-power-name{display:none}.wp-power b{margin-left:0}.wp-battle{grid-template-columns:104px minmax(0,1fr)}.wp-battle-map{display:none}.wp-powers-conquests{display:none}}
+@media (max-width:1179px){
+  .wp-label{display:none}
+  .wp-crown{width:44px;height:44px;padding:0;gap:0;justify-content:center;border:0;background:none}
+  .wp-crown:hover{transform:translate(-50%,-50%)}
+  .wp-crown-title,.wp-crown-holder,.wp-crown-sub,.wp-crown-siege{display:none}
+  .wp-crown-icon{position:absolute;left:50%;top:-3px;width:12px;height:8px;margin:0;transform:translateX(-50%)}
+  .wp-crown-ring{margin:0;padding:2px}
+  .wp-crown .wp-emblem{width:24px;height:24px}
+  .wp-legend{display:block;columns:2;column-gap:40px}
+}
+@media (max-width:759px){
+  .wp-legend{columns:1}
+  .wp-crown .wp-emblem{width:20px;height:20px}
+}
+@media (max-width:640px){.wp-battle{grid-template-columns:104px minmax(0,1fr)}.wp-battle-map{display:none}.wp-powers-conquests{display:none}}
 @media (prefers-reduced-motion:reduce){.wp-root *{animation:none!important;transition:none!important}}
 `;

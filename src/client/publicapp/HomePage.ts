@@ -25,22 +25,13 @@ import {
   type RegionFront,
 } from "./HomePresentation";
 import { ensurePublicFonts } from "./PublicFonts";
+import { CROWN_GLYPH } from "./WorldGlyphs";
 import {
   WORLD_GRID_ANCHORS,
   WORLD_GRID_HEIGHT,
   WORLD_GRID_WIDTH,
 } from "./WorldMapGrid";
-import {
-  mix,
-  paintWorldFrame,
-  QUIET_AMOUNT,
-  QUIET_RGB,
-  SEA,
-  STRIPE_AMOUNT,
-  UNCLAIMED_RGB,
-  worldGrid,
-  type Rgb,
-} from "./WorldMapRenderer";
+import { mix, paintWorldFrame, SEA, worldGrid } from "./WorldMapRenderer";
 import {
   fetchWorldModel,
   type WorldAgent,
@@ -57,8 +48,11 @@ import {
   feedState,
   frontDisplayState,
   frontPaints,
+  frontSwatch,
   hexToRgb,
   parseVisitSnapshot,
+  rgbHex,
+  UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
 import { battlefieldName } from "./WorldText";
@@ -94,7 +88,6 @@ const VISIT_KEY = "proxywar.home.lastVisit";
 const OCEAN = "#071225";
 const STARTER_REPOSITORY_URL =
   "https://github.com/0xNad/proxywar-coworld-starter";
-const UNCLAIMED_HEX = rgbHex(UNCLAIMED_RGB);
 const VACANT_RING = "#46556c";
 
 /**
@@ -142,17 +135,10 @@ const HELD_UNOPPOSED_KEYS = {
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
-/** A pixel crown with a raised centre (a flat one reads as battlements). */
-const CROWN_GLYPH = svg`<svg viewBox="0 0 9 5" aria-hidden="true" shape-rendering="crispEdges"><path d="M4 0h1v1H4zM0 1h1v1H0zM3 1h3v1H3zM8 1h1v1H8zM0 2h2v1H0zM3 2h3v1H3zM7 2h2v1H7zM0 3h9v2H0z"/></svg>`;
-
 /** Invisible-separator markers for templates spliced into translated sentences. */
 const MARK_PATTERN = /⁣(\d+)⁣/;
 function mark(index: number): string {
   return `⁣${index}⁣`;
-}
-
-function rgbHex(rgb: Rgb): string {
-  return `#${rgb.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
 }
 
 function reducedMotion(): boolean {
@@ -504,21 +490,7 @@ export class HomePage extends LitElement {
 
   /** CSS paint for a swatch, computed with the renderer's own maths. */
   private swatch(front: WorldTheatre | null): string {
-    if (front === null || front.holder === null) return UNCLAIMED_HEX;
-    const display = frontDisplayState(front, this.now);
-    const holder = hexToRgb(this.colorOf(front.holder));
-    if (holder === null || display === "unclaimed") return UNCLAIMED_HEX;
-    if (display === "quiet") {
-      return rgbHex(mix(holder, QUIET_RGB, QUIET_AMOUNT));
-    }
-    if (display === "contested") {
-      const rival = hexToRgb(this.colorOf(front.challenger));
-      if (rival !== null) {
-        const stripe = rgbHex(mix(holder, rival, STRIPE_AMOUNT));
-        return `repeating-linear-gradient(135deg,${stripe} 0 2px,${rgbHex(holder)} 2px 7px)`;
-      }
-    }
-    return rgbHex(holder);
+    return frontSwatch(front, (name) => this.colorOf(name), this.now);
   }
 
   private label(name: string): string {
