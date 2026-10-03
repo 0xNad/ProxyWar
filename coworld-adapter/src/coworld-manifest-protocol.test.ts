@@ -38,7 +38,24 @@ interface ManifestProtocolText {
       properties: Record<string, unknown>;
     };
   };
+  player: Array<{
+    id: string;
+    image: string;
+    run: string[];
+    description: string;
+  }>;
+  certification: {
+    players: Array<{ player_id: string }>;
+  };
 }
+
+const COMMANDER_PUBLIC_BASE =
+  "ghcr.io/0xnad/proxywar-commander-public-base@sha256:75d5738231a79d10d224e7468b02f4531028b28486c39c13148e310be38fd360";
+const COMMANDER_PUBLIC_BASE_PLAYER = "proxywar-commander-public-base";
+const COMMANDER_PUBLIC_BASE_RUN = [
+  "node",
+  "/app/proxywar/coworld-adapter/src/starter-player.mjs",
+];
 
 const CANONICAL_RESULT_REQUIRED = [
   "seed",
@@ -125,6 +142,43 @@ const adapterDirectory = existsSync(resolve(process.cwd(), "coworld"))
 const manifestDirectory = resolve(adapterDirectory, "coworld");
 
 describe("Coworld manifest spawn-preference protocol", () => {
+  it("publishes and certifies the exact Commander public base without invoking the private policy", () => {
+    const manifest = JSON.parse(
+      readFileSync(`${manifestDirectory}/coworld_manifest.json`, "utf8"),
+    ) as ManifestProtocolText;
+    const template = JSON.parse(
+      readFileSync(
+        `${manifestDirectory}/coworld_manifest_template.json`,
+        "utf8",
+      ),
+    ) as ManifestProtocolText;
+    const compose = readFileSync(
+      resolve(adapterDirectory, "coworld_compose.yaml"),
+      "utf8",
+    );
+
+    expect(
+      manifest.player.find(({ id }) => id === COMMANDER_PUBLIC_BASE_PLAYER),
+    ).toMatchObject({
+      image: COMMANDER_PUBLIC_BASE,
+      run: COMMANDER_PUBLIC_BASE_RUN,
+    });
+    expect(
+      template.player.find(({ id }) => id === COMMANDER_PUBLIC_BASE_PLAYER),
+    ).toMatchObject({
+      image: "{{COMMANDER_PUBLIC_BASE_IMAGE}}",
+      run: COMMANDER_PUBLIC_BASE_RUN,
+    });
+    expect(
+      manifest.certification.players.map(({ player_id }) => player_id),
+    ).toEqual(["proxywar-starter-websocket", COMMANDER_PUBLIC_BASE_PLAYER]);
+    expect(
+      template.certification.players.map(({ player_id }) => player_id),
+    ).toEqual(["proxywar-starter-websocket", COMMANDER_PUBLIC_BASE_PLAYER]);
+    expect(compose).toContain("commander-public-base:");
+    expect(compose).toContain(`image: ${COMMANDER_PUBLIC_BASE}`);
+  });
+
   it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
     "%s enables structured spatial observation without enabling the minimap",
     (manifestName) => {

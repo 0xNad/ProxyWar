@@ -19,6 +19,12 @@ services:
       context: .
       dockerfile: Dockerfile.runnables
 
+  commander-public-base:
+    # Exact public Commander base published with the Coworld package. Competitive
+    # policies remain separate private images built from this verifiable base.
+    image: ghcr.io/0xnad/proxywar-commander-public-base@sha256:75d5738231a79d10d224e7468b02f4531028b28486c39c13148e310be38fd360
+    platform: linux/amd64
+
   commissioner:
     # Hosted Coworld episodes require linux/amd64 -- without this, `docker compose build`
     # on an Apple Silicon host produces an arm64 image that upload-coworld rejects outright.
