@@ -35,6 +35,9 @@ group.
   cap, split evenly across the twelve seats); the config's `caps` also hold
   the loop to a daily total and refuse to launch when the coworld's remaining
   funds drop below a floor.
+- `launch_interval_minutes` in the config spaces launches: at 60 the loop
+  plays about one game an hour, roughly 24 a day, instead of two at a time
+  until the daily cap.
 - A seat that hits its share of the cap gets HTTP 429 from the sidecar, stops
   planning and keeps playing its last plan, and says so in every decision.
 

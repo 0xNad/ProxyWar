@@ -93,6 +93,7 @@
     }
   ],
   "concurrency": 2,
+  "launch_interval_minutes": 60,
   "caps": {
     "per_game_llm_usd": 24,
     "daily_usd": 240,
