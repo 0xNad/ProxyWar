@@ -161,6 +161,22 @@ export function battlefieldName(map: string): string {
     : translated;
 }
 
+/**
+ * The line above the headline: who fights over this map. The league's
+ * world names its builders; the Frontier Four names its teams.
+ */
+export function contextLine(model: {
+  readonly mode?: "league" | "frontier-four";
+  readonly teams?: readonly { readonly label: string }[];
+}): string {
+  if (model.mode === "frontier-four" && (model.teams?.length ?? 0) > 0) {
+    return translateText("home_page.context_frontier", {
+      teams: formatList(model.teams!.map((team) => team.label)),
+    });
+  }
+  return translateText("home_page.context");
+}
+
 /** A front's name inside a sentence ("the Black Sea", "the Crown"). */
 export function frontInText(id: WorldTheatreId): string {
   return translateText(`home_page.in_text_${id}`);

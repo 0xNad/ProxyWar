@@ -94,6 +94,7 @@ export interface AgentSpec {
   profile: AgentStrategyProfile;
   clientID?: string;
   persistentID?: string;
+  clanTag?: string | null;
 }
 
 export interface AgentParticipant {
@@ -212,6 +213,7 @@ export function createAgentParticipants(
       clientID: spec.clientID,
       username: spec.username,
       persistentID: spec.persistentID,
+      clanTag: spec.clanTag,
       log,
       ...(options.retainTurnMessagesPrimaryOnly === true
         ? { retainTurnMessages: index === 0 }
@@ -561,8 +563,7 @@ export class AgentLeagueMatchRunner {
       const { decision } = input;
       const { actionIDs: requestedActionIDs, droppedByCapActionIDs } =
         requestedDecisionActionIDs(decision);
-      const batchPrimaryMismatch =
-        agentDecisionBatchPrimaryMismatch(decision);
+      const batchPrimaryMismatch = agentDecisionBatchPrimaryMismatch(decision);
       const rejectedActionIDs: string[] = [];
       const selectedActions: Array<{
         action: LegalAction | null;
@@ -574,8 +575,9 @@ export class AgentLeagueMatchRunner {
         rejectedActionIDs.push(...batchPrimaryMismatch.rejectedActionIDs);
       }
 
-      for (const actionID of
-        batchPrimaryMismatch === null ? requestedActionIDs : []) {
+      for (const actionID of batchPrimaryMismatch === null
+        ? requestedActionIDs
+        : []) {
         const actionDecision: AgentDecision = { ...decision, actionID };
         const validation = this.decisionValidator(
           actionDecision,

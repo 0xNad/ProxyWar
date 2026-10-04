@@ -884,6 +884,16 @@ export interface PublicWorldModel {
    * and the starter without fetching the whole read model.
    */
   readonly links: PublicWorldLinks | null;
+  /**
+   * Who fights over the map. Absent or `league`: league players. The
+   * Frontier Four publisher sets `frontier-four` and names the teams, so
+   * the pages can say so.
+   */
+  readonly mode?: "league" | "frontier-four";
+  readonly teams?: readonly {
+    readonly label: string;
+    readonly model: string;
+  }[];
 }
 
 export interface PublicWorldLinks {
@@ -905,13 +915,16 @@ function matchHref(episodeRequestId: string): string {
  * past winner the league no longer lists at all — a generated provisional
  * identity with no profile link (there is no `/agent/:slug` page for them).
  */
+/** Who a name is on the page: label, link, colours, emblem. */
+export type WorldAgentIdentity = Omit<
+  PublicWorldAgent,
+  "theatres" | "conquests" | "battlesWon"
+>;
+
 function resolveWorldAgentIdentities(
   names: readonly string[],
   readModelAgents: readonly PublicAgent[],
-): Map<
-  string,
-  Omit<PublicWorldAgent, "theatres" | "conquests" | "battlesWon">
-> {
+): Map<string, WorldAgentIdentity> {
   const byPlayerName = new Map(
     readModelAgents.map((agent) => [agent.playerName, agent]),
   );
@@ -923,10 +936,7 @@ function resolveWorldAgentIdentities(
   }
   const unknownNames = names.filter((name) => !byPlayerName.has(name));
   const provisional = computeProvisionalIdentities(unknownNames, reservedSlugs);
-  const result = new Map<
-    string,
-    Omit<PublicWorldAgent, "theatres" | "conquests" | "battlesWon">
-  >();
+  const result = new Map<string, WorldAgentIdentity>();
   for (const name of names) {
     const agent = byPlayerName.get(name);
     if (agent !== undefined) {
@@ -982,6 +992,12 @@ export function buildPublicWorldModel(args: {
   readonly ledger: WorldLedgerStore;
   readonly data: CoworldLeagueMirrorData;
   readonly readModelAgents: readonly PublicAgent[];
+  /**
+   * Identities to use as given, for a world whose sides are not league
+   * players (the Frontier Four teams). Names missing here still resolve
+   * through `readModelAgents` and the provisional fallback.
+   */
+  readonly identities?: ReadonlyMap<string, WorldAgentIdentity>;
   readonly links?: PublicWorldLinks | null;
   readonly generatedAt?: string;
 }): PublicWorldModel {
@@ -1033,10 +1049,14 @@ export function buildPublicWorldModel(args: {
   }
   const byName = new Map(state.agents.map((agent) => [agent.name, agent]));
   const names = [...mentioned].sort((a, b) => a.localeCompare(b));
-  const identities = resolveWorldAgentIdentities(names, args.readModelAgents);
+  const given = args.identities ?? new Map<string, WorldAgentIdentity>();
+  const resolved = resolveWorldAgentIdentities(
+    names.filter((name) => !given.has(name)),
+    args.readModelAgents,
+  );
   const agents: PublicWorldAgent[] = names
     .map((name) => {
-      const identity = identities.get(name);
+      const identity = given.get(name) ?? resolved.get(name);
       const agentState = byName.get(name);
       return {
         name,

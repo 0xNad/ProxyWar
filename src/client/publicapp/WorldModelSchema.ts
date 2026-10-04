@@ -126,6 +126,9 @@ export const WorldModelSchema = z.object({
     .object({ accountUrl: z.string(), enterTheLeagueUrl: z.string() })
     .nullable()
     .optional(),
+  /** Absent for the league's world; `frontier-four` names the teams. */
+  mode: z.enum(["league", "frontier-four"]).optional(),
+  teams: z.array(z.object({ label: z.string(), model: z.string() })).optional(),
 });
 export type WorldModel = z.infer<typeof WorldModelSchema>;
 

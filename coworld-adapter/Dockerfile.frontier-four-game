@@ -1,0 +1,8 @@
+# Frontier Four game image: the canonical Proxy War 0.1.70 image with the
+# team-format overlay (the same four files the September 13 team experiment
+# overlaid on 0.1.68). Nothing else changes.
+FROM public.ecr.aws/q5f4m8t9/cogames@sha256:e3b46c049e1d53371c480248aedae3995d30b59ac99a83b7f39ee8c0ee420108
+COPY integration/src/no-docker-coworld-episode.ts /app/integration/src/no-docker-coworld-episode.ts
+COPY integration/src/coworld-results.ts /app/integration/src/coworld-results.ts
+COPY integration/src/coworld-teams.ts /app/integration/src/coworld-teams.ts
+COPY proxywar/src/server/agents/AgentLeagueMatch.ts /app/proxywar/src/server/agents/AgentLeagueMatch.ts

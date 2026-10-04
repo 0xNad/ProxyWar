@@ -7,6 +7,11 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
+import {
+  labelledTeamSeatPlayers,
+  normalizeCoworldExperimentConfig,
+  resolveCoworldTeams,
+} from "./coworld-teams.ts";
 
 import { CommanderXpFinalizationBarrier } from "./commander-xp-finalization.ts";
 import {
@@ -124,6 +129,9 @@ export type CoworldConfig = {
   map: string;
   map_size: string;
   difficulty: string;
+  team_count?: number;
+  seat_teams?: number[];
+  team_labels?: string[];
   seed?: number;
   replay_tail_turns?: number;
   num_agents?: number;
@@ -929,10 +937,16 @@ async function runProxyWarEpisode(
     format: winston.format.simple(),
     transports: [new winston.transports.Console()],
   });
+  const teams = resolveCoworldTeams(config, config.tokens.length);
+  // A team game named by the request: every seat, result and artifact
+  // carries "<team> <n>", whatever names hosted dispatch resolved.
+  const labelledPlayers = labelledTeamSeatPlayers(config, config.tokens.length);
+  if (labelledPlayers !== null) config.players = labelledPlayers;
   const selectedGameConfig = {
     gameMap: enumValue(modules.GameMapType, config.map),
     gameMapSize: enumValue(modules.GameMapSize, config.map_size),
-    gameMode: modules.GameMode.FFA,
+    gameMode: teams === null ? modules.GameMode.FFA : modules.GameMode.Team,
+    ...(teams === null ? {} : { playerTeams: teams.count }),
     gameType: modules.GameType.Private,
     difficulty: enumValue(modules.Difficulty, config.difficulty),
     nations: "disabled",
@@ -1004,7 +1018,10 @@ async function runProxyWarEpisode(
   const specs = competitiveSeatSpecs(
     identityPlayers,
     modules.proxyWarGameUsernameMaxLength ?? 27,
-  );
+  ).map((spec, slot) => ({
+    ...spec,
+    ...(teams === null ? {} : { clanTag: teams.clanTags[slot] }),
+  }));
   const participants = modules.createAgentParticipants(specs, log, {
     brainFactory: (spec: unknown, index: number) =>
       protocolServer.brainForSlot(
@@ -1476,7 +1493,7 @@ async function requireWebSocketMessage(url: string): Promise<string> {
 async function loadConfig(): Promise<CoworldConfig> {
   if (process.env.COGAME_CONFIG_URI) {
     const raw = await readUri(process.env.COGAME_CONFIG_URI);
-    return JSON.parse(raw);
+    return normalizeCoworldExperimentConfig(JSON.parse(raw));
   }
   const manifest = JSON.parse(
     await fs.readFile(
@@ -1554,6 +1571,12 @@ function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
     map: config.map,
     map_size: config.map_size,
     difficulty: config.difficulty,
+    ...(config.team_count === undefined
+      ? {}
+      : { team_count: config.team_count, seat_teams: config.seat_teams }),
+    ...(config.team_labels === undefined
+      ? {}
+      : { team_labels: config.team_labels }),
     seed: config.seed,
     replay_tail_turns: config.replay_tail_turns,
     episodeIndex: config.episodeIndex,
@@ -1727,6 +1750,9 @@ function finalKnownState(input: {
   return {
     phase,
     winnerSlot,
+    ...(resolved.some(({ player }) => (player?.team() ?? null) !== null)
+      ? { winnerTeam: winnerRef.type === "team" ? winnerRef.team : null }
+      : {}),
     tick: input.gameState.ticks(),
     turnCount: input.turnCount,
     players: resolved.map(({ participant, player }) => ({
@@ -1734,6 +1760,7 @@ function finalKnownState(input: {
       username: participant.spec.username,
       profile: participant.spec.profile,
       playerID: player?.id() ?? null,
+      ...((player?.team() ?? null) === null ? {} : { team: player.team() }),
       isAlive: player?.isAlive() ?? null,
       tilesOwned: player?.numTilesOwned() ?? null,
       troops: player?.troops() ?? null,
