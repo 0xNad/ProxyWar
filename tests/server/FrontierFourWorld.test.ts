@@ -66,6 +66,7 @@ function game(
     mapSize: "Normal",
     completedAt,
     replayUrl: `https://softmax.com/observatory/replays/${id}`,
+    viewerUrl: null,
     costUsd: 9.5,
     cycle,
     teams: TEAMS,
@@ -145,6 +146,14 @@ describe("Frontier Four world", () => {
     expect(row.roundNumber).toBe(3);
     expect(row.winnerName).toBe("Astra");
     expect(row.watchHref).toBe("https://softmax.com/observatory/replays/c1");
+    // A known viewer page beats the raw replay file.
+    const viewed = parseFrontierFourGameRecord({
+      ...game("c2", "Oceania", "Red", "2026-10-05T10:00:00.000Z", 3),
+      viewerUrl: "https://viewer.test/index.html#replay=c2",
+    })!;
+    expect(frontierFourEpisodeRow(viewed).watchHref).toBe(
+      "https://viewer.test/index.html#replay=c2",
+    );
     expect(row.players).toHaveLength(12);
     const astraSeats = row.players.filter((player) => player.isWinner);
     expect(astraSeats.map((player) => player.slot)).toEqual([0, 10, 11]);

@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 from coworld.api_client import CoworldApiClient
@@ -348,6 +349,13 @@ class Scheduler:
             sides.append({**side, "team": engine_team})
         front = record["front"]
         usage = self.llm_usage(episode_request_id, sides)
+        replay_url = episode.get("replay_url")
+        viewer_base = self.config.get("replay_viewer_base")
+        viewer_url = (
+            f"{viewer_base}#replay={urllib.parse.quote(replay_url, safe='')}"
+            if replay_url and viewer_base
+            else None
+        )
         return {
             "schemaVersion": 1,
             "llmUsdEstimate": usage["usd"],
@@ -358,7 +366,8 @@ class Scheduler:
             "map": front["map"],
             "mapSize": front.get("map_size", ""),
             "completedAt": episode.get("completed_at") or iso(utcnow()),
-            "replayUrl": episode.get("replay_url"),
+            "replayUrl": replay_url,
+            "viewerUrl": viewer_url,
             "costUsd": episode.get("cost_usd"),
             "cycle": record["cycle"],
             "teams": sides,

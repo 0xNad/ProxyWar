@@ -109,6 +109,8 @@ export interface FrontierFourGameRecord {
   readonly mapSize: string;
   readonly completedAt: string;
   readonly replayUrl: string | null;
+  /** The hosted replay viewer page for this game, when the scheduler knew one. */
+  readonly viewerUrl: string | null;
   readonly costUsd: number | null;
   /** The scheduler's cycle through the fronts; stands in for a round number. */
   readonly cycle: number;
@@ -198,6 +200,7 @@ export function parseFrontierFourGameRecord(
     mapSize: optionalString(value.mapSize) ?? "",
     completedAt: new Date(Date.parse(completedAt)).toISOString(),
     replayUrl: optionalString(value.replayUrl),
+    viewerUrl: optionalString(value.viewerUrl),
     costUsd: optionalNumber(value.costUsd),
     cycle,
     teams: parsedTeams,
@@ -313,7 +316,8 @@ export function frontierFourEpisodeRow(
         color: colorOf(side?.label ?? null),
       };
     }),
-    watchHref: record.replayUrl,
+    // The viewer page when known; the raw replay file otherwise.
+    watchHref: record.viewerUrl ?? record.replayUrl,
     fullRenderHref: null,
   };
 }

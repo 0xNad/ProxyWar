@@ -132,5 +132,6 @@
       "output": 6,
       "cache_read": 0.5
     }
-  }
+  },
+  "replay_viewer_base": "https://api.observatory.softmax-research.net/v2/coworlds/replays/static/<coworld id>/<url-encoded manifest hash>/index.html?v=2"
 }
