@@ -192,9 +192,8 @@ class Scheduler:
             "created_at": iso(utcnow()),
         }
         if self.dry_run:
+            # A dry run shows the next game and touches nothing on disk.
             log("dry_run_launch", key=key, variant=front["variant_id"], sides=[(s["label"], s["slots"]) for s in sides])
-            self.advance_cursor()
-            self.save()
             return
         response = self.client.create_experience_request(body).model_dump(mode="json")
         record["request"] = {k: response.get(k) for k in ("id", "status", "created_at", "cost_preview")}
@@ -248,7 +247,7 @@ class Scheduler:
             log("settled", key=key, status=status, cost_usd=sum(float(e.get("cost_usd") or 0) for e in episodes), games=self.state["games"])
             self.publish()
 
-    def llm_usage(self, episode_request_id: str, sides: list[dict]) -> dict:
+    def llm_usage(self, episode_request_id: str, sides: list[dict], roster: list[dict] | None = None) -> dict:
         """Price each seat's model calls from its own log.
 
         The platform's budget meter does not see sidecar spend, so the loop
@@ -258,6 +257,9 @@ class Scheduler:
         """
         prices = self.config.get("prices_per_million", {})
         cap_share = float(self.config["caps"]["per_game_llm_usd"]) / max(1, len(self.layout))
+        # The policy a seat ran is the one the request seated there, which may
+        # be older than the config's current version.
+        policy_of_slot = {entry["slot"]: entry["player"]["policy_ref"] for entry in roster or []}
         usage = {"usd": 0.0, "teams": {}}
         for side in sides:
             price = prices.get(side["model"], {})
@@ -266,7 +268,7 @@ class Scheduler:
                 try:
                     raw = decode_policy_log(
                         self.client.get_bytes(
-                            f"/v2/episode-requests/{episode_request_id}/{self.policy_version_for(side)}/policy-logs/{slot}"
+                            f"/v2/episode-requests/{episode_request_id}/{policy_of_slot.get(slot) or self.policy_version_for(side)}/policy-logs/{slot}"
                         )
                     )
                 except Exception as error:  # noqa: BLE001
@@ -348,7 +350,7 @@ class Scheduler:
                     break
             sides.append({**side, "team": engine_team})
         front = record["front"]
-        usage = self.llm_usage(episode_request_id, sides)
+        usage = self.llm_usage(episode_request_id, sides, record.get("body", {}).get("roster"))
         replay_url = episode.get("replay_url")
         viewer_base = self.config.get("replay_viewer_base")
         viewer_url = (

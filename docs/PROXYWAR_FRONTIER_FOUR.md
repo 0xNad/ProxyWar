@@ -37,6 +37,16 @@ group.
 - A seat that hits its share of the cap gets HTTP 429 from the sidecar, stops
   planning and keeps playing its last plan, and says so in every decision.
 
+## Where it must run from
+
+Under launchd the loop's Python has no access to the external volumes (the
+grant dialog cannot appear for a background process), and `getcwd()` on a
+volume path blocks for ever. So the LaunchAgent's start script copies
+`scheduler.py` into `~/Library/Application Support/ProxyWar/frontier-four/bin/`
+and runs it from there, the games file lives in that directory, and the
+publisher (node, which does have access) is started through zsh inside the
+deploy worktree. Keep it that way when changing the config.
+
 ## Running it
 
 ```bash
