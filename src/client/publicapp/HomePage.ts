@@ -57,6 +57,7 @@ import {
   visitSnapshot,
 } from "./WorldPresentation";
 import {
+  contextLine,
   eventSentence,
   formatAge,
   formatDate,
@@ -564,7 +565,7 @@ export class HomePage extends LitElement {
   private renderHud(model: WorldModel) {
     const view = this.verdictView();
     return html`<div class="hp-hud">
-      <p class="hp-context">${translateText("home_page.context")}</p>
+      <p class="hp-context">${contextLine(model)}</p>
       <h1
         class="hp-verdict"
         id="hp-verdict"

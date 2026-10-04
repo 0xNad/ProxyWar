@@ -68,12 +68,14 @@ export function resolveWinnerSlot(
  */
 export interface CoworldResultsFinalState {
   readonly winnerSlot: number | null;
+  readonly winnerTeam?: string | null;
   readonly turnCount: number | null;
   readonly tick: number | null;
   readonly players: ReadonlyArray<{
     readonly username: string;
     readonly tilesOwned: number | null;
     readonly isAlive: boolean | null;
+    readonly team?: string;
   }>;
 }
 
@@ -100,6 +102,7 @@ export interface CoworldResults {
   readonly seed: number | null;
   readonly scores: number[];
   readonly winner_slot: number | null;
+  readonly winner_team?: string | null;
   readonly turn_count: number | null;
   readonly tick: number | null;
   readonly decision_count: number;
@@ -115,6 +118,7 @@ export interface CoworldResults {
     score: number;
     tiles_owned: number | null;
     is_alive: boolean | null;
+    team?: string;
   }>;
 }
 
@@ -138,8 +142,37 @@ export function coworldResults(input: {
     0,
   );
   // Winner slot is resolved by identity in finalKnownState (not a name substring).
-  const winner_slot = input.finalState.winnerSlot;
+  const teamMode = input.finalState.winnerTeam !== undefined;
+  const teamMembers = new Map<string, number>();
+  const teamTiles = new Map<string, number>();
+  if (teamMode) {
+    for (const player of input.finalState.players) {
+      if (!player.team)
+        throw new Error("Team result has an unassigned policy slot");
+      teamMembers.set(player.team, (teamMembers.get(player.team) ?? 0) + 1);
+      teamTiles.set(
+        player.team,
+        (teamTiles.get(player.team) ?? 0) + Math.max(0, player.tilesOwned ?? 0),
+      );
+    }
+    if (
+      input.finalState.winnerTeam !== null &&
+      !teamMembers.has(input.finalState.winnerTeam!)
+    ) {
+      throw new Error("Team winner does not match any policy slot");
+    }
+  }
+  const winner_slot = teamMode ? null : input.finalState.winnerSlot;
   const scores = input.finalState.players.map((player, index) => {
+    if (teamMode) {
+      const members = teamMembers.get(player.team!)!;
+      if (input.finalState.winnerTeam !== null) {
+        return player.team === input.finalState.winnerTeam ? 1 / members : 0;
+      }
+      return totalTiles > 0
+        ? teamTiles.get(player.team!)! / totalTiles / members
+        : 0;
+    }
     if (winner_slot !== null) {
       return index === winner_slot ? 1 : 0;
     }
@@ -153,6 +186,7 @@ export function coworldResults(input: {
     seed: input.seed,
     scores,
     winner_slot,
+    ...(teamMode ? { winner_team: input.finalState.winnerTeam } : {}),
     turn_count: input.finalState.turnCount,
     tick: input.finalState.tick,
     decision_count: input.records.length,
@@ -190,6 +224,7 @@ export function coworldResults(input: {
       score: scores[slot] ?? 0,
       tiles_owned: player.tilesOwned,
       is_alive: player.isAlive,
+      ...(teamMode ? { team: player.team } : {}),
     })),
   };
 }

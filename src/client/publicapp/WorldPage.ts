@@ -51,6 +51,7 @@ import {
 import { renderRules } from "./WorldRules";
 import {
   battlefieldName,
+  contextLine,
   formatAge,
   formatDate,
   formatList,
@@ -644,7 +645,7 @@ export class WorldPage extends LitElement {
       <section class="wp-hero" aria-labelledby="wp-headline">
         <div class="wp-wrap wp-hero-head">
           <div class="wp-eyebrow">
-            <span>${translateText("home_page.context")}</span>
+            <span>${contextLine(model)}</span>
             ${feed.kind === "empty"
               ? html`<span class="wp-feed"
                   >${translateText("world_page.feed_empty")}</span

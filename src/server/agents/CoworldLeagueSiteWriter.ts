@@ -270,6 +270,34 @@ export interface CoworldLeagueSitePaths {
   worldLedgerPath: string;
 }
 
+/**
+ * Who publishes `world.json` into this site directory. Absent or `league`:
+ * the mirror, from league battles. `frontier-four`: the Frontier Four
+ * publisher, from its own games; the mirror then leaves `world.json` and
+ * the world ledger alone, so the two never fight over the file.
+ */
+export const COWORLD_LEAGUE_WORLD_SOURCE_FILE = "world-source.json";
+
+export type WorldSource = "league" | "frontier-four";
+
+export async function readWorldSource(siteDir: string): Promise<WorldSource> {
+  try {
+    const raw = await fs.readFile(
+      path.join(siteDir, COWORLD_LEAGUE_WORLD_SOURCE_FILE),
+      "utf8",
+    );
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "object" &&
+      value !== null &&
+      "source" in value &&
+      value.source === "frontier-four"
+      ? "frontier-four"
+      : "league";
+  } catch {
+    return "league";
+  }
+}
+
 export const COWORLD_LEAGUE_WORLD_FILE = "world.json";
 export const COWORLD_LEAGUE_WORLD_LEDGER_FILE = "world-ledger.json";
 
@@ -483,7 +511,7 @@ export async function withCoworldLeagueSiteWriteLock<T>(
   }
 }
 
-async function writeFileAtomic(
+export async function writeFileAtomic(
   destinationPath: string,
   contents: string,
 ): Promise<void> {
@@ -619,6 +647,9 @@ export async function publishCoworldLeagueWorldUnlocked(args: {
     COWORLD_LEAGUE_WORLD_LEDGER_FILE,
   );
   try {
+    if ((await readWorldSource(args.siteDir)) !== "league") {
+      return { worldPath, worldLedgerPath, battlesAdded: 0, published: false };
+    }
     const existing = await readWorldLedgerStore(worldLedgerPath);
     if (existing === "corrupt") {
       console.warn(

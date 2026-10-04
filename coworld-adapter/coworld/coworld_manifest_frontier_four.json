@@ -1,0 +1,1068 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": ["strategy", "multiplayer", "ai-agents"],
+  "game": {
+    "name": "proxywar-frontier-four",
+    "version": "0.1.0",
+    "description": "Proxy War, the Frontier Four edition: four teams of three nations, each team one frontier model, fight for the fronts of the world map. Team games on the canonical Proxy War engine.",
+    "owner": "proxywar",
+    "player_runtime": "platform-hosted",
+    "config_schema": {
+      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "tokens",
+        "players",
+        "max_decision_steps",
+        "turns_per_decision_step",
+        "max_decision_ms",
+        "map",
+        "map_size",
+        "difficulty"
+      ],
+      "properties": {
+        "map": {
+          "enum": [
+            "Pangaea",
+            "Asia",
+            "World",
+            "GiantWorldMap",
+            "Europe",
+            "NorthAmerica",
+            "Africa",
+            "Mena",
+            "Britannia",
+            "EastAsia",
+            "Oceania",
+            "BlackSea"
+          ],
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer",
+          "maximum": 11881375,
+          "minimum": 0,
+          "description": "Optional deterministic episode seed. Encoded under a fixed PWS prefix as five base-26 A-Z letters so OpenFront Math.abs(simpleHash(...)) remains injective over the supported range."
+        },
+        "tokens": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxItems": 25,
+          "minItems": 2
+        },
+        "players": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "maxItems": 25,
+          "minItems": 2
+        },
+        "map_size": {
+          "enum": ["Compact", "Normal"],
+          "type": "string"
+        },
+        "difficulty": {
+          "enum": ["Easy", "Medium"],
+          "type": "string"
+        },
+        "num_agents": {
+          "type": "integer",
+          "maximum": 25,
+          "minimum": 2,
+          "description": "Connected real-policy seats for this variant (commissioner ladder routing)."
+        },
+        "episodeIndex": {
+          "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "description": "Zero-based episode ordinal within deterministic same-variant recurrence blocks. The commissioner advances it once per scheduled episode; ProxyWar uses it only for report-independent spawn priority and fallback rotation. Defaults to 0 when omitted."
+        },
+        "max_decision_ms": {
+          "type": "integer",
+          "maximum": 180000,
+          "minimum": 250
+        },
+        "replay_tail_turns": {
+          "type": "integer",
+          "default": 0,
+          "maximum": 5000,
+          "minimum": 0
+        },
+        "max_decision_steps": {
+          "type": "integer",
+          "maximum": 600,
+          "minimum": 1
+        },
+        "episode_timeout_seconds": {
+          "type": "integer",
+          "maximum": 6000,
+          "minimum": 60,
+          "description": "Real wall-clock budget for this variant's episode. Explicit so the commissioner framework's max(300, 2x this) duration limit isn't computed from the unrelated player_connect_timeout_seconds fallback and truncate a real multi-minute match."
+        },
+        "turns_per_decision_step": {
+          "type": "integer",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "player_connect_timeout_seconds": {
+          "type": "number",
+          "default": 120,
+          "maximum": 300,
+          "minimum": 0
+        },
+        "team_count": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 8
+        },
+        "seat_teams": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 25,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "results_schema": {
+      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "seed",
+        "game_id",
+        "scores",
+        "winner_slot",
+        "turn_count",
+        "tick",
+        "decision_count",
+        "accepted_decision_count",
+        "fallback_count",
+        "players"
+      ],
+      "properties": {
+        "seed": {
+          "type": ["integer", "null"],
+          "maximum": 11881375,
+          "minimum": 0
+        },
+        "tick": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "scores": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 25,
+          "minItems": 2
+        },
+        "game_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{8}$"
+        },
+        "players": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "slot": {
+                "type": "integer",
+                "maximum": 24,
+                "minimum": 0
+              },
+              "score": {
+                "type": "number"
+              },
+              "is_alive": {
+                "type": ["boolean", "null"]
+              },
+              "tiles_owned": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "team": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "maxItems": 25,
+          "minItems": 2
+        },
+        "turn_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "winner_slot": {
+          "type": ["integer", "null"],
+          "maximum": 24,
+          "minimum": 0
+        },
+        "decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degraded_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degraded_causes": {
+          "type": "object",
+          "properties": {
+            "plan-parse": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-stale": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unreported": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "brain-error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-warmup": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-timeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "policy-error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "brain-timeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-rejected": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-unavailable": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "maxProperties": 10,
+          "additionalProperties": false
+        },
+        "accepted_decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "winner_team": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runnable": {
+      "type": "game",
+      "image": "proxywar-frontier-four-game:0.1.0",
+      "run": [
+        "node",
+        "--max-old-space-size=640",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/no-docker-coworld-episode.ts"
+      ],
+      "env": {
+        "PROXYWAR_TUNE_STRUCTURED_DEALS": "1",
+        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1",
+        "PROXYWAR_TUNE_SPATIAL_OBSERVATION": "1"
+      }
+    },
+    "protocols": {
+      "player": {
+        "type": "text",
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, protocol:{maxActionsPerDecision,maxSpawnPreferences:16}, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. protocol.maxSpawnPreferences is independent of protocol.maxActionsPerDecision. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, spawnPreferenceLegalActionIds?, selectedMessageActionId?, messageText?, selectedDealActionId?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. On a spawn-only menu, spawnPreferenceLegalActionIds may rank up to protocol.maxSpawnPreferences exact offered spawn LegalAction.id values with selectedLegalActionId first. This spawn ballot is independent of selectedLegalActionIds action batching and must not be used to batch gameplay actions. When the responseContract advertises selectedMessageActionId and messageText and the menu offers message:* actions, the two fields must be sent together: selectedMessageActionId must exactly match one offered message id and messageText must be nonblank plain text of at most 280 characters. This optional comms slot is simulation-inert and independent of the gameplay, spawn, and structured-deal slots. selectedLegalActionIds may batch up to maxActionsPerDecision offered ids (deduplicated; element 0 is the scalar primary); send it ONLY when the request envelope advertised protocol.maxActionsPerDecision - older game images execute the scalar primary only. When the current menu offers deal_* actions, selectedDealActionId may independently select one exact offered deal_propose/deal_accept/deal_reject/deal_withdraw id alongside the game action; omitting it remains valid but ignores that diplomacy opportunity. Structured deals are breakable, referee-observed promises, not engine alliances or permission changes. The wire template joint_attack is an attack pledge by the proposer only. At episode end the game sends {type:'final', slot}; the player must finish any optional COWORLD_PLAYER_ARTIFACT_UPLOAD_URL upload before closing because websocket close acknowledges terminal work is complete. The game still validates decisions through Proxy War AgentDecisionValidator."
+      },
+      "global": {
+        "type": "text",
+        "value": "Proxy War Coworld global protocol: /global sends JSON status snapshots with the latest Proxy War spectator frame for machine consumers, and /replay sends the saved replay payload. /client/global and /client/replay serve the native Proxy War client shell, which waits for Coworld replay artifacts and loads the existing game-record.json replay path through /ai-league-runs/<runID>/.... /client/player serves the same native view and adds a Coworld player sidebar that connects to /player for offered LegalAction.id choices."
+      }
+    },
+    "docs": {
+      "readme": {
+        "type": "text",
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields; its envelope independently advertises protocol.maxActionsPerDecision for optional gameplay-action batching and protocol.maxSpawnPreferences=16 for spawn ranking. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly. On a spawn-only menu, the optional spawnPreferenceLegalActionIds field may rank up to 16 exact offered spawn LegalAction.id values with selectedLegalActionId first. spawnPreferenceLegalActionIds is a spawn ballot independent of selectedLegalActionIds gameplay-action batching; never put the spawn ranking in selectedLegalActionIds. When offered, selectedDealActionId may separately select one exact deal_* id alongside that game action. Omitting the optional slot stays valid but ignores the diplomacy opportunity. Structured deals are breakable, referee-observed promises rather than engine alliances or permission changes. Non-aggression and trade-security bind both parties; joint_attack is an attack pledge by the proposer only; accepting support_request obligates the recipient to send the stated support.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Teams\n\nVariants named `teams-4x3-<map>` seat twelve players on four permanent teams of three (`team_count`, `seat_teams`). Teammates cannot attack or betray each other, may donate gold and troops, and spawn clustered; alliances, embargoes and structured deals are cross-team only. The winner is a team, on summed territory, and every seat on the winning team scores 1; an undecided team episode gives each seat its team's territory share. Results carry `winner_team` and `players[].team`.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer.\n\n## Unavailable policy seats\n\nAfter the existing player connection window closes, ordinary matches proceed with at least two connected policies. A policy that never connected receives no spawn and zero score. Results preserve every original policy slot, and replays list unavailablePlayerSlots. Late joins for unavailable slots are rejected. Matched Commander evaluations still require every assigned policy.\n\n\n## Episode duration budget\n\nThe configured episode_timeout_seconds bounds gameplay, with two minutes reserved for result and replay writing. Decision windows are capped to remaining gameplay time. An ordinary bounded match that reaches this limit finalizes its current state using the existing scoring rule; its replay marks episodeDurationLimitReached. Evaluations that require a winner still fail if no winner was reached.\n"
+      },
+      "pages": [
+        {
+          "id": "proxywar-release-provenance",
+          "title": "Release provenance",
+          "content": {
+            "type": "text",
+            "value": "release_version=0.1.70\nfix_source_sha=b9350719bf7e776981bcc46da1be229d373b2818\nbase_game_image=public.ecr.aws/q5f4m8t9/cogames@sha256:1f94ef42b0b3bc17cf6b513440b2887d0ed89ad10caa36333315d9ce2a5a1474\nbase_package=cow_472e5a30-b076-4846-a01f-eb86c80ba8e5\nbuild_scope=Layered patch of integration/src/no-docker-coworld-episode.ts and proxywar/src/server/agents/AgentStepLockedLeague.ts on 0.1.69, which contains the unavailable-seat and original-slot scoring fix. Engine simulation, dependencies, maps, replay viewer and starter are inherited.\nvalidation=160 focused regression tests including real episode process budget expiry; both typechecks; lint with zero errors. Unavailable-seat fix verified in native hosted certification, five hosted smokes, an exact failed-roster hosted regression, and a full-length local 16-slot match.\nmissing_policy_behavior=Ordinary matches proceed with at least two connected policies after the existing deadline. Unavailable seats receive no spawn and zero score in their original slot. Matched Commander evaluations remain strict.\nduration_behavior=Gameplay uses the configured episode_timeout_seconds minus two minutes reserved for artifact writing. Expiring ordinary matches finalize current-state results and replay. Required-winner evaluations fail if incomplete. Replays expose episodeDurationLimitReached.\n"
+          }
+        },
+        {
+          "id": "proxywar-structured-spatial-observation",
+          "title": "Structured spatial observation",
+          "content": {
+            "type": "text",
+            "value": "The canonical package enables PROXYWAR_TUNE_SPATIAL_OBSERVATION=1 and leaves PROXYWAR_TUNE_SPATIAL_MINIMAP absent. Each game-backed observation therefore carries mapInfo; after a seat owns land it may also carry the bounded schema-5 spatial block with provenance global-lockstep-public-map-v1, coordinate frame, front terrain and coverage, completed public structures and warships, and weighted rival/naval exposure. The optional minimap child remains disabled. Spatial data is context only: a policy may use it to rank the exact current legalActions[].id values, but coordinates, glyphs, and player IDs are never executable actions or raw intents."
+          }
+        }
+      ]
+    },
+    "replay_viewer": {
+      "bundle": "sha256:ff15338a11fa1be63c218e4e87ec9534f8dbcd414ca7db951c75d57a9347a251"
+    }
+  },
+  "player": [
+    {
+      "type": "player",
+      "image": "public.ecr.aws/q5f4m8t9/cogames@sha256:ba87aad82d1d8e669ee1f3a8f0fb22a0f8168640f4478f9aa6eb672fecf17f0d",
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
+      "env": {},
+      "id": "proxywar-starter-websocket",
+      "name": "Proxy War Starter Websocket Player",
+      "description": "Minimal websocket player that chooses one offered LegalAction.id."
+    }
+  ],
+  "reporter": [],
+  "commissioner": [],
+  "grader": [],
+  "diagnoser": [],
+  "optimizer": [],
+  "variants": [
+    {
+      "id": "teams-canary-2x2",
+      "name": "Team canary (2 teams of 2)",
+      "game_config": {
+        "map": "Pangaea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 4,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 0,
+        "max_decision_steps": 8,
+        "episode_timeout_seconds": 600,
+        "turns_per_decision_step": 25,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 2,
+        "seat_teams": [0, 1, 0, 1]
+      },
+      "description": "Eight-decision team smoke test: connects, assigns teams, writes winner_team."
+    },
+    {
+      "id": "teams-4x3-pangaea",
+      "name": "Frontier Four, 4 teams of 3, Pangaea",
+      "game_config": {
+        "map": "Pangaea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Pangaea (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-world",
+      "name": "Frontier Four, 4 teams of 3, World",
+      "game_config": {
+        "map": "World",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on World (Compact). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-asia",
+      "name": "Frontier Four, 4 teams of 3, Asia",
+      "game_config": {
+        "map": "Asia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Asia (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-eastasia",
+      "name": "Frontier Four, 4 teams of 3, EastAsia",
+      "game_config": {
+        "map": "EastAsia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on EastAsia (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-oceania",
+      "name": "Frontier Four, 4 teams of 3, Oceania",
+      "game_config": {
+        "map": "Oceania",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Oceania (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-blacksea",
+      "name": "Frontier Four, 4 teams of 3, BlackSea",
+      "game_config": {
+        "map": "BlackSea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on BlackSea (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-britannia",
+      "name": "Frontier Four, 4 teams of 3, Britannia",
+      "game_config": {
+        "map": "Britannia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Britannia (Compact). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-northamerica",
+      "name": "Frontier Four, 4 teams of 3, NorthAmerica",
+      "game_config": {
+        "map": "NorthAmerica",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on NorthAmerica (Compact). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-europe",
+      "name": "Frontier Four, 4 teams of 3, Europe",
+      "game_config": {
+        "map": "Europe",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Europe (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-africa",
+      "name": "Frontier Four, 4 teams of 3, Africa",
+      "game_config": {
+        "map": "Africa",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Africa (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    },
+    {
+      "id": "teams-4x3-mena",
+      "name": "Frontier Four, 4 teams of 3, Mena",
+      "game_config": {
+        "map": "Mena",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          },
+          {
+            "name": "Seat 7"
+          },
+          {
+            "name": "Seat 8"
+          },
+          {
+            "name": "Seat 9"
+          },
+          {
+            "name": "Seat 10"
+          },
+          {
+            "name": "Seat 11"
+          },
+          {
+            "name": "Seat 12"
+          }
+        ],
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "num_agents": 12,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 500,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 4,
+        "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0]
+      },
+      "description": "Twelve seats on four permanent teams of three on Mena (Normal). Seat order follows seat_teams; the requester places each team's clones on its slots."
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "map": "Pangaea",
+      "players": [
+        {
+          "name": "Seat 1"
+        },
+        {
+          "name": "Seat 2"
+        },
+        {
+          "name": "Seat 3"
+        },
+        {
+          "name": "Seat 4"
+        }
+      ],
+      "map_size": "Compact",
+      "difficulty": "Easy",
+      "num_agents": 4,
+      "max_decision_ms": 60000,
+      "replay_tail_turns": 0,
+      "max_decision_steps": 2,
+      "episode_timeout_seconds": 600,
+      "turns_per_decision_step": 25,
+      "player_connect_timeout_seconds": 120,
+      "team_count": 2,
+      "seat_teams": [0, 1, 0, 1]
+    },
+    "players": [
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      }
+    ]
+  },
+  "episode_timeout_minutes": 70
+}

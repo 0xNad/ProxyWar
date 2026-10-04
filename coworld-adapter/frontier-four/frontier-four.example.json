@@ -1,0 +1,110 @@
+{
+  "coworld_id": "cow_REPLACE_WITH_FRONTIER_FOUR_COWORLD",
+  "budget_coworld_name": "proxywar",
+  "teams": [
+    {
+      "label": "Astra",
+      "model": "openai/gpt-6-astra",
+      "policy_ref": "REPLACE_policy_version_uuid"
+    },
+    {
+      "label": "Fable",
+      "model": "anthropic/claude-fable-5.1",
+      "policy_ref": "REPLACE_policy_version_uuid"
+    },
+    {
+      "label": "Gemini",
+      "model": "google/gemini-3.1-pro-preview",
+      "policy_ref": "REPLACE_policy_version_uuid"
+    },
+    {
+      "label": "Grok",
+      "model": "x-ai/grok-4.7",
+      "policy_ref": "REPLACE_policy_version_uuid"
+    }
+  ],
+  "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0],
+  "fronts": [
+    {
+      "label": "Pangaea",
+      "map": "Pangaea",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-pangaea"
+    },
+    {
+      "label": "Asia",
+      "map": "Asia",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-asia"
+    },
+    {
+      "label": "East Asia",
+      "map": "EastAsia",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-eastasia"
+    },
+    {
+      "label": "Oceania",
+      "map": "Oceania",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-oceania"
+    },
+    {
+      "label": "Black Sea",
+      "map": "BlackSea",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-blacksea"
+    },
+    {
+      "label": "Britannia",
+      "map": "Britannia",
+      "map_size": "Compact",
+      "variant_id": "teams-4x3-britannia"
+    },
+    {
+      "label": "North America",
+      "map": "NorthAmerica",
+      "map_size": "Compact",
+      "variant_id": "teams-4x3-northamerica"
+    },
+    {
+      "label": "Europe",
+      "map": "Europe",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-europe"
+    },
+    {
+      "label": "Africa",
+      "map": "Africa",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-africa"
+    },
+    {
+      "label": "Middle East",
+      "map": "Mena",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-mena"
+    },
+    {
+      "label": "World",
+      "map": "World",
+      "map_size": "Compact",
+      "variant_id": "teams-4x3-world"
+    }
+  ],
+  "concurrency": 2,
+  "caps": { "per_game_llm_usd": 24, "daily_usd": 240, "min_remaining_usd": 60 },
+  "games_path": "/Volumes/Crucial X9/ProxyWar/live-artifacts/ai-league-runs/league/frontier-four-games.jsonl",
+  "state_dir": "/Users/claude/Library/Application Support/ProxyWar/frontier-four",
+  "publish": {
+    "cwd": "/Volumes/ProxyWar Workspace/ProxyWar/worktrees/deploy-external-audit-20260825",
+    "argv": [
+      "node",
+      "--import",
+      "tsx/esm",
+      "src/scripts/frontier-four-publish.ts",
+      "--site-dir",
+      "/Volumes/Crucial X9/ProxyWar/live-artifacts/ai-league-runs/league"
+    ]
+  }
+}

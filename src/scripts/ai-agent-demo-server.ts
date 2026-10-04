@@ -70,12 +70,15 @@ import {
 } from "../server/agents/FeaturedMatch";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
 import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
+import { FRONTIER_FOUR_EPISODES_FILE } from "../server/agents/FrontierFourWorld";
 import {
   buildLeagueEpisodeMatchPageModel,
   buildLeagueEpisodeParticipantCards,
+  findLeagueEpisodeByRequestId,
   findLeagueEpisodeRunDir,
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
+  readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeDecisiveMoments,
   readLeagueEpisodeRecap,
   resolveLeagueEpisodeRow,
@@ -989,6 +992,19 @@ app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
 // prefix rather than probing both. See `LeagueEpisodeMatchPage.ts`'s own
 // doc for why every field here is already public (or, for `recap`, drawn
 // from the one recap artifact on the public run-artifact allowlist).
+/**
+ * A Frontier Four game is not a league episode, so the league resolver
+ * cannot find it; its row lives in the file the Frontier Four publisher
+ * writes beside `data.json` (`FrontierFourWorld.ts`). Same row shape, so
+ * the page renders it unchanged, with the hosted replay as the watch link.
+ */
+async function resolveFrontierFourEpisodeRow(episodeId: string) {
+  const rows = await readCoworldLeagueEpisodesFromDataJson(
+    path.join(runsRootDir, "league", FRONTIER_FOUR_EPISODES_FILE),
+  );
+  return rows === null ? null : findLeagueEpisodeByRequestId(rows, episodeId);
+}
+
 app.get("/api/matches/:episodeId", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -997,13 +1013,14 @@ app.get("/api/matches/:episodeId", async (req, res) => {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;
     }
-    const row = await resolveLeagueEpisodeRow(
-      leagueDataJsonPath,
-      summaryArchiveDir,
-      episodeId,
-      runsRootDir,
-      leagueReplayCacheDir,
-    );
+    const row =
+      (await resolveLeagueEpisodeRow(
+        leagueDataJsonPath,
+        summaryArchiveDir,
+        episodeId,
+        runsRootDir,
+        leagueReplayCacheDir,
+      )) ?? (await resolveFrontierFourEpisodeRow(episodeId));
     if (row === null) {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;

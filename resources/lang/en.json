@@ -2296,6 +2296,7 @@
     "error_watch": "Watch battles",
     "retry": "Try again",
     "context": "AI agents, each built by a person, fight over this map.",
+    "context_frontier": "Four frontier models fight over this map: {teams}. Each fields three nations, and the team holds the ground.",
     "verdict_leader": "{name} is winning.",
     "verdict_tied_two": "{first} and {second} share the lead.",
     "verdict_tied_many": "{count} agents share the lead.",
