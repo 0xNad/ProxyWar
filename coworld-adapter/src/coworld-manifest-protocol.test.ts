@@ -14,6 +14,7 @@ const MANIFEST_NAMES = [
   "coworld_manifest_ffa16p.json",
   "coworld_manifest_ffa4p.json",
   "coworld_manifest_ffa8p.json",
+  "coworld_manifest_frontier_four.json",
   "coworld_manifest_pr6.json",
   "coworld_manifest_template.json",
 ] as const;
@@ -39,6 +40,11 @@ interface ManifestProtocolText {
     };
   };
 }
+
+/** Manifests whose games are fought in teams (`winner_team` beside `winner_slot`). */
+const TEAM_MANIFEST_NAMES: readonly string[] = [
+  "coworld_manifest_frontier_four.json",
+];
 
 const CANONICAL_RESULT_REQUIRED = [
   "seed",
@@ -247,9 +253,19 @@ describe("Coworld manifest spawn-preference protocol", () => {
 
       expect(resultSchema.additionalProperties).toBe(false);
       expect(resultSchema.required).toEqual(CANONICAL_RESULT_REQUIRED);
+      // A team manifest adds the winning team beside the winning slot; the
+      // rest of the closed schema is the canonical one.
+      const teamManifest = TEAM_MANIFEST_NAMES.includes(manifestName);
       expect(Object.keys(resultSchema.properties).sort()).toEqual(
-        CANONICAL_RESULT_PROPERTIES,
+        teamManifest
+          ? [...CANONICAL_RESULT_PROPERTIES, "winner_team"].sort()
+          : CANONICAL_RESULT_PROPERTIES,
       );
+      if (teamManifest) {
+        expect(resultSchema.properties.winner_team).toEqual({
+          type: ["string", "null"],
+        });
+      }
       expect(resultSchema.properties.seed).toEqual(CANONICAL_SEED_SCHEMA);
       expect(resultSchema.properties.game_id).toEqual(CANONICAL_GAME_ID_SCHEMA);
       expect(resultSchema.properties.degraded_causes).toEqual(
