@@ -21,6 +21,7 @@ request, for resumption and audit).
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import json
 import random
@@ -55,6 +56,20 @@ def save_json(path: Path, data) -> None:
     temp = path.with_suffix(path.suffix + ".part")
     temp.write_text(json.dumps(data, indent=2) + "\n")
     temp.replace(path)
+
+
+def decode_policy_log(payload: bytes) -> str:
+    """The policy-log endpoint returns the pod's log as a Python bytes literal
+    (``b'...\\n...'``); turn it back into text with real newlines."""
+    text = payload.decode("utf-8", "replace")
+    if text.startswith(("b'", 'b"')):
+        try:
+            literal = ast.literal_eval(text)
+            if isinstance(literal, bytes):
+                return literal.decode("utf-8", "replace")
+        except (ValueError, SyntaxError):
+            return text.replace("\\n", "\n")
+    return text
 
 
 def log(event: str, **fields) -> None:
@@ -248,15 +263,17 @@ class Scheduler:
             team = {"inputTokens": 0, "cacheReadTokens": 0, "outputTokens": 0, "calls": 0, "errors": 0, "usd": 0.0, "seatsPriced": 0}
             for slot in side["slots"]:
                 try:
-                    raw = self.client.get_bytes(
-                        f"/v2/episode-requests/{episode_request_id}/{self.policy_version_for(side)}/policy-logs/{slot}"
-                    ).decode("utf-8", "replace")
+                    raw = decode_policy_log(
+                        self.client.get_bytes(
+                            f"/v2/episode-requests/{episode_request_id}/{self.policy_version_for(side)}/policy-logs/{slot}"
+                        )
+                    )
                 except Exception as error:  # noqa: BLE001
                     log("seat_log_unreadable", episode=episode_request_id, slot=slot, error=str(error)[:120])
                     team["usd"] += cap_share
                     continue
                 summary = None
-                for match in re.finditer(r"PROXYWAR_LLM_USAGE (\{[^\n]*\})", raw):
+                for match in re.finditer(r"PROXYWAR_LLM_USAGE (\{.*?\})(?=\n|$)", raw):
                     try:
                         event = json.loads(match.group(1))
                     except json.JSONDecodeError:
