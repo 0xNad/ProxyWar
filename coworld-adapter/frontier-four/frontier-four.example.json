@@ -100,17 +100,7 @@
   },
   "games_path": "/Volumes/Crucial X9/ProxyWar/live-artifacts/ai-league-runs/league/frontier-four-games.jsonl",
   "state_dir": "/Users/claude/Library/Application Support/ProxyWar/frontier-four",
-  "publish": {
-    "cwd": "/Volumes/ProxyWar Workspace/ProxyWar/worktrees/deploy-external-audit-20260825",
-    "argv": [
-      "node",
-      "--import",
-      "tsx/esm",
-      "src/scripts/frontier-four-publish.ts",
-      "--site-dir",
-      "/Volumes/Crucial X9/ProxyWar/live-artifacts/ai-league-runs/league"
-    ]
-  },
+  "publish": null,
   "prices_per_million": {
     "openai/gpt-6-astra": {
       "input": 10,

@@ -24,7 +24,8 @@ testers can access `/public`, `/api/*`, or replay routes.
 - `proxywar-beta.service`: systemd service template.
 - `Caddyfile.example`: HTTPS reverse-proxy template.
 - `cloudflare-tunnel.yml.example`: named Cloudflare Tunnel config.
-- `mac/`: launchd service templates and wrapper scripts for a macOS host.
+- `mac/`: launchd service templates and wrapper scripts for a macOS host,
+  including the two Frontier Four jobs (`docs/PROXYWAR_FRONTIER_FOUR.md`).
 
 ## macOS + Cloudflare Tunnel
 

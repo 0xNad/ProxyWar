@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.proxywar.frontier-four</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/YOUR_USER/Library/Application Support/ProxyWar/bin/start-proxywar-frontier-four.zsh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOUR_USER</string>
+    <key>PATH</key>
+    <string>/Users/YOUR_USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PROXYWAR_PROJECT_DIR</key>
+    <string>/Users/YOUR_USER/Documents/ProxyWar</string>
+  </dict>
+  <!--
+    The scheduler's working directory, state and games file stay in HOME: its
+    Python must never touch a removable volume (see
+    docs/PROXYWAR_FRONTIER_FOUR.md). The scheduler loops for ever, so
+    KeepAlive restarts it after a crash; ThrottleInterval keeps a broken
+    start from spinning.
+  -->
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USER/Library/Application Support/ProxyWar/frontier-four</string>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/proxywar-frontier-four.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/proxywar-frontier-four.err.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

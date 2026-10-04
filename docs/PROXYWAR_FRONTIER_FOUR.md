@@ -12,7 +12,8 @@ beside them are the way to refresh them.
 | ------------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Game package | coworld `proxywar-frontier-four` (`cow_02f4462d-454d-48f0-b71f-2c1f302bdfab`)    | The canonical Proxy War image plus the team overlay (`coworld-adapter/Dockerfile.frontier-four-game`). Manifest: `coworld-adapter/coworld/coworld_manifest_frontier_four.json`. Variants `teams-4x3-<map>`, one per playable front, and a 2x2 canary.  |
 | Team agent   | `coworld-adapter/frontier-four/player.mjs`                                       | The public LLM starter's executor with the model behind the platform's LLM sidecar. One image, four policies: `frontier-astra`, `frontier-fable`, `frontier-gemini`, `frontier-grok`, each pinned to its model at upload with `--use-llm --llm-model`. |
-| Scheduler    | `coworld-adapter/frontier-four/scheduler.py`                                     | Launches one game per front per cycle, records settled games, republishes the world. Config and state: `~/Library/Application Support/ProxyWar/frontier-four/`. LaunchAgent `com.proxywar.frontier-four`.                                              |
+| Scheduler    | `coworld-adapter/frontier-four/scheduler.py`                                     | Launches one game per front per cycle and records settled games. Config and state: `~/Library/Application Support/ProxyWar/frontier-four/`. LaunchAgent `com.proxywar.frontier-four` (`deploy/mac/start-proxywar-frontier-four.zsh`).                  |
+| Publisher    | `deploy/mac/start-proxywar-frontier-four-publisher.zsh`                          | LaunchAgent `com.proxywar.frontier-four-publisher`, every minute: when the games file differs from what it last published, runs the world script below and keeps a copy of what it published (`games.published.jsonl`).                                |
 | World        | `src/server/agents/FrontierFourWorld.ts`, `src/scripts/frontier-four-publish.ts` | Game records become world battles held by teams; `world.json`, `/match/<id>` rows and the `world-source.json` marker are written into the league site directory.                                                                                       |
 
 ## Seats and names
@@ -37,30 +38,58 @@ group.
 - A seat that hits its share of the cap gets HTTP 429 from the sidecar, stops
   planning and keeps playing its last plan, and says so in every decision.
 
-## Where it must run from
+## Where each piece must run from
 
-Under launchd the loop's Python has no access to the external volumes (the
-grant dialog cannot appear for a background process), and `getcwd()` on a
-volume path blocks for ever. So the LaunchAgent's start script copies
-`scheduler.py` into `~/Library/Application Support/ProxyWar/frontier-four/bin/`
-and runs it from there, the games file lives in that directory, and the
-publisher (node, which does have access) is started through zsh inside the
-deploy worktree. Keep it that way when changing the config.
+macOS gates file access on removable volumes per executable (System
+Settings, Privacy & Security, Files and Folders). Apple's own binaries such
+as zsh and cp pass; node and Python need a grant, which the operator gives
+by answering the prompt the first time that binary asks. A launchd job
+cannot answer that prompt, and while it is pending every launchd job's
+volume access on the Mac blocks in `getcwd()` or `open()`, granted or not,
+until the prompt is answered after unlocking the screen or the user's
+`tccd` restarts. The league mirror and the premiere loop stalled this way
+on 2026-10-04 after the scheduler's Python first touched the deploy worktree.
+
+So the scheduler's Python (a uv build without a grant) runs from a HOME copy
+with its working directory, state and games file in HOME and never touches
+a volume; the config keeps `"publish": null`. Publishing is the publisher
+job: zsh as the program and the granted node binary doing the work, the
+shape of the league mirror. Keep both that way when changing either job.
+A stalled launchd node shows near-zero CPU and `sample <pid> 1` ends in
+`__getcwd` and `open$NOCANCEL`.
 
 ## Running it
 
-```bash
-# one tick, creating nothing: reads the budget and shows the next game
-uvx --from coworld python coworld-adapter/frontier-four/scheduler.py \
-  --config "$HOME/Library/Application Support/ProxyWar/frontier-four/frontier-four.json" --dry-run --once
+Both jobs are LaunchAgents; the templates are in `deploy/mac/`:
 
-# the loop (what the LaunchAgent runs)
-uvx --from coworld python coworld-adapter/frontier-four/scheduler.py \
-  --config "$HOME/Library/Application Support/ProxyWar/frontier-four/frontier-four.json" --interval 60
+```bash
+B="$HOME/Library/Application Support/ProxyWar/bin"
+cp deploy/mac/start-proxywar-frontier-four.zsh deploy/mac/start-proxywar-frontier-four-publisher.zsh "$B/"
+chmod 755 "$B"/start-proxywar-frontier-four*.zsh
+cp deploy/mac/com.proxywar.frontier-four.plist.example ~/Library/LaunchAgents/com.proxywar.frontier-four.plist
+cp deploy/mac/com.proxywar.frontier-four-publisher.plist.example ~/Library/LaunchAgents/com.proxywar.frontier-four-publisher.plist
+# replace every /Users/YOUR_USER and /Volumes/YOUR_VOLUME placeholder, then:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.proxywar.frontier-four.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.proxywar.frontier-four-publisher.plist
 ```
 
-Stop the loop with `launchctl bootout gui/$(id -u)/com.proxywar.frontier-four`.
-Games already launched finish on their own and are recorded by the next tick.
+The scheduler's virtual environment is
+`~/Library/Application Support/ProxyWar/frontier-four/venv` with the pinned
+`coworld` package (`uv venv <venv> && uv pip install --python <venv>/bin/python coworld==0.1.56`).
+A dry tick from a shell reads the budget, shows the next game and creates
+nothing:
+
+```bash
+"$HOME/Library/Application Support/ProxyWar/frontier-four/venv/bin/python" \
+  coworld-adapter/frontier-four/scheduler.py \
+  --config "$HOME/Library/Application Support/ProxyWar/frontier-four/frontier-four.json" --dry-run --once
+```
+
+Stop the loop with `launchctl bootout gui/$(id -u)/com.proxywar.frontier-four`
+(and the same for `com.proxywar.frontier-four-publisher`). Games already
+launched finish on their own and are recorded by the next tick after a
+restart. Logs: `~/Library/Logs/proxywar-frontier-four.log` (one JSON event
+per line) and `~/Library/Logs/proxywar-frontier-four-publisher.log`.
 
 ## Handing the world back to the league
 
