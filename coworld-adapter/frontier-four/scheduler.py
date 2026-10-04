@@ -9,6 +9,8 @@ Spend is held to the configured caps: a per-game LLM cap on every request,
 a daily cap on what this loop spends, and a floor on the coworld's remaining
 daily funds so the league's own rounds keep running. The loop refuses to
 launch when either is crossed and resumes on the next day.
+`launch_interval_minutes` spaces launches so the competition runs through
+the day instead of in bursts (60: about one game an hour).
 
 Usage:
     uvx --from coworld python scheduler.py --config frontier-four.json [--once] [--dry-run]
@@ -89,6 +91,7 @@ class Scheduler:
             {"cycle": 0, "cursor": 0, "inflight": [], "spend": {}, "games": 0},
         )
         self.dry_run = dry_run
+        self.last_hold: str | None = None
         self.client = CoworldApiClient.from_login(server_url=SERVER)
         self.teams = config["teams"]
         self.fronts = config["fronts"]
@@ -112,6 +115,12 @@ class Scheduler:
         caps = self.config["caps"]
         if self.spent_today() >= caps["daily_usd"]:
             return False, f"daily cap {caps['daily_usd']} reached ({self.spent_today():.2f})"
+        interval = float(self.config.get("launch_interval_minutes") or 0)
+        last_launch = self.state.get("last_launch_at")
+        if interval > 0 and last_launch:
+            due = dt.datetime.fromisoformat(last_launch.replace("Z", "+00:00")) + dt.timedelta(minutes=interval)
+            if utcnow() < due:
+                return False, f"paced: next launch at {iso(due)}"
         budget = self.budget()
         if budget is None:
             return False, "budget unreadable"
@@ -199,6 +208,7 @@ class Scheduler:
         record["request"] = {k: response.get(k) for k in ("id", "status", "created_at", "cost_preview")}
         save_json(self.requests_dir / f"{key}.json", record)
         self.state["inflight"].append(key)
+        self.state["last_launch_at"] = iso(utcnow())
         self.advance_cursor()
         self.save()
         log("launched", key=key, request=response.get("id"), variant=front["variant_id"], cost_preview=response.get("cost_preview"))
@@ -412,8 +422,12 @@ class Scheduler:
             return
         allowed, why = self.may_launch()
         if not allowed:
-            log("hold", why=why)
+            # One line per reason, not one per minute.
+            if why != self.last_hold:
+                log("hold", why=why)
+            self.last_hold = why
             return
+        self.last_hold = None
         log("launch_window", why=why)
         self.launch()
 
