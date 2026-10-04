@@ -64,3 +64,35 @@ export function resolveCoworldTeams(
     clanTags: assignments.map((team) => `XP${team + 1}`),
   };
 }
+
+/**
+ * Seat names for a team game whose sides are named by the request
+ * (`team_labels`, one per team index): "Astra 1", "Astra 2", … in slot
+ * order. Hosted dispatch overwrites `players[].name` with the policy
+ * owners' names, which would call every seat of one account the same; a
+ * field dispatch does not know keeps the team's name on the map.
+ */
+export function labelledTeamSeatPlayers(
+  config: { team_labels?: string[]; seat_teams?: number[] },
+  seatCount: number,
+): Array<{ name: string }> | null {
+  const labels = config.team_labels;
+  const assignments = config.seat_teams;
+  if (labels === undefined) return null;
+  if (!Array.isArray(labels) || !Array.isArray(assignments)) {
+    throw new Error("team_labels requires seat_teams");
+  }
+  if (assignments.length !== seatCount) {
+    throw new Error("seat_teams must assign every policy slot exactly once");
+  }
+  const counts = new Map<number, number>();
+  return assignments.map((team) => {
+    const label = labels[team];
+    if (typeof label !== "string" || label.trim() === "") {
+      throw new Error("team_labels must name every team in seat_teams");
+    }
+    const ordinal = (counts.get(team) ?? 0) + 1;
+    counts.set(team, ordinal);
+    return { name: `${label.trim()} ${ordinal}` };
+  });
+}

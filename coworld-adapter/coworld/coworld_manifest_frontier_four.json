@@ -136,6 +136,17 @@
             "minimum": 0,
             "maximum": 7
           }
+        },
+        "team_labels": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 24
+          },
+          "description": "Display name per team index; seats are named \"<label> <n>\". Supplied by the request so the map shows the team, not the policy owner."
         }
       },
       "additionalProperties": false
@@ -388,7 +399,8 @@
         "turns_per_decision_step": 25,
         "player_connect_timeout_seconds": 120,
         "team_count": 2,
-        "seat_teams": [0, 1, 0, 1]
+        "seat_teams": [0, 1, 0, 1],
+        "team_labels": ["Astra", "Fable"]
       },
       "description": "Eight-decision team smoke test: connects, assigns teams, writes winner_team."
     },
@@ -1047,7 +1059,8 @@
       "turns_per_decision_step": 25,
       "player_connect_timeout_seconds": 120,
       "team_count": 2,
-      "seat_teams": [0, 1, 0, 1]
+      "seat_teams": [0, 1, 0, 1],
+      "team_labels": ["Astra", "Fable"]
     },
     "players": [
       {

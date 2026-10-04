@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 import {
+  labelledTeamSeatPlayers,
   normalizeCoworldExperimentConfig,
   resolveCoworldTeams,
 } from "./coworld-teams.ts";
@@ -130,6 +131,7 @@ export type CoworldConfig = {
   difficulty: string;
   team_count?: number;
   seat_teams?: number[];
+  team_labels?: string[];
   seed?: number;
   replay_tail_turns?: number;
   num_agents?: number;
@@ -936,6 +938,10 @@ async function runProxyWarEpisode(
     transports: [new winston.transports.Console()],
   });
   const teams = resolveCoworldTeams(config, config.tokens.length);
+  // A team game named by the request: every seat, result and artifact
+  // carries "<team> <n>", whatever names hosted dispatch resolved.
+  const labelledPlayers = labelledTeamSeatPlayers(config, config.tokens.length);
+  if (labelledPlayers !== null) config.players = labelledPlayers;
   const selectedGameConfig = {
     gameMap: enumValue(modules.GameMapType, config.map),
     gameMapSize: enumValue(modules.GameMapSize, config.map_size),
@@ -1568,6 +1574,9 @@ function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
     ...(config.team_count === undefined
       ? {}
       : { team_count: config.team_count, seat_teams: config.seat_teams }),
+    ...(config.team_labels === undefined
+      ? {}
+      : { team_labels: config.team_labels }),
     seed: config.seed,
     replay_tail_turns: config.replay_tail_turns,
     episodeIndex: config.episodeIndex,

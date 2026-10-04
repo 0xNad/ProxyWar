@@ -115,7 +115,7 @@ class Scheduler:
         if self.state["cursor"] % len(self.fronts) == 0:
             self.state["cycle"] += 1
 
-    def roster(self, game_index: int) -> tuple[list[dict], list[dict]]:
+    def roster(self, game_index: int) -> tuple[list[dict], list[dict], list[int]]:
         """Seat each team's clones on one side; rotate which side a team gets.
 
         The variant fixes which slots belong to which team index
@@ -130,7 +130,6 @@ class Scheduler:
         head, tail = order[0], order[1:]
         rng.shuffle(tail)
         order = [head] + tail
-        side_of_team = {team_index: side for side, team_index in enumerate(order)}
         roster = []
         sides = [
             {"label": team["label"], "model": team["model"], "team": None, "slots": []}
@@ -140,20 +139,23 @@ class Scheduler:
             team_index = order[side]
             roster.append({"slot": slot, "player": {"policy_ref": self.teams[team_index]["policy_ref"]}})
             sides[team_index]["slots"].append(slot)
-        del side_of_team
-        return roster, sides
+        return roster, sides, order
 
     def launch(self) -> None:
         front = self.next_front()
         cycle = self.state["cycle"] + 1
         game_index = self.state["cursor"]
-        roster, sides = self.roster(game_index)
+        roster, sides, order = self.roster(game_index)
         key = f"ff-{self.config['coworld_id'][4:12]}-c{cycle}-g{game_index}-{front['variant_id']}"
         body = {
             "coworld_id": self.config["coworld_id"],
             "variant_id": front["variant_id"],
             "roster": roster,
             "num_episodes": 1,
+            # Seats are named "<team> <n>" on the map, whichever account owns the policies.
+            "game_config_overrides": {
+                "team_labels": [self.teams[team_index]["label"] for team_index in order]
+            },
             "episode_player_llm_spend_limit_usd": self.config["caps"]["per_game_llm_usd"],
             "title": f"Frontier Four c{cycle}: {front['label']}"[:50],
             "description": (
