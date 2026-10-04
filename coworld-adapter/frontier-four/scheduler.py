@@ -192,9 +192,8 @@ class Scheduler:
             "created_at": iso(utcnow()),
         }
         if self.dry_run:
+            # A dry run shows the next game and touches nothing on disk.
             log("dry_run_launch", key=key, variant=front["variant_id"], sides=[(s["label"], s["slots"]) for s in sides])
-            self.advance_cursor()
-            self.save()
             return
         response = self.client.create_experience_request(body).model_dump(mode="json")
         record["request"] = {k: response.get(k) for k in ("id", "status", "created_at", "cost_preview")}
