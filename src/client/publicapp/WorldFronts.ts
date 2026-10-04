@@ -3,6 +3,7 @@ import { translateText } from "../Utils";
 import { CROWN_GLYPH } from "./WorldGlyphs";
 import type { WorldModel, WorldTheatre } from "./WorldModelSchema";
 import { frontDisplayState, type FrontDisplayState } from "./WorldPresentation";
+import { modeKey } from "./WorldText";
 import { STATUS_KEYS, type WorldView } from "./WorldView";
 
 /**
@@ -37,7 +38,7 @@ export function renderFronts(view: WorldView) {
         ${translateText("world_page.fronts_title")}
       </h2>
       <p class="wp-section-intro">
-        ${translateText("world_page.fronts_intro", {
+        ${translateText(modeKey(model, "world_page.fronts_intro"), {
           window: model.windowSize,
         })}
         ${translateText("world_page.fronts_strip_intro")}

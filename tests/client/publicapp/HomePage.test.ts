@@ -88,6 +88,27 @@ afterEach(() => {
 });
 
 describe("home-page", () => {
+  it("says team, not agent or league, when the Frontier Four hold the map", async () => {
+    serve(
+      worldFixture({
+        mode: "frontier-four",
+        teams: [
+          { label: "Astra", model: "openai/gpt-6-astra" },
+          { label: "Fable", model: "anthropic/claude-fable-5.1" },
+          { label: "Gemini", model: "google/gemini-3.1-pro-preview" },
+          { label: "Grok", model: "x-ai/grok-4.7" },
+        ],
+      }),
+    );
+    const el = mount();
+    await settle(el);
+    const page = text(el);
+    expect(page).toContain("Four frontier models fight over this map");
+    expect(page).toContain("A front belongs to the team with the most wins");
+    expect(page).toContain("Data as of");
+    expect(page).not.toContain("League data as of");
+    expect(page).not.toMatch(/belongs to the agent|Agent ratings/);
+  });
   it("reads world.json and says what this is and who is winning, with the lead's weak spot", async () => {
     const el = mount();
     await settle(el);

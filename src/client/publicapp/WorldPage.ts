@@ -55,6 +55,7 @@ import {
   formatAge,
   formatDate,
   formatList,
+  modeKey,
 } from "./WorldText";
 import {
   leadUnderline,
@@ -805,7 +806,7 @@ export class WorldPage extends LitElement {
             width=${WORLD_GRID_WIDTH}
             height=${WORLD_GRID_HEIGHT}
             role="img"
-            aria-label=${translateText("world_page.map_label")}
+            aria-label=${translateText(modeKey(model, "world_page.map_label"))}
           ></canvas>
           ${renderPlacards(this.placardView(), model)}
         </div>

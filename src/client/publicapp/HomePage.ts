@@ -63,6 +63,7 @@ import {
   formatDate,
   formatList,
   frontInText,
+  modeKey,
   nameMarker,
   pageLocale,
   splice,
@@ -538,7 +539,7 @@ export class HomePage extends LitElement {
         ${this.renderLatest(model)} ${this.renderRules(model)}
         ${this.renderEnter(model)}
         <p class="hp-as-of">
-          ${translateText("home_page.data_as_of", {
+          ${translateText(modeKey(model, "home_page.data_as_of"), {
             time: this.dataTime(model.generatedAt),
           })}
         </p>
@@ -962,7 +963,7 @@ export class HomePage extends LitElement {
       },
       {
         title: translateText("world_page.status_unclaimed"),
-        body: translateText("home_page.rule_unclaimed"),
+        body: translateText(modeKey(model, "home_page.rule_unclaimed")),
         frame: UNCLAIMED_HEX,
       },
       {
@@ -977,7 +978,7 @@ export class HomePage extends LitElement {
       <p>${translateText("home_page.rules_split", { total: fronts.length })}</p>
       <p>
         <b
-          >${translateText("home_page.rules_rule", {
+          >${translateText(modeKey(model, "home_page.rules_rule"), {
             window: model.windowSize,
           })}</b
         >
@@ -1001,7 +1002,7 @@ export class HomePage extends LitElement {
       </dl>
       <p class="hp-rules-stats">
         ${splice(
-          "home_page.rules_stats",
+          modeKey(model, "home_page.rules_stats"),
           {
             count: model.battleCount,
             date:

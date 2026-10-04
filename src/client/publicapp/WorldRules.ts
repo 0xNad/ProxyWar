@@ -2,6 +2,7 @@ import { html, nothing } from "lit";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { translateText } from "../Utils";
 import { CROWN_GLYPH } from "./WorldGlyphs";
+import { modeKey } from "./WorldText";
 import { ICONS, type WorldView } from "./WorldView";
 
 /** "How the world works": the three rules, and where the data comes from. */
@@ -20,7 +21,7 @@ export function renderRules(view: WorldView) {
       <article class="wp-rule">
         <span class="wp-rule-icon">${unsafeSVG(ICONS.pin)}</span>
         <h3>${translateText("world_page.rule_place_title")}</h3>
-        <p>${translateText("world_page.rule_place_body")}</p>
+        <p>${translateText(modeKey(model, "world_page.rule_place_body"))}</p>
       </article>
       <article class="wp-rule">
         <span class="wp-rule-icon">${unsafeSVG(ICONS.flag)}</span>
@@ -30,7 +31,7 @@ export function renderRules(view: WorldView) {
           })}
         </h3>
         <p>
-          ${translateText("world_page.rule_window_body", {
+          ${translateText(modeKey(model, "world_page.rule_window_body"), {
             window: model.windowSize,
           })}
         </p>
@@ -43,7 +44,7 @@ export function renderRules(view: WorldView) {
     </div>
     ${model.firstBattleAt !== null
       ? html`<p class="wp-data-note">
-          ${translateText("world_page.data_note", {
+          ${translateText(modeKey(model, "world_page.data_note"), {
             count: model.battleCount,
             date: view.date(model.firstBattleAt),
           })}

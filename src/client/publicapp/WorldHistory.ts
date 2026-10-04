@@ -4,7 +4,7 @@ import { contrastRatio } from "./HomePresentation";
 import { CROWN_GLYPH } from "./WorldGlyphs";
 import type { WorldDay, WorldTheatreId } from "./WorldModelSchema";
 import { WORLD_REGION_IDS } from "./WorldPresentation";
-import { formatLeagueDay, frontInText, pageLocale } from "./WorldText";
+import { formatLeagueDay, frontInText, modeKey, pageLocale } from "./WorldText";
 import type { WorldView } from "./WorldView";
 
 /**
@@ -229,8 +229,8 @@ export function renderFrontTimeline(view: WorldView, id: WorldTheatreId) {
         holders === 1
           ? "world_page.sheet_days_one"
           : longest.to === n - 1
-            ? "world_page.sheet_days_ongoing"
-            : "world_page.sheet_days",
+            ? modeKey(view.model, "world_page.sheet_days_ongoing")
+            : modeKey(view.model, "world_page.sheet_days"),
         params,
       )}
     </figcaption>

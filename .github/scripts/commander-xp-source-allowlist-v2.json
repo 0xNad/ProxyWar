@@ -332,6 +332,7 @@
   "tests/client/publicapp/WorldMapLayout.test.ts",
   "tests/client/publicapp/WorldPage.test.ts",
   "tests/client/publicapp/WorldPresentation.test.ts",
+  "tests/client/publicapp/WorldText.test.ts",
   "tests/core/ExternalGameConfigBoundary.test.ts",
   "tests/coworld/CommanderProductionPlayer.test.ts",
   "tests/coworld/CommanderStarterContract.test.ts",

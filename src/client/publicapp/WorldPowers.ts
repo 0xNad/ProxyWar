@@ -1,7 +1,7 @@
 import { html } from "lit";
 import { translateText } from "../Utils";
 import { legendFront } from "./WorldLegend";
-import { formatNumber } from "./WorldText";
+import { formatNumber, modeKey } from "./WorldText";
 import type { WorldView } from "./WorldView";
 
 /**
@@ -43,7 +43,9 @@ export function renderPowers(view: WorldView) {
     <table class="wp-powers">
       <thead>
         <tr>
-          <th scope="col">${translateText("world_page.powers_agent")}</th>
+          <th scope="col">
+            ${translateText(modeKey(model, "world_page.powers_agent"))}
+          </th>
           <th scope="col">${translateText("world_page.powers_fronts")}</th>
           <th scope="col" class="wp-num wp-powers-conquests">
             ${translateText("world_page.powers_conquests")}
