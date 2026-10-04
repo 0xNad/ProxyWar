@@ -24,6 +24,7 @@ import argparse
 import datetime as dt
 import json
 import random
+import re
 import subprocess
 import sys
 import time
@@ -215,18 +216,84 @@ class Scheduler:
             for episode in episodes:
                 cost = float(episode.get("cost_usd") or 0)
                 day = self.today()
-                self.state["spend"][day] = float(self.state["spend"].get(day, 0.0)) + cost
                 if episode.get("status") == "completed":
                     game = self.game_record(record, episode)
                     if game is not None:
+                        cost += float(game.get("llmUsdEstimate") or 0)
                         self.append_game(game)
                         self.state["games"] += 1
                 else:
+                    # An episode that did not complete may still have spent up to the cap.
+                    cost += float(self.config["caps"]["per_game_llm_usd"])
                     log("episode_not_completed", key=key, episode=episode.get("id"), status=episode.get("status"), error=str(episode.get("error"))[:200])
+                self.state["spend"][day] = float(self.state["spend"].get(day, 0.0)) + cost
             save_json(path, record)
             self.save()
             log("settled", key=key, status=status, cost_usd=sum(float(e.get("cost_usd") or 0) for e in episodes), games=self.state["games"])
             self.publish()
+
+    def llm_usage(self, episode_request_id: str, sides: list[dict]) -> dict:
+        """Price each seat's model calls from its own log.
+
+        The platform's budget meter does not see sidecar spend, so the loop
+        prices the `PROXYWAR_LLM_USAGE` summary every seat prints (input,
+        cached-input and output tokens) with the config's per-model prices.
+        A seat whose log is unreadable is priced at its share of the cap.
+        """
+        prices = self.config.get("prices_per_million", {})
+        cap_share = float(self.config["caps"]["per_game_llm_usd"]) / max(1, len(self.layout))
+        usage = {"usd": 0.0, "teams": {}}
+        for side in sides:
+            price = prices.get(side["model"], {})
+            team = {"inputTokens": 0, "cacheReadTokens": 0, "outputTokens": 0, "calls": 0, "errors": 0, "usd": 0.0, "seatsPriced": 0}
+            for slot in side["slots"]:
+                try:
+                    raw = self.client.get_bytes(
+                        f"/v2/episode-requests/{episode_request_id}/{self.policy_version_for(side)}/policy-logs/{slot}"
+                    ).decode("utf-8", "replace")
+                except Exception as error:  # noqa: BLE001
+                    log("seat_log_unreadable", episode=episode_request_id, slot=slot, error=str(error)[:120])
+                    team["usd"] += cap_share
+                    continue
+                summary = None
+                for match in re.finditer(r"PROXYWAR_LLM_USAGE (\{[^\n]*\})", raw):
+                    try:
+                        event = json.loads(match.group(1))
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("event") == "summary":
+                        summary = event
+                if summary is None:
+                    team["usd"] += cap_share
+                    continue
+                inp = int(summary.get("inputTokens") or 0)
+                cached = int(summary.get("cacheReadInputTokens") or 0)
+                out = int(summary.get("outputTokens") or 0)
+                team["inputTokens"] += inp
+                team["cacheReadTokens"] += cached
+                team["outputTokens"] += out
+                team["calls"] += int(summary.get("responses") or 0)
+                team["errors"] += int(summary.get("errors") or 0)
+                team["seatsPriced"] += 1
+                if price:
+                    team["usd"] += (
+                        max(0, inp - cached) * float(price.get("input", 0))
+                        + cached * float(price.get("cache_read", price.get("input", 0)))
+                        + out * float(price.get("output", 0))
+                    ) / 1_000_000
+                else:
+                    team["usd"] += cap_share
+            team["usd"] = round(team["usd"], 4)
+            usage["teams"][side["label"]] = team
+            usage["usd"] += team["usd"]
+        usage["usd"] = round(usage["usd"], 4)
+        return usage
+
+    def policy_version_for(self, side: dict) -> str:
+        for team in self.teams:
+            if team["label"] == side["label"]:
+                return team["policy_ref"]
+        raise KeyError(side["label"])
 
     def results_artifact(self, episode_request_id: str) -> dict | None:
         try:
@@ -263,8 +330,11 @@ class Scheduler:
                     break
             sides.append({**side, "team": engine_team})
         front = record["front"]
+        usage = self.llm_usage(episode_request_id, sides)
         return {
             "schemaVersion": 1,
+            "llmUsdEstimate": usage["usd"],
+            "llmUsageByTeam": usage["teams"],
             "experienceRequestId": record["request"]["id"],
             "episodeRequestId": episode_request_id,
             "variantId": front["variant_id"],
@@ -288,7 +358,7 @@ class Scheduler:
         games_path.parent.mkdir(parents=True, exist_ok=True)
         with games_path.open("a") as handle:
             handle.write(json.dumps(game) + "\n")
-        log("game_recorded", episode=game["episodeRequestId"], map=game["map"], winner=game["winnerTeam"], cost_usd=game["costUsd"])
+        log("game_recorded", episode=game["episodeRequestId"], map=game["map"], winner=game["winnerTeam"], cost_usd=game["costUsd"], llm_usd=game.get("llmUsdEstimate"))
 
     def publish(self) -> None:
         publish = self.config.get("publish")

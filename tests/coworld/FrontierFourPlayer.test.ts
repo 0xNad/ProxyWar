@@ -237,9 +237,17 @@ describe("Frontier Four player", () => {
     const call = sidecar.calls[0];
     expect(call.path).toBe("/v1/messages");
     expect(call.body.model).toBe("anthropic/claude-fable-5.1");
-    expect(call.body.max_tokens).toBe(600);
-    // Stable text in `system`, the volatile GAME block in the user turn.
-    const system = String(call.body.system);
+    expect(call.body.max_tokens).toBe(1500);
+    // Stable text in one cached `system` block, the volatile GAME block in
+    // the user turn.
+    const systemBlocks = call.body.system as Array<{
+      type: string;
+      text: string;
+      cache_control?: { type: string };
+    }>;
+    expect(systemBlocks).toHaveLength(1);
+    expect(systemBlocks[0].cache_control).toEqual({ type: "ephemeral" });
+    const system = systemBlocks[0].text;
     expect(system).toContain("TEAM GAME");
     const user = (call.body.messages as Array<{ content: string }>)[0].content;
     expect(user.startsWith("GAME:")).toBe(true);
@@ -266,7 +274,8 @@ describe("Frontier Four player", () => {
     const call = sidecar.calls[0];
     expect(call.path).toBe("/v1/chat/completions");
     expect(call.body.model).toBe("openai/gpt-6-astra");
-    expect(call.body.max_tokens).toBe(1500);
+    expect(call.body.max_tokens).toBe(4000);
+    expect(call.body.reasoning).toEqual({ effort: "low" });
     const messages = call.body.messages as Array<{
       role: string;
       content: string;

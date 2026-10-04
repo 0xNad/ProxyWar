@@ -32,10 +32,14 @@ const MODEL =
   (SIDECAR ? "" : "anthropic/claude-haiku-4.5");
 const MODEL_TIMEOUT_MS = boundedIntegerEnv(
   "MODEL_TIMEOUT_MS",
-  45000,
+  75000,
   5000,
-  120000,
+  180000,
 );
+// Reasoning models think before the plan JSON; ask for little of it. A
+// model whose route rejects the control gets it dropped for the episode.
+const REASONING_EFFORT = (process.env.PLAN_REASONING_EFFORT || "low").trim();
+let reasoningDisabled = REASONING_EFFORT === "none";
 let modelClient = null;
 let spendExhausted = false; // the sidecar's per-episode spend limit was hit
 let lastSpend = { spendUsd: null, spendLimitUsd: null };
@@ -50,21 +54,28 @@ function isAnthropicModel(model) {
   return String(model).startsWith("anthropic/");
 }
 
-/** The Anthropic Messages request (also what the sidecar caches for Claude). */
+/**
+ * The Anthropic Messages request. The stable text is one cached system
+ * block: the first call writes the cache, every later call in the game
+ * reads it at a tenth of the price.
+ */
 function buildMessagesRequest(model, system, user, maxTokens) {
   return {
     model,
     max_tokens: maxTokens,
-    system,
+    system: [
+      { type: "text", text: system, cache_control: { type: "ephemeral" } },
+    ],
     messages: [{ role: "user", content: user }],
   };
 }
 
 /** The OpenAI Chat Completions request, for every non-Anthropic model. */
-function buildChatRequest(model, system, user, maxTokens) {
+function buildChatRequest(model, system, user, maxTokens, reasoning) {
   return {
     model,
     max_tokens: maxTokens,
+    ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -104,7 +115,13 @@ async function completeViaHttp(model, system, user, maxTokens) {
   const path = anthropic ? "/v1/messages" : "/v1/chat/completions";
   const body = anthropic
     ? buildMessagesRequest(model, system, user, maxTokens)
-    : buildChatRequest(model, system, user, maxTokens);
+    : buildChatRequest(
+        model,
+        system,
+        user,
+        maxTokens,
+        reasoningDisabled ? null : REASONING_EFFORT,
+      );
   const headers = { "content-type": "application/json" };
   if (anthropic) headers["anthropic-version"] = "2023-06-01";
   // The sidecar ignores auth; OpenRouter direct needs the key.
@@ -131,6 +148,15 @@ async function completeViaHttp(model, system, user, maxTokens) {
     );
     error.status = response.status;
     error.category = String(category);
+    // The route refused the reasoning control: drop it and ask once more.
+    if (
+      !anthropic &&
+      !reasoningDisabled &&
+      ["routing_parameters", "invalid_request"].includes(error.category)
+    ) {
+      reasoningDisabled = true;
+      return completeViaHttp(model, system, user, maxTokens);
+    }
     throw error;
   }
   if (anthropic) {
@@ -998,9 +1024,13 @@ function emitPlannerUsageSummary(reason) {
   emitPlannerUsage(event);
 }
 
-/** Output room for the plan JSON; reasoning models spend some of it thinking. */
+/**
+ * Output room for the plan JSON. The plan itself runs to a few hundred
+ * tokens, but a verbose model's deal policies ran past 600 in the first
+ * hosted game, and reasoning models count their thinking here too.
+ */
 function planMaxTokens(model) {
-  return isAnthropicModel(model) ? 600 : 1500;
+  return isAnthropicModel(model) ? 1500 : 4000;
 }
 
 async function askModel(state) {
