@@ -115,6 +115,29 @@ afterEach(() => {
 });
 
 describe("world-page", () => {
+  it("says team, not agent or league, when the Frontier Four hold the map", async () => {
+    serve(
+      worldFixture({
+        mode: "frontier-four",
+        teams: [
+          { label: "Astra", model: "openai/gpt-6-astra" },
+          { label: "Fable", model: "anthropic/claude-fable-5.1" },
+          { label: "Gemini", model: "google/gemini-3.1-pro-preview" },
+          { label: "Grok", model: "x-ai/grok-4.7" },
+        ],
+      }),
+    );
+    const el = mount();
+    await settle(el);
+    const page = (el.textContent ?? "").replace(/\s+/g, " ");
+    expect(page).toContain("Battles are fought on real maps");
+    expect(page).toContain("belongs to the team with the most wins");
+    expect(el.querySelector(".wp-powers thead")?.textContent).toContain("Team");
+    expect(el.querySelector("canvas.wp-map")?.getAttribute("aria-label")).toBe(
+      "World map coloured by the team holding each front",
+    );
+    expect(page).not.toMatch(/League battles are fought|belongs to the agent/);
+  });
   it("fetches world.json and renders the map, labels, Crown, fronts, dispatches and powers", async () => {
     const el = mount();
     await settle(el);

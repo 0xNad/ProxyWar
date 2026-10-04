@@ -177,6 +177,40 @@ export function contextLine(model: {
   return translateText("home_page.context");
 }
 
+/**
+ * League strings with a Frontier Four twin. The twin says "team" where the
+ * league says "agent" and drops "league", because in that mode the fronts
+ * are held by four teams of one model each.
+ */
+export const FRONTIER_TWINS: Readonly<Record<string, string>> = {
+  "home_page.rules_rule": "home_page.rules_rule_frontier",
+  "home_page.rule_unclaimed": "home_page.rule_unclaimed_frontier",
+  "home_page.rules_stats": "home_page.rules_stats_frontier",
+  "home_page.data_as_of": "home_page.data_as_of_frontier",
+  "home_page.support_empty": "home_page.support_empty_frontier",
+  "home_page.verdict_tied_many": "home_page.verdict_tied_many_frontier",
+  "home_page.support_tied": "home_page.support_tied_frontier",
+  "home_page.support_tied_many": "home_page.support_tied_many_frontier",
+  "home_page.support_scattered": "home_page.support_scattered_frontier",
+  "world_page.rule_place_body": "world_page.rule_place_body_frontier",
+  "world_page.rule_window_body": "world_page.rule_window_body_frontier",
+  "world_page.data_note": "world_page.data_note_frontier",
+  "world_page.fronts_intro": "world_page.fronts_intro_frontier",
+  "world_page.map_label": "world_page.map_label_frontier",
+  "world_page.powers_agent": "world_page.powers_agent_frontier",
+  "world_page.sheet_days": "world_page.sheet_days_frontier",
+  "world_page.sheet_days_ongoing": "world_page.sheet_days_ongoing_frontier",
+  "world_page.front_unclaimed_body": "world_page.front_unclaimed_body_frontier",
+};
+
+/** The key to read for this world's mode: the Frontier Four twin where one exists. */
+export function modeKey(
+  model: { readonly mode?: "league" | "frontier-four" },
+  key: string,
+): string {
+  return model.mode === "frontier-four" ? (FRONTIER_TWINS[key] ?? key) : key;
+}
+
 /** A front's name inside a sentence ("the Black Sea", "the Crown"). */
 export function frontInText(id: WorldTheatreId): string {
   return translateText(`home_page.in_text_${id}`);

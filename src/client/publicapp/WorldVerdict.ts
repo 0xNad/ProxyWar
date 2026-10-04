@@ -7,6 +7,7 @@ import { hexToRgb, rgbHex, worldVerdict } from "./WorldPresentation";
 import {
   formatList,
   frontInText,
+  modeKey,
   nameMarker,
   splice,
   spliceList,
@@ -63,7 +64,7 @@ export function renderVerdict(
             { first: nameMarker(0), second: nameMarker(1) },
             verdict.names.map((name) => view.leadName(name)),
           )
-        : translateText("home_page.verdict_tied_many", {
+        : translateText(modeKey(model, "home_page.verdict_tied_many"), {
             count: verdict.names.length,
           });
     case "scattered":
@@ -141,11 +142,13 @@ export function renderSupport(
     }
     case "tied":
       return verdict.names.length === 2
-        ? splice("home_page.support_tied", { holding: nameMarker(0) }, [
-            holding(verdict.fronts),
-          ])
+        ? splice(
+            modeKey(model, "home_page.support_tied"),
+            { holding: nameMarker(0) },
+            [holding(verdict.fronts)],
+          )
         : splice(
-            "home_page.support_tied_many",
+            modeKey(model, "home_page.support_tied_many"),
             {
               names: formatList(verdict.names.map((name) => view.label(name))),
               holding: nameMarker(0),
@@ -153,10 +156,10 @@ export function renderSupport(
             [holding(verdict.fronts)],
           );
     case "scattered":
-      return translateText("home_page.support_scattered", {
+      return translateText(modeKey(model, "home_page.support_scattered"), {
         count: verdict.claimed,
       });
     case "empty":
-      return translateText("home_page.support_empty");
+      return translateText(modeKey(model, "home_page.support_empty"));
   }
 }

@@ -6,7 +6,7 @@ import { contestLine, renderStrip } from "./WorldFronts";
 import { renderFrontTimeline } from "./WorldHistory";
 import type { WorldTheatre, WorldTheatreId } from "./WorldModelSchema";
 import { battlefieldKey, frontDisplayState } from "./WorldPresentation";
-import { battlefieldName, formatDateRange } from "./WorldText";
+import { battlefieldName, formatDateRange, modeKey } from "./WorldText";
 import { ICONS, STATUS_KEYS, type WorldView } from "./WorldView";
 
 /**
@@ -79,7 +79,7 @@ export function renderDrawer(
           ? html`<p class="wp-front-empty">
               ${translateText(
                 theatre.battleCount === 0
-                  ? "world_page.front_unclaimed_body"
+                  ? modeKey(model, "world_page.front_unclaimed_body")
                   : "world_page.front_unclaimed_tried",
                 {
                   count: theatre.battleCount,
