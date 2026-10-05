@@ -10,7 +10,9 @@ a daily cap on what this loop spends, and a floor on the coworld's remaining
 daily funds so the league's own rounds keep running. The loop refuses to
 launch when either is crossed and resumes on the next day.
 `launch_interval_minutes` spaces launches so the competition runs through
-the day instead of in bursts (60: about one game an hour).
+the day instead of in bursts (60: about one game an hour). A launch the
+platform refuses for lack of experience credits (HTTP 402) holds the loop
+until the refill time the refusal names.
 
 Usage:
     uvx --from coworld python scheduler.py --config frontier-four.json [--once] [--dry-run]
@@ -46,6 +48,21 @@ def utcnow() -> dt.datetime:
 
 def iso(value: dt.datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def next_refill(message: str) -> dt.datetime:
+    """The refill time a credits refusal names, else the next UTC midnight."""
+    match = re.search(r"next refill ([0-9T:+.-]+)", message)
+    if match:
+        try:
+            parsed = dt.datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed
+        except ValueError:
+            pass
+    now = utcnow()
+    return (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def load_json(path: Path, default):
@@ -92,6 +109,7 @@ class Scheduler:
         )
         self.dry_run = dry_run
         self.last_hold: str | None = None
+        self.credits_hold_until: dt.datetime | None = None
         self.client = CoworldApiClient.from_login(server_url=SERVER)
         self.teams = config["teams"]
         self.fronts = config["fronts"]
@@ -121,6 +139,10 @@ class Scheduler:
             due = dt.datetime.fromisoformat(last_launch.replace("Z", "+00:00")) + dt.timedelta(minutes=interval)
             if utcnow() < due:
                 return False, f"paced: next launch at {iso(due)}"
+        if self.credits_hold_until is not None:
+            if utcnow() < self.credits_hold_until:
+                return False, f"credits exhausted: next refill at {iso(self.credits_hold_until)}"
+            self.credits_hold_until = None
         budget = self.budget()
         if budget is None:
             return False, "budget unreadable"
@@ -204,7 +226,15 @@ class Scheduler:
             # A dry run shows the next game and touches nothing on disk.
             log("dry_run_launch", key=key, variant=front["variant_id"], sides=[(s["label"], s["slots"]) for s in sides])
             return
-        response = self.client.create_experience_request(body).model_dump(mode="json")
+        try:
+            response = self.client.create_experience_request(body).model_dump(mode="json")
+        except Exception as error:  # noqa: BLE001 - a refused request is a hold, not a crash
+            message = str(error)
+            if "(402)" not in message and "experience credits" not in message:
+                raise
+            self.credits_hold_until = next_refill(message)
+            log("credits_exhausted", until=iso(self.credits_hold_until), error=message[:300])
+            return
         record["request"] = {k: response.get(k) for k in ("id", "status", "created_at", "cost_preview")}
         save_json(self.requests_dir / f"{key}.json", record)
         self.state["inflight"].append(key)
