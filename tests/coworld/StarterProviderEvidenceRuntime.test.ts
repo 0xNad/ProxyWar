@@ -50,9 +50,6 @@ const fakeBedrock = {
       runtime.calls.push(request);
       runtime.callOptions.push(options);
       if (runtime.calls.length === 1) {
-        throw new Error("first model unavailable");
-      }
-      if (runtime.calls.length === 2) {
         return {
           id: "msg_provider_success_1",
           model: "test.sonnet-response",
@@ -87,12 +84,11 @@ const fakeBedrock = {
 
 const previousEnv = {
   wsUrl: process.env.COWORLD_PLAYER_WS_URL,
-  model: process.env.BEDROCK_MODEL,
+  model: process.env.COWORLD_LLM_MODEL,
   planEvery: process.env.PLAN_EVERY,
-  sidecar: process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
+  sidecar: process.env.COWORLD_LLM_ENDPOINT,
   refreshTimeout: process.env.PLANNER_REFRESH_TIMEOUT_MS,
 };
-let strictBedrockSidecarEndpoint: (value: unknown) => string | undefined;
 let createPlannerProviderEvidenceGroup: () => {
   start: (model: string) => number | null;
   complete: (attempt: number | null, response: Record<string, unknown>) => void;
@@ -156,10 +152,10 @@ describe("tester planner provider evidence runtime", () => {
 
   beforeAll(async () => {
     process.env.COWORLD_PLAYER_WS_URL = "ws://provider-runtime.invalid";
-    process.env.BEDROCK_MODEL = "test.sonnet-provider";
+    process.env.COWORLD_LLM_MODEL = "test.sonnet-provider";
     process.env.PLAN_EVERY = "1";
     process.env.PLANNER_REFRESH_TIMEOUT_MS = "12000";
-    delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
+    delete process.env.COWORLD_LLM_ENDPOINT;
     logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
       const line = args.map(String).join(" ");
       logs.push(line);
@@ -174,34 +170,12 @@ describe("tester planner provider evidence runtime", () => {
       "../../coworld-adapter/tester-starter-llm/llm-player.mjs";
     const player = await import(playerModulePath);
     const { startLlmPlayer } = player;
-    strictBedrockSidecarEndpoint = player.strictBedrockSidecarEndpoint;
     createPlannerProviderEvidenceGroup =
       player.createPlannerProviderEvidenceGroup;
     startLlmPlayer({
-      bedrockClient: fakeBedrock,
+      llmClient: fakeBedrock,
       WebSocketCtor: FakeWebSocket,
     });
-  });
-
-  it("accepts only credential-free loopback HTTP sidecars", () => {
-    expect(strictBedrockSidecarEndpoint("http://127.0.0.1:9100")).toBe(
-      "http://127.0.0.1:9100",
-    );
-    expect(strictBedrockSidecarEndpoint(" http://localhost:9100 ")).toBe(
-      "http://localhost:9100",
-    );
-    for (const invalid of [
-      "https://127.0.0.1:9100",
-      "http://bedrock-sidecar:9100",
-      "http://127.0.0.1",
-      "http://user:pass@127.0.0.1:9100",
-      "http://127.0.0.1:9100/path",
-      "http://127.0.0.1:9100/?query=1",
-    ]) {
-      expect(() => strictBedrockSidecarEndpoint(invalid)).toThrow(
-        "bedrock-sidecar-endpoint-invalid",
-      );
-    }
   });
 
   it("omits overflowed aggregate tokens while retaining terminal counts", () => {
@@ -236,18 +210,18 @@ describe("tester planner provider evidence runtime", () => {
         key === "wsUrl"
           ? "COWORLD_PLAYER_WS_URL"
           : key === "model"
-            ? "BEDROCK_MODEL"
+            ? "COWORLD_LLM_MODEL"
             : key === "planEvery"
               ? "PLAN_EVERY"
               : key === "sidecar"
-                ? "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"
+                ? "COWORLD_LLM_ENDPOINT"
                 : "PLANNER_REFRESH_TIMEOUT_MS";
       if (value === undefined) delete process.env[envKey];
       else process.env[envKey] = value;
     }
   });
 
-  it("emits one terminal mixed-attempt aggregate, then a bounded timeout, with no tail", async () => {
+  it("emits one terminal successful aggregate, then a bounded timeout, with no tail", async () => {
     runtime.socket!.emit("message", decisionRequest("req-1"));
     await vi.waitFor(() =>
       expect(logs.some((line) => line.includes('"status":"applied"'))).toBe(
@@ -259,15 +233,12 @@ describe("tester planner provider evidence runtime", () => {
       requestID: "req-1",
       providerEvidence: {
         callKind: "planner",
-        provider: "aws-bedrock",
+        provider: "coworld-sidecar",
         requestedModel: "test.sonnet-provider",
-        attemptedModels: [
-          "test.sonnet-provider",
-          "us.anthropic.claude-sonnet-4-6",
-        ],
-        attemptCount: 2,
+        attemptedModels: ["test.sonnet-provider"],
+        attemptCount: 1,
         completedAttemptCount: 1,
-        failedAttemptCount: 1,
+        failedAttemptCount: 0,
         timedOutAttemptCount: 0,
         responseModel: "test.sonnet-response",
         inputTokens: 1250,
@@ -279,16 +250,16 @@ describe("tester planner provider evidence runtime", () => {
     vi.useFakeTimers();
     const startedAt = Date.now();
     runtime.socket!.emit("message", decisionRequest("req-2"));
-    await vi.waitFor(() => expect(runtime.calls).toHaveLength(3));
+    await vi.waitFor(() => expect(runtime.calls).toHaveLength(2));
     await vi.advanceTimersByTimeAsync(12_000);
     await vi.waitFor(() => expect(runtime.sent).toHaveLength(2));
     expect(runtime.sent.at(-1)).toMatchObject({
       requestID: "req-2",
       providerEvidence: {
         callKind: "planner",
-        provider: "aws-bedrock",
-        requestedModel: "us.anthropic.claude-sonnet-4-6",
-        attemptedModels: ["us.anthropic.claude-sonnet-4-6"],
+        provider: "coworld-sidecar",
+        requestedModel: "test.sonnet-provider",
+        attemptedModels: ["test.sonnet-provider"],
         attemptCount: 1,
         completedAttemptCount: 0,
         failedAttemptCount: 0,
@@ -303,11 +274,11 @@ describe("tester planner provider evidence runtime", () => {
         .responseModel,
     ).toBeUndefined();
     expect(errors.some((line) => line.includes("timeout"))).toBe(true);
-    expect(runtime.callOptions[2]).toMatchObject({ maxRetries: 0 });
-    expect(Number(runtime.callOptions[2].timeout)).toBeGreaterThan(0);
-    expect(Number(runtime.callOptions[2].timeout)).toBeLessThanOrEqual(12_000);
-    expect(runtime.callOptions[2].signal).toBeInstanceOf(AbortSignal);
-    expect((runtime.callOptions[2].signal as AbortSignal).aborted).toBe(true);
+    expect(runtime.callOptions[1]).toMatchObject({ maxRetries: 0 });
+    expect(Number(runtime.callOptions[1].timeout)).toBeGreaterThan(0);
+    expect(Number(runtime.callOptions[1].timeout)).toBeLessThanOrEqual(12_000);
+    expect(runtime.callOptions[1].signal).toBeInstanceOf(AbortSignal);
+    expect((runtime.callOptions[1].signal as AbortSignal).aborted).toBe(true);
     expect(runtime.abortedProviderCalls).toBe(1);
     expect(runtime.settledProviderCalls).toBe(1);
 
@@ -327,20 +298,20 @@ describe("tester planner provider evidence runtime", () => {
     );
     runtime.socket!.emit("message", decisionRequest("after-final"));
 
-    await vi.waitFor(() => expect(runtime.calls).toHaveLength(4));
+    await vi.waitFor(() => expect(runtime.calls).toHaveLength(3));
     expect(runtime.sent).toHaveLength(3);
     expect(runtime.closeCount).toBe(0);
 
     await vi.advanceTimersByTimeAsync(12_000);
     await vi.waitFor(() => {
       expect(runtime.sent).toHaveLength(4);
-      expect(runtime.calls).toHaveLength(5);
+      expect(runtime.calls).toHaveLength(4);
     });
     expect(runtime.sent[3]).toMatchObject({
       requestID: "overlap-1",
       providerEvidence: {
         callKind: "planner",
-        attemptedModels: ["us.anthropic.claude-sonnet-4-6"],
+        attemptedModels: ["test.sonnet-provider"],
         attemptCount: 1,
         completedAttemptCount: 0,
         failedAttemptCount: 0,
@@ -359,7 +330,7 @@ describe("tester planner provider evidence runtime", () => {
       requestID: "overlap-2",
       providerEvidence: {
         callKind: "planner",
-        attemptedModels: ["us.anthropic.claude-sonnet-4-6"],
+        attemptedModels: ["test.sonnet-provider"],
         attemptCount: 1,
         completedAttemptCount: 0,
         failedAttemptCount: 0,
@@ -370,7 +341,7 @@ describe("tester planner provider evidence runtime", () => {
     expect(runtime.sent[3].providerEvidence).not.toBe(
       runtime.sent[4].providerEvidence,
     );
-    expect(runtime.calls).toHaveLength(5);
+    expect(runtime.calls).toHaveLength(4);
     expect(runtime.sent).toHaveLength(5);
     expect(runtime.abortedProviderCalls).toBe(3);
     expect(runtime.settledProviderCalls).toBe(3);

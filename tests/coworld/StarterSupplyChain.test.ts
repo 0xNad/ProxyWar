@@ -23,7 +23,6 @@ describe("canonical Coworld starter supply chain", () => {
 
     expect(packageJson.dependencies).toEqual({
       ws: "8.21.3",
-      "@anthropic-ai/bedrock-sdk": "0.33.1",
     });
     expect(lock.lockfileVersion).toBe(3);
     expect(lock.packages[""]?.dependencies).toEqual(packageJson.dependencies);
@@ -46,7 +45,7 @@ describe("canonical Coworld starter supply chain", () => {
   it("pins hosted CLIs and never executes a mutable remote installer", async () => {
     const launch = await fs.readFile(path.join(starter, "launch.sh"), "utf8");
 
-    expect(launch).toContain('COWORLD_PACKAGE="coworld==0.1.42"');
+    expect(launch).toContain('COWORLD_PACKAGE="coworld==0.1.70"');
     expect(launch).toContain('SOFTMAX_CLI_PACKAGE="softmax-cli==0.26.30"');
     expect(launch).not.toMatch(/curl[^\n|]*\|\s*(?:sh|bash)/);
     expect(launch).not.toMatch(/uvx\s+(?:coworld|softmax)\b/);

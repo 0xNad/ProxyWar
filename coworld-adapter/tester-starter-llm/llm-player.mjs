@@ -1,5 +1,5 @@
 /**
- * ProxyWar LLM agent (Bedrock) — deferred-planning edition.
+ * ProxyWar LLM agent (Coworld native Messages API) — deferred-planning edition.
  *
  * WHY THIS SHAPE: hosted episodes have a hard wall-clock budget set by the
  * match package (the league coworld currently allows up to 100 minutes;
@@ -7,7 +7,7 @@
  * decision (~15-25s each) spends the whole budget waiting on the model and
  * the platform kills the game. So this agent answers
  * most decisions instantly from its current PLAN (a short doctrine the model
- * wrote), and refreshes that plan with Claude (via AWS Bedrock) in one bounded
+ * wrote), and refreshes that plan with Claude (via the Coworld sidecar) in one bounded
  * exchange every few decisions. The refresh response carries one exact,
  * terminal aggregate of every provider attempt; intervening decisions remain
  * deterministic and zero-call.
@@ -18,7 +18,6 @@
  *   - choose     (how a plan turns into one legal move).
  * That's your agent. Everything else is plumbing.
  */
-import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import {
@@ -38,54 +37,34 @@ import {
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
 
-const REGION =
-  process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
-const MODELS = [
-  process.env.BEDROCK_MODEL,
-  "us.anthropic.claude-sonnet-4-6",
-  "global.anthropic.claude-sonnet-4-6",
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-  "anthropic.claude-sonnet-4-5-20250929-v1:0",
-].filter(Boolean);
+const MODELS = [process.env.COWORLD_LLM_MODEL || "anthropic/claude-haiku-4.5"];
+const SIDECAR = process.env.COWORLD_LLM_ENDPOINT;
+let llm = null;
 
-// Hosted pods front Bedrock with a per-pod sidecar (since ~2026-07-30): calls
-// must go to AWS_ENDPOINT_URL_BEDROCK_RUNTIME or they 403 on placeholder creds.
-// Locally the env var is absent and the client talks to AWS directly as before.
-export function strictBedrockSidecarEndpoint(value) {
-  const raw = typeof value === "string" ? value.trim() : "";
-  if (raw.length === 0) return undefined;
-  let parsed;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error("bedrock-sidecar-endpoint-invalid");
-  }
-  if (
-    parsed.protocol !== "http:" ||
-    (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") ||
-    parsed.port.length === 0 ||
-    parsed.pathname !== "/" ||
-    parsed.search.length > 0 ||
-    parsed.hash.length > 0 ||
-    parsed.username.length > 0 ||
-    parsed.password.length > 0
-  ) {
-    throw new Error("bedrock-sidecar-endpoint-invalid");
-  }
-  return parsed.origin;
-}
-const SIDECAR =
-  strictBedrockSidecarEndpoint(process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME) ??
-  "";
-let bedrock = null;
-function createBedrockClient() {
-  try {
-    return new AnthropicBedrock(
-      SIDECAR ? { awsRegion: REGION, baseURL: SIDECAR } : { awsRegion: REGION },
-    );
-  } catch {
-    return null;
-  }
+export function createLlmClient(endpoint = SIDECAR) {
+  if (!endpoint) throw new Error("COWORLD_LLM_ENDPOINT is required");
+  const messagesUrl = new URL("v1/messages", `${endpoint.replace(/\/$/, "")}/`);
+  return {
+    messages: {
+      async create(request, { signal }) {
+        const response = await fetch(messagesUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify(request),
+          signal,
+        });
+        if (!response.ok) {
+          const error = new Error(`Coworld LLM HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        return response.json();
+      },
+    },
+  };
 }
 let lockedModel = null;
 
@@ -651,7 +630,7 @@ function providerTimeoutError() {
   return error;
 }
 
-async function invokeBedrockAttempt(request, remainingMs) {
+async function invokeLlmAttempt(request, remainingMs) {
   const controller = new AbortController();
   const timeoutError = providerTimeoutError();
   let timeoutHandle;
@@ -663,7 +642,7 @@ async function invokeBedrockAttempt(request, remainingMs) {
   });
   let invocation;
   try {
-    invocation = bedrock.messages.create(request, {
+    invocation = llm.messages.create(request, {
       timeout: remainingMs,
       maxRetries: 0,
       signal: controller.signal,
@@ -679,7 +658,7 @@ async function invokeBedrockAttempt(request, remainingMs) {
 
 export function createPlannerProviderEvidenceGroup() {
   const group = {
-    provider: SIDECAR ? "bedrock-sidecar" : "aws-bedrock",
+    provider: "coworld-sidecar",
     requestedModel: null,
     attemptedModels: [],
     attemptCount: 0,
@@ -706,7 +685,7 @@ export function createPlannerProviderEvidenceGroup() {
     complete(attempt, response) {
       if (this.terminal || attempt === null) return;
       this.completedAttemptCount += 1;
-      const usage = normalizeBedrockUsage(response?.usage);
+      const usage = normalizeLlmUsage(response?.usage);
       const inputTokens = boundedProviderTokenCount(usage.inputTokens);
       const outputTokens = boundedProviderTokenCount(usage.outputTokens);
       if (
@@ -747,7 +726,7 @@ export function createPlannerProviderEvidenceGroup() {
       } else if (this.attemptCount > 1) {
         delete this.requestID;
       }
-      this.rawOutputPresent ||= bedrockResponseText(response).length > 0;
+      this.rawOutputPresent ||= llmResponseText(response).length > 0;
     },
     fail(attempt, error) {
       if (this.terminal || attempt === null) return;
@@ -812,7 +791,7 @@ function optionalTokenCount(value) {
     : undefined;
 }
 
-function normalizeBedrockUsage(usage) {
+function normalizeLlmUsage(usage) {
   const normalized = {
     inputTokens: optionalTokenCount(usage?.input_tokens ?? usage?.inputTokens),
     outputTokens: optionalTokenCount(
@@ -908,7 +887,7 @@ function recordPlannerResponse({
   latencyMs,
   usage,
 }) {
-  const normalized = normalizeBedrockUsage(usage);
+  const normalized = normalizeLlmUsage(usage);
   plannerUsageTotals.responses += 1;
   if (normalized.usageAvailable) plannerUsageTotals.responsesWithUsage += 1;
   for (const key of [
@@ -970,7 +949,7 @@ function emitPlannerUsageSummary(reason) {
   emitPlannerUsage(event);
 }
 
-function buildBedrockRequest(
+function buildLlmRequest(
   model,
   staticPrompt,
   dynamicPrompt,
@@ -998,12 +977,12 @@ function buildBedrockRequest(
   };
 }
 
-function bedrockResponseText(response) {
+function llmResponseText(response) {
   return response?.content?.[0]?.text || "";
 }
 
-async function askBedrock(state, providerEvidenceGroup, deadlineAt) {
-  if (!bedrock) throw new Error("bedrock client did not initialize");
+async function askLlm(state, providerEvidenceGroup, deadlineAt) {
+  if (!llm) throw new Error("Coworld LLM client did not initialize");
   const staticPrompt =
     STRATEGY +
     "\n" +
@@ -1045,8 +1024,8 @@ async function askBedrock(state, providerEvidenceGroup, deadlineAt) {
       // message because hosted Sonnet rejects the assistant-prefill form. The
       // optional cache arm splits the identical text into a static cached block
       // and one dynamic GAME block; the default stays a byte-identical string.
-      const r = await invokeBedrockAttempt(
-        buildBedrockRequest(
+      const r = await invokeLlmAttempt(
+        buildLlmRequest(
           model,
           staticPrompt,
           dynamicPrompt,
@@ -1068,7 +1047,7 @@ async function askBedrock(state, providerEvidenceGroup, deadlineAt) {
       lockedModel = model;
       return {
         attempt,
-        text: bedrockResponseText(r),
+        text: llmResponseText(r),
         model,
       };
     } catch (e) {
@@ -1085,7 +1064,7 @@ async function askBedrock(state, providerEvidenceGroup, deadlineAt) {
     }
   }
   providerEvidenceGroup.finish();
-  throw lastErr || new Error("no bedrock model responded");
+  throw lastErr || new Error("no Coworld model responded");
 }
 
 async function authorOpenEndedMessage(
@@ -1117,8 +1096,8 @@ async function authorOpenEndedMessage(
     const startedAt = Date.now();
     let response;
     try {
-      response = await invokeBedrockAttempt(
-        buildBedrockRequest(model, prompt, "", true, false),
+      response = await invokeLlmAttempt(
+        buildLlmRequest(model, prompt, "", true, false),
         remainingMs,
       );
       recordPlannerResponse({
@@ -1144,7 +1123,7 @@ async function authorOpenEndedMessage(
     }
     try {
       const text = parseOpenEndedMessageResponse(
-        bedrockResponseText(response),
+        llmResponseText(response),
         intent.maxChars,
       );
       intent.commit?.();
@@ -1206,7 +1185,7 @@ async function refreshPlan(state) {
       ? "global-lockstep-public-map-v1"
       : null;
   try {
-    const { attempt, text, model } = await askBedrock(
+    const { attempt, text, model } = await askLlm(
       state,
       providerEvidenceGroup,
       Date.now() + PLANNER_REFRESH_TIMEOUT_MS,
@@ -1916,20 +1895,17 @@ const lingerArmed =
   process.env.KUBERNETES_SERVICE_HOST !== undefined ||
   process.env.PROXYWAR_PLAYER_FORCE_LINGER === "1";
 
-export function startLlmPlayer({
-  bedrockClient,
-  WebSocketCtor = WebSocket,
-} = {}) {
+export function startLlmPlayer({ llmClient, WebSocketCtor = WebSocket } = {}) {
   if (!url)
     throw new Error(
       "COWORLD_PLAYER_WS_URL is required (the match provides it)",
     );
-  bedrock = bedrockClient ?? createBedrockClient();
+  llm = llmClient ?? createLlmClient();
   const ownerEvidence = createOwnerCapabilityEvidenceLogger();
   const socket = new WebSocketCtor(url);
   socket.on("open", () =>
     console.log(
-      `connected to match (region=${REGION}, models=${MODELS.length})`,
+      `connected to match (endpoint=coworld-sidecar, models=${MODELS.length})`,
     ),
   );
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # ProxyWar agent starter — checks your setup, signs you in, builds your agent,
-# and uploads it to Softmax (Bedrock-powered) as a policy. Uploading is not
+# and uploads it to Softmax (Coworld LLM-powered) as a policy. Uploading is not
 # the same as entering the league — the script prints the `coworld leagues` /
 # `coworld submit` commands that do that at the end.
 #
@@ -15,7 +15,7 @@
 #
 # The script fixes or guides every gap it finds; the one thing it can't do for
 # you is the Softmax sign-in (runs in your browser, once). No model API key is
-# needed — the agent uses Softmax's in-cluster Bedrock (--use-bedrock).
+# needed — the agent uses Softmax's native LLM sidecar (--use-llm --llm-model anthropic/claude-haiku-4.5).
 #
 set -euo pipefail
 
@@ -44,7 +44,7 @@ done
 IMAGE="proxywar-agent-llm:latest"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SERVER="https://softmax.com/api"
-COWORLD_PACKAGE="coworld==0.1.42"
+COWORLD_PACKAGE="coworld==0.1.70"
 SOFTMAX_CLI_PACKAGE="softmax-cli==0.26.30"
 BLOCKED=0
 AUTH="unknown"
@@ -159,9 +159,9 @@ fi
 echo "==> Building your agent image (linux/amd64)..."
 docker build --platform linux/amd64 -t "$IMAGE" "$HERE"
 
-echo "==> Uploading to Softmax as policy '$NAME' (Bedrock enabled)..."
+echo "==> Uploading to Softmax as policy '$NAME' (Coworld LLM enabled)..."
 uvx --from "$COWORLD_PACKAGE" coworld upload-policy "$IMAGE" \
-  --name "$NAME" --use-bedrock --run node --run /app/llm-player.mjs
+  --name "$NAME" --use-llm --llm-model anthropic/claude-haiku-4.5 --run node --run /app/llm-player.mjs
 
 echo "==> Resolving your policy id..."
 POLICY_ID="$(uvx --from "$COWORLD_PACKAGE" python - "$NAME" "$SERVER" <<'PY'
@@ -180,7 +180,7 @@ PY
 echo
 if [ -n "$POLICY_ID" ]; then
   cat <<EOF
-Done. Your Bedrock-powered agent is uploaded. Your policy id is:
+Done. Your Coworld LLM-powered agent is uploaded. Your policy id is:
 
     $POLICY_ID
 EOF
