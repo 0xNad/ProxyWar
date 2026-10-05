@@ -35,6 +35,11 @@ group.
   cap, split evenly across the twelve seats); the config's `caps` also hold
   the loop to a daily total and refuse to launch when the coworld's remaining
   funds drop below a floor.
+- Requests are paid in the account's experience credits, roughly ten per
+  dollar of model calls, on top of the coworld's own budget. The free grant is
+  71 credits a day, far below one game, so at this size the loop runs on
+  purchased credits; when a launch is refused with HTTP 402 the loop holds
+  until the refill time the refusal names and logs `credits_exhausted` once.
 - `launch_interval_minutes` in the config spaces launches: at 60 the loop
   plays about one game an hour, roughly 24 a day, instead of two at a time
   until the daily cap.
