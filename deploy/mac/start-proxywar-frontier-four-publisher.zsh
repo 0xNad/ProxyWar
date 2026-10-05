@@ -41,7 +41,7 @@ if node --import tsx/esm src/scripts/frontier-four-publish.ts --site-dir "$SITE_
   fi
   echo "[frontier-four-publisher $(date -u +%FT%TZ)] published $(wc -l < "$GAMES" | tr -d ' ') games to $SITE_DIR" >> "$LOG"
 else
-  status=$?
-  echo "[frontier-four-publisher $(date -u +%FT%TZ)] publish failed with exit $status" >> "$LOG"
-  exit $status
+  rc=$?
+  echo "[frontier-four-publisher $(date -u +%FT%TZ)] publish failed with exit $rc" >> "$LOG"
+  exit $rc
 fi
