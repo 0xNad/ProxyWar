@@ -1,0 +1,489 @@
+{
+  "game": {
+    "name": "proxywar-frontier-ffa",
+    "version": "0.1.0",
+    "description": "Proxy War, Frontier free-for-all: five frontier models, one nation each, fight for the fronts of the world map. Every seat is its own single-seat team on the canonical Proxy War engine.",
+    "docs": {
+      "readme": {
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields; its envelope independently advertises protocol.maxActionsPerDecision for optional gameplay-action batching and protocol.maxSpawnPreferences=16 for spawn ranking. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly. On a spawn-only menu, the optional spawnPreferenceLegalActionIds field may rank up to 16 exact offered spawn LegalAction.id values with selectedLegalActionId first. spawnPreferenceLegalActionIds is a spawn ballot independent of selectedLegalActionIds gameplay-action batching; never put the spawn ranking in selectedLegalActionIds. When offered, selectedDealActionId may separately select one exact deal_* id alongside that game action. Omitting the optional slot stays valid but ignores the diplomacy opportunity. Structured deals are breakable, referee-observed promises rather than engine alliances or permission changes. Non-aggression and trade-security bind both parties; joint_attack is an attack pledge by the proposer only; accepting support_request obligates the recipient to send the stated support.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Five-model free-for-all\n\nVariants named `ffa5-<map>` seat five players on a Compact map, each its own single-seat team (`team_count: 5`, `seat_teams: [0, 1, 2, 3, 4]`). The request names the seats after the models it seats (`team_labels`, so a seat reads \"<label> 1\") and sets `episodeIndex`, which rotates who chooses a spawn first. There are no teammates: every seat may ally with, trade with, attack or betray any other seat, and alliances, embargoes and structured deals work between any two seats. A seat that holds more than 95% of the land wins outright. Otherwise the game stops after 240 decision steps of 100 turns (40 game minutes) with no winner reported, and each seat scores its share of the land, so the seat with the most land leads on points. `ffa5-canary` is a 48-step smoke test on World. Results carry `winner_team` and `players[].team`.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer.\n\n## Unavailable policy seats\n\nAfter the existing player connection window closes, ordinary matches proceed with at least two connected policies. A policy that never connected receives no spawn and zero score. Results preserve every original policy slot, and replays list unavailablePlayerSlots. Late joins for unavailable slots are rejected. Matched Commander evaluations still require every assigned policy.\n\n\n## Episode duration budget\n\nThe configured episode_timeout_seconds bounds gameplay, with two minutes reserved for result and replay writing. Decision windows are capped to remaining gameplay time. An ordinary bounded match that reaches this limit finalizes its current state using the existing scoring rule; its replay marks episodeDurationLimitReached. Evaluations that require a winner still fail if no winner was reached.\n"
+      }
+    }
+  },
+  "variants": [
+    {
+      "id": "ffa5-canary",
+      "name": "Frontier FFA canary (5 seats, World)",
+      "game_config": {
+        "map": "World",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 48,
+        "episode_timeout_seconds": 1200,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "48-decision smoke test of the five-seat free-for-all on World (Compact): connects five seats, names them, writes winner_team."
+    },
+    {
+      "id": "ffa5-pangaea",
+      "name": "Frontier FFA, 5 models, Pangaea",
+      "game_config": {
+        "map": "Pangaea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Pangaea (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-asia",
+      "name": "Frontier FFA, 5 models, Asia",
+      "game_config": {
+        "map": "Asia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Asia (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-eastasia",
+      "name": "Frontier FFA, 5 models, East Asia",
+      "game_config": {
+        "map": "EastAsia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on East Asia (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-oceania",
+      "name": "Frontier FFA, 5 models, Oceania",
+      "game_config": {
+        "map": "Oceania",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Oceania (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-blacksea",
+      "name": "Frontier FFA, 5 models, Black Sea",
+      "game_config": {
+        "map": "BlackSea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Black Sea (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-britannia",
+      "name": "Frontier FFA, 5 models, Britannia",
+      "game_config": {
+        "map": "Britannia",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Britannia (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-northamerica",
+      "name": "Frontier FFA, 5 models, North America",
+      "game_config": {
+        "map": "NorthAmerica",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on North America (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-europe",
+      "name": "Frontier FFA, 5 models, Europe",
+      "game_config": {
+        "map": "Europe",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Europe (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-africa",
+      "name": "Frontier FFA, 5 models, Africa",
+      "game_config": {
+        "map": "Africa",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Africa (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-mena",
+      "name": "Frontier FFA, 5 models, Middle East",
+      "game_config": {
+        "map": "Mena",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on Middle East (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    },
+    {
+      "id": "ffa5-world",
+      "name": "Frontier FFA, 5 models, World",
+      "game_config": {
+        "map": "World",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 5,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 500,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 2700,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 5,
+        "seat_teams": [0, 1, 2, 3, 4]
+      },
+      "description": "Five seats, each its own single-seat team, on World (Compact) for 240 decision steps of 100 turns (40 game minutes). A seat holding more than 95% of the land wins outright; otherwise the most land leads on points."
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "players": [
+        {
+          "name": "Seat 1"
+        },
+        {
+          "name": "Seat 2"
+        },
+        {
+          "name": "Seat 3"
+        },
+        {
+          "name": "Seat 4"
+        },
+        {
+          "name": "Seat 5"
+        }
+      ],
+      "num_agents": 5,
+      "team_count": 5,
+      "seat_teams": [0, 1, 2, 3, 4],
+      "team_labels": ["Astra", "Fable", "Opus", "Gemini", "Grok"]
+    },
+    "players": [
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      }
+    ]
+  },
+  "episode_timeout_minutes": 50
+}

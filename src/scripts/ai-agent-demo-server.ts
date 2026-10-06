@@ -1192,9 +1192,10 @@ async function sendPublicAppShellPage(
   res: Response,
   failureLabel: string,
   status = 200,
+  transformShell?: (appShell: string) => string,
 ): Promise<void> {
   try {
-    await writePublicAppShellPage(res, status);
+    await writePublicAppShellPage(res, status, transformShell);
   } catch (error) {
     console.error(
       `Failed to serve ${failureLabel}: ${
@@ -1244,9 +1245,10 @@ async function frontPageDataReady(): Promise<boolean> {
 async function writePublicAppShellPage(
   res: Response,
   status: number,
+  transformShell: (appShell: string) => string = (appShell) => appShell,
 ): Promise<void> {
-  const appShell = await getAppShellContent(
-    path.resolve(staticRootDir, "public.html"),
+  const appShell = transformShell(
+    await getAppShellContent(path.resolve(staticRootDir, "public.html")),
   );
   const scriptNonce = randomBytes(24).toString("base64");
   res.setHeader(
@@ -1426,13 +1428,18 @@ async function resolveMatchDetailPageMetadata(matchId: string): Promise<{
       card,
     };
   }
-  const row = await resolveLeagueEpisodeRow(
+  const leagueRow = await resolveLeagueEpisodeRow(
     leagueDataJsonPath,
     summaryArchiveDir,
     matchId,
     runsRootDir,
     leagueReplayCacheDir,
   );
+  // A Frontier game is not a league episode; its row is in the Frontier
+  // publisher's file, the same fallback `/api/matches/:episodeId` uses.
+  const frontierRow =
+    leagueRow === null ? await resolveFrontierFourEpisodeRow(matchId) : null;
+  const row = leagueRow ?? frontierRow;
   if (row === null) return null;
   // League episodes are always post-match (see `MatchDetailPage.ts`'s own
   // doc), so the card is always the result variant.
@@ -1455,9 +1462,24 @@ async function resolveMatchDetailPageMetadata(matchId: string): Promise<{
   };
   return {
     title: leagueEpisodeSpoilerSafeTitle(row),
-    description: leagueEpisodeSpoilerSafeDescription(row),
+    description:
+      frontierRow === null
+        ? leagueEpisodeSpoilerSafeDescription(row)
+        : frontierEpisodeDescription(row),
     card,
   };
+}
+
+/** Like the league description, without calling a Frontier game a league battle. */
+function frontierEpisodeDescription(row: {
+  readonly map: string;
+  readonly players: readonly { readonly slot: number; readonly name: string }[];
+}): string {
+  const names = [...row.players]
+    .sort((left, right) => left.slot - right.slot)
+    .map((player) => player.name);
+  const roster = names.length === 0 ? "Unknown participants" : names.join(", ");
+  return `Watch this Proxy War Frontier battle: ${roster} on ${row.map}.`;
 }
 
 /**
@@ -1595,6 +1617,21 @@ async function sendMatchDetailPageShell(
       .send("Proxy War the match detail page is not built for this server.");
   }
 }
+/**
+ * The app shell's canonical link and `og:url` name the site root. A page
+ * shared from its own address (`/world`) names that address instead, so a
+ * shared link previews and dedupes as the page itself.
+ */
+function withSocialPageUrl(appShell: string, pageUrl: string): string {
+  const tags = [
+    `<link rel="canonical" href="${escapeHtml(pageUrl)}">`,
+    `<meta property="og:url" content="${escapeHtml(pageUrl)}">`,
+  ].join("\n");
+  return appShell
+    .replace(/<link\b[^>]*\brel\s*=\s*["']?canonical\b[^>]*>\s*/gi, "")
+    .replace(/<meta\b[^>]*\bproperty\s*=\s*["']?og:url\b[^>]*>\s*/gi, "")
+    .replace(/<head(?:\s[^>]*)?>/i, (headTag) => `${headTag}\n${tags}`);
+}
 // The front page (`HomePage.ts`): who holds the world right now, read from
 // the mirror-published `world.json`. It is "/" on both public hosts — the
 // league host (`leagueWrapperOnly`, where the later gate middleware would
@@ -1637,7 +1674,10 @@ app.get("/watch", async (_req, res) => {
 // mirror-published `world.json` — same always-reachable app-shell document
 // as `/watch`.
 app.get("/world", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the world map");
+  const worldUrl = new URL("/world", replayPremierePublicOrigin).href;
+  await sendPublicAppShellPage(res, "the world map", 200, (appShell) =>
+    withSocialPageUrl(appShell, worldUrl),
+  );
 });
 app.get("/agents", async (_req, res) => {
   await sendPublicAppShellPage(res, "the agents directory");

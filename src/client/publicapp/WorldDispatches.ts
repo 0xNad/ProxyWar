@@ -6,6 +6,7 @@ import {
   formatDayHeading,
   formatTime,
   localDay,
+  modeKey,
   nameMarker,
   splice,
 } from "./WorldText";
@@ -32,7 +33,7 @@ export function renderDispatches(
       ${translateText("world_page.dispatches_title")}
     </h2>
     <p class="wp-panel-intro">
-      ${translateText("world_page.dispatches_definition", {
+      ${translateText(modeKey(model, "world_page.dispatches_definition"), {
         window: model.windowSize,
       })}
     </p>
@@ -77,7 +78,11 @@ function dayGroups(
 
 /** One event in the front page's words; the whole row watches the battle. */
 function renderDispatch(view: WorldView, event: WorldEvent) {
-  const { key, params } = eventSentence(event, (name) => view.label(name));
+  const { key, params } = eventSentence(
+    event,
+    (name) => view.label(name),
+    view.model,
+  );
   const sentence = translateText(key, {
     ...params,
     agent: view.label(event.agent),

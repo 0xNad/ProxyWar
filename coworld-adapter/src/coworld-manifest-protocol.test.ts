@@ -14,6 +14,7 @@ const MANIFEST_NAMES = [
   "coworld_manifest_ffa16p.json",
   "coworld_manifest_ffa4p.json",
   "coworld_manifest_ffa8p.json",
+  "coworld_manifest_frontier_ffa.json",
   "coworld_manifest_frontier_four.json",
   "coworld_manifest_pr6.json",
   "coworld_manifest_template.json",
@@ -43,6 +44,7 @@ interface ManifestProtocolText {
 
 /** Manifests whose games are fought in teams (`winner_team` beside `winner_slot`). */
 const TEAM_MANIFEST_NAMES: readonly string[] = [
+  "coworld_manifest_frontier_ffa.json",
   "coworld_manifest_frontier_four.json",
 ];
 

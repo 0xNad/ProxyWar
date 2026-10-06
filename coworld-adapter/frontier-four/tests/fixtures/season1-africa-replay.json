@@ -1,0 +1,2617 @@
+{
+  "_comment": "Trimmed from Season-1 hosted game ereq_135fec5a (Africa, 4 teams of 3, Grok/Blue conquest at turn 23600): snapshots without tile lists, only agent_message intents, only moment events, deal-ledger decision steps only.",
+  "request": {
+    "key": "ff-02f4462d-c3-g30-teams-4x3-africa",
+    "cycle": 3,
+    "game_index": 30,
+    "episode_index": 30,
+    "front": {
+      "label": "Africa",
+      "map": "Africa",
+      "map_size": "Normal",
+      "variant_id": "teams-4x3-africa"
+    },
+    "sides": [
+      {
+        "label": "Astra",
+        "model": "openai/gpt-6-astra",
+        "team": null,
+        "slots": [2, 5, 9],
+        "pickOrder": null
+      },
+      {
+        "label": "Fable",
+        "model": "anthropic/claude-fable-5.1",
+        "team": null,
+        "slots": [3, 4, 7],
+        "pickOrder": null
+      },
+      {
+        "label": "Gemini",
+        "model": "google/gemini-3.1-pro-preview",
+        "team": null,
+        "slots": [0, 10, 11],
+        "pickOrder": null
+      },
+      {
+        "label": "Grok",
+        "model": "x-ai/grok-4.7",
+        "team": null,
+        "slots": [1, 6, 8],
+        "pickOrder": null
+      }
+    ],
+    "request": { "id": "xreq_cf5da1ca-fb77-4a5d-8d0b-105844ed0814" },
+    "body": { "roster": [] }
+  },
+  "episode": {
+    "id": "ereq_135fec5a-9f52-4a57-92be-f4ffbb4f3b3b",
+    "status": "completed",
+    "replay_url": "https://softmax-public.s3.amazonaws.com/replays/a7926d54-043f-4edc-8262-cec9e445a552.replay",
+    "completed_at": "2026-10-05T12:02:00.955806Z",
+    "cost_usd": 0.043916
+  },
+  "replay": {
+    "schemaVersion": 1,
+    "replayKind": "proxywar-coworld-local-poc",
+    "config": {
+      "players": [
+        { "name": "Gemini 1" },
+        { "name": "Grok 1" },
+        { "name": "Astra 1" },
+        { "name": "Fable 1" },
+        { "name": "Fable 2" },
+        { "name": "Astra 2" },
+        { "name": "Grok 2" },
+        { "name": "Fable 3" },
+        { "name": "Grok 3" },
+        { "name": "Astra 3" },
+        { "name": "Gemini 2" },
+        { "name": "Gemini 3" }
+      ],
+      "max_decision_steps": 500,
+      "turns_per_decision_step": 100,
+      "max_decision_ms": 60000,
+      "map": "Africa",
+      "map_size": "Normal",
+      "difficulty": "Easy",
+      "team_count": 4,
+      "seat_teams": [0, 1, 2, 3, 3, 2, 1, 3, 1, 2, 0, 0],
+      "team_labels": ["Gemini", "Grok", "Astra", "Fable"],
+      "replay_tail_turns": 500,
+      "num_agents": 12,
+      "episode_timeout_seconds": 3600,
+      "player_connect_timeout_seconds": 120,
+      "player_count": 12
+    },
+    "results": {
+      "game_id": "COWRLD01",
+      "seed": null,
+      "scores": [
+        0, 0.3333333333333333, 0, 0, 0, 0, 0.3333333333333333, 0,
+        0.3333333333333333, 0, 0, 0
+      ],
+      "winner_slot": null,
+      "winner_team": "Blue",
+      "turn_count": 23600,
+      "tick": 23600,
+      "decision_count": 2288,
+      "accepted_decision_count": 2288,
+      "fallback_count": 317,
+      "degraded_count": 184,
+      "degraded_causes": { "plan-warmup": 169, "plan-stale": 15 },
+      "players": [
+        {
+          "slot": 0,
+          "name": "Gemini 1",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Red"
+        },
+        {
+          "slot": 1,
+          "name": "Grok 1",
+          "score": 0.3333333333333333,
+          "tiles_owned": 451347,
+          "is_alive": true,
+          "team": "Blue"
+        },
+        {
+          "slot": 2,
+          "name": "Astra 1",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Yellow"
+        },
+        {
+          "slot": 3,
+          "name": "Fable 1",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Green"
+        },
+        {
+          "slot": 4,
+          "name": "Fable 2",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Green"
+        },
+        {
+          "slot": 5,
+          "name": "Astra 2",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Yellow"
+        },
+        {
+          "slot": 6,
+          "name": "Grok 2",
+          "score": 0.3333333333333333,
+          "tiles_owned": 263660,
+          "is_alive": true,
+          "team": "Blue"
+        },
+        {
+          "slot": 7,
+          "name": "Fable 3",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Green"
+        },
+        {
+          "slot": 8,
+          "name": "Grok 3",
+          "score": 0.3333333333333333,
+          "tiles_owned": 1407036,
+          "is_alive": true,
+          "team": "Blue"
+        },
+        {
+          "slot": 9,
+          "name": "Astra 3",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Yellow"
+        },
+        {
+          "slot": 10,
+          "name": "Gemini 2",
+          "score": 0,
+          "tiles_owned": 0,
+          "is_alive": false,
+          "team": "Red"
+        },
+        {
+          "slot": 11,
+          "name": "Gemini 3",
+          "score": 0,
+          "tiles_owned": 61143,
+          "is_alive": true,
+          "team": "Red"
+        }
+      ]
+    },
+    "finalState": {
+      "phase": "winner:Blue",
+      "winnerSlot": 8,
+      "winnerTeam": "Blue",
+      "tick": 23600,
+      "turnCount": 23600,
+      "players": [
+        {
+          "agentID": "opportunistic-agent-1",
+          "username": "Gemini 1",
+          "profile": "opportunistic",
+          "playerID": "c4o8gv6v",
+          "team": "Red",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 9009,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-2",
+          "username": "Grok 1",
+          "profile": "opportunistic",
+          "playerID": "28k1hctz",
+          "team": "Blue",
+          "isAlive": true,
+          "tilesOwned": 451347,
+          "troops": 10790107,
+          "gold": "73179940"
+        },
+        {
+          "agentID": "opportunistic-agent-3",
+          "username": "Astra 1",
+          "profile": "opportunistic",
+          "playerID": "r5o3pta1",
+          "team": "Yellow",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 61535,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-4",
+          "username": "Fable 1",
+          "profile": "opportunistic",
+          "playerID": "xbt2wt14",
+          "team": "Green",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 12521,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-5",
+          "username": "Fable 2",
+          "profile": "opportunistic",
+          "playerID": "9h8tnrym",
+          "team": "Green",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 69114,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-6",
+          "username": "Astra 2",
+          "profile": "opportunistic",
+          "playerID": "25ze9gxs",
+          "team": "Yellow",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 7793,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-7",
+          "username": "Grok 2",
+          "profile": "opportunistic",
+          "playerID": "idjkf73n",
+          "team": "Blue",
+          "isAlive": true,
+          "tilesOwned": 263660,
+          "troops": 8678134,
+          "gold": "198237235"
+        },
+        {
+          "agentID": "opportunistic-agent-8",
+          "username": "Fable 3",
+          "profile": "opportunistic",
+          "playerID": "sjh3tur2",
+          "team": "Green",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 47345,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-9",
+          "username": "Grok 3",
+          "profile": "opportunistic",
+          "playerID": "2rmhbq4h",
+          "team": "Blue",
+          "isAlive": true,
+          "tilesOwned": 1407036,
+          "troops": 31398137,
+          "gold": "259013870"
+        },
+        {
+          "agentID": "opportunistic-agent-10",
+          "username": "Astra 3",
+          "profile": "opportunistic",
+          "playerID": "x262ww19",
+          "team": "Yellow",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 111967,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-11",
+          "username": "Gemini 2",
+          "profile": "opportunistic",
+          "playerID": "1wy62oh4",
+          "team": "Red",
+          "isAlive": false,
+          "tilesOwned": 0,
+          "troops": 86604,
+          "gold": "0"
+        },
+        {
+          "agentID": "opportunistic-agent-12",
+          "username": "Gemini 3",
+          "profile": "opportunistic",
+          "playerID": "a6xyjvhc",
+          "team": "Red",
+          "isAlive": true,
+          "tilesOwned": 61143,
+          "troops": 2210768,
+          "gold": "850402"
+        }
+      ]
+    },
+    "unavailablePlayerSlots": [],
+    "episodeDurationLimitReached": false,
+    "inlineRunArtifacts": {
+      "game-record.json": "{\"info\": {\"gameID\": \"COWRLD01\", \"players\": [{\"clientID\": \"3nMST1fr\", \"username\": \"Gemini 1\"}, {\"clientID\": \"YvWZ3vwj\", \"username\": \"Grok 1\"}, {\"clientID\": \"ESrfp3BM\", \"username\": \"Astra 1\"}, {\"clientID\": \"tj9akX4f\", \"username\": \"Fable 1\"}, {\"clientID\": \"Gj4rWgUt\", \"username\": \"Fable 2\"}, {\"clientID\": \"Sog197gy\", \"username\": \"Astra 2\"}, {\"clientID\": \"ZwDSeAmd\", \"username\": \"Grok 2\"}, {\"clientID\": \"Rn3RecmA\", \"username\": \"Fable 3\"}, {\"clientID\": \"rhss9h3y\", \"username\": \"Grok 3\"}, {\"clientID\": \"Phqcud5w\", \"username\": \"Astra 3\"}, {\"clientID\": \"2n3YoU9U\", \"username\": \"Gemini 2\"}, {\"clientID\": \"bgNar5tS\", \"username\": \"Gemini 3\"}]}, \"turns\": [{\"turnNumber\": 1500, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_2229ded0-7e18-41d5-8854-ed6312acf781\", \"clientID\": \"Phqcud5w\"}, {\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_211dbc84-8f91-42a0-aa70-a7162f740dcc\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 1600, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_5a20bd08-1b98-490c-9099-797a8a0e5a0e\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_74354699-7469-4352-9d4d-f21c7ef5754f\", \"clientID\": \"Rn3RecmA\"}, {\"type\": \"agent_message\", \"recipient\": \"x262ww19\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_1e7f50df-b299-4648-8857-ef135afe6572\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 1700, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_4dcc11b8-258f-482d-8bd2-6289b82e2cc7\", \"clientID\": \"3nMST1fr\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_6a531f92-c897-429e-8a3f-663c6d306fa9\", \"clientID\": \"tj9akX4f\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_a777f6eb-2fbe-4c41-a6d2-511893c0e6ea\", \"clientID\": \"Gj4rWgUt\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_225f7ba1-8212-4961-a03b-465f4528c3ee\", \"clientID\": \"rhss9h3y\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_bce4a972-1058-4725-b245-356169521e37\", \"clientID\": \"Phqcud5w\"}, {\"type\": \"agent_message\", \"recipient\": \"sjh3tur2\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_a0e57b2b-502b-4ae9-a650-6f5eb5a441bc\", \"clientID\": \"2n3YoU9U\"}, {\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_3946e41a-4dcb-4093-a8f1-4e650e6615b2\", \"clientID\": \"bgNar5tS\"}]}, {\"turnNumber\": 1800, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"c4o8gv6v\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_87de835e-172a-4a37-8583-641f4d71b071\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_af0b6cf8-cded-4c06-9918-cf8cc73c1f09\", \"clientID\": \"Rn3RecmA\"}, {\"type\": \"agent_message\", \"recipient\": \"xbt2wt14\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_d2642a39-d6b2-477c-8fb7-ca80ec91a257\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 1900, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_cdfe6d66-cc2a-40cc-b173-630b5b504051\", \"clientID\": \"3nMST1fr\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_09b8b238-717f-44aa-8673-2194f4f19e0d\", \"clientID\": \"tj9akX4f\"}, {\"type\": \"agent_message\", \"recipient\": \"sjh3tur2\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_d929ad64-1e52-4f8b-b670-1365d13ed524\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 2000, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_cf903992-9705-41c9-97e7-62d0b86b14d5\", \"clientID\": \"Gj4rWgUt\"}, {\"type\": \"agent_message\", \"recipient\": \"c4o8gv6v\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_13851fe6-f0c9-4f57-8fd4-2c814318dc72\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_bd344b8d-08fa-447a-bccc-a5a8a5791f59\", \"clientID\": \"Rn3RecmA\"}, {\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_262e6d43-0087-4783-aad9-183eeb644235\", \"clientID\": \"rhss9h3y\"}, {\"type\": \"agent_message\", \"recipient\": \"xbt2wt14\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_281437b9-cc44-4a2e-8548-d1837d04d023\", \"clientID\": \"2n3YoU9U\"}, {\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_f3d7d961-5288-4074-8b07-7642f138c2a3\", \"clientID\": \"bgNar5tS\"}]}, {\"turnNumber\": 2100, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_18a0c27f-2e3a-4fe7-bbc4-5810dc1ee4c9\", \"clientID\": \"3nMST1fr\"}, {\"type\": \"agent_message\", \"recipient\": \"a6xyjvhc\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_c67ed8b0-77df-4221-9c3b-59f453c3b292\", \"clientID\": \"YvWZ3vwj\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_c60d7692-173a-4158-a6de-82636416c5fb\", \"clientID\": \"tj9akX4f\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_92327864-e4f5-42a5-a7c1-c71d0d09d89d\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"sjh3tur2\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_d0e3d6a1-26fe-4f35-abf6-0c4e71dc7a7b\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 2200, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_0fcf98f3-6805-447a-b2e1-65d2789dc6aa\", \"clientID\": \"Gj4rWgUt\"}, {\"type\": \"agent_message\", \"recipient\": \"c4o8gv6v\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_fa992951-6a72-465b-983e-d1d257d97520\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_3f5e88ba-99d7-4780-be42-41e6d8995be3\", \"clientID\": \"Rn3RecmA\"}, {\"type\": \"agent_message\", \"recipient\": \"xbt2wt14\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_29a23b16-64ed-4e95-ae0f-b2741a1fe137\", \"clientID\": \"2n3YoU9U\"}, {\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_6e22d69b-382e-4349-bd1a-e31b283364f2\", \"clientID\": \"bgNar5tS\"}]}, {\"turnNumber\": 2300, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"25ze9gxs\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_4e040cc9-cb9a-465f-b869-81f620ce1f8d\", \"clientID\": \"3nMST1fr\"}, {\"type\": \"agent_message\", \"recipient\": \"a6xyjvhc\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_428756db-127b-48a9-8794-83810ed68f28\", \"clientID\": \"YvWZ3vwj\"}, {\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_16dfc53f-cb28-4096-8918-89f5fbe898fa\", \"clientID\": \"tj9akX4f\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_f3221018-9382-4165-a4ec-9075ed54a208\", \"clientID\": \"Sog197gy\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_3842aa51-61bf-428b-8cb0-bcb138d0b2d6\", \"clientID\": \"rhss9h3y\"}]}, {\"turnNumber\": 2400, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"2rmhbq4h\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_1cd2c788-96d3-4f8e-a539-a9a1af4d3328\", \"clientID\": \"Gj4rWgUt\"}, {\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_8fe6c831-8b67-401e-a429-a10a2433b446\", \"clientID\": \"bgNar5tS\"}]}, {\"turnNumber\": 2500, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"a6xyjvhc\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_521ce274-400d-4ded-962b-dd29284be314\", \"clientID\": \"YvWZ3vwj\"}, {\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"We share a border. I would rather point my troops elsewhere - pact?\", \"messageEventID\": \"msg_63d10f66-a427-4274-8bb6-d3b80977a6f3\", \"clientID\": \"ZwDSeAmd\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_3d35d950-dc61-4017-ae3d-bc0961cb1a12\", \"clientID\": \"rhss9h3y\"}]}, {\"turnNumber\": 2600, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"idjkf73n\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_cd185f13-95dc-4a3c-bac6-48739e690f70\", \"clientID\": \"YvWZ3vwj\"}, {\"type\": \"agent_message\", \"recipient\": \"2rmhbq4h\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_19fd3d1d-73b0-4a50-ac38-2d17e3042e4c\", \"clientID\": \"Gj4rWgUt\"}, {\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_bf4ed03b-bbe6-4f50-8766-92d8906eea9e\", \"clientID\": \"bgNar5tS\"}]}, {\"turnNumber\": 2700, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_56b52ea7-7429-41b7-b6f9-6f97312b2a63\", \"clientID\": \"ZwDSeAmd\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_addce801-e1a5-43ec-903a-e07971f15279\", \"clientID\": \"rhss9h3y\"}]}, {\"turnNumber\": 2800, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"idjkf73n\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_936e3ee0-11cc-40df-8978-f6c870f61fee\", \"clientID\": \"YvWZ3vwj\"}, {\"type\": \"agent_message\", \"recipient\": \"2rmhbq4h\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_6c537b0f-1321-483d-94ba-ba56d1827653\", \"clientID\": \"Gj4rWgUt\"}]}, {\"turnNumber\": 2900, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_14ae72ed-16ce-4311-af9d-4a4b23894349\", \"clientID\": \"ZwDSeAmd\"}, {\"type\": \"agent_message\", \"recipient\": \"9h8tnrym\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_82051246-882f-40c7-b71b-d7dc25ba6006\", \"clientID\": \"rhss9h3y\"}]}, {\"turnNumber\": 3000, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"idjkf73n\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_0d46a456-6bd7-4878-9567-c149f98a25b2\", \"clientID\": \"YvWZ3vwj\"}]}, {\"turnNumber\": 3100, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"28k1hctz\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_21247bd9-2558-4aeb-9c8e-c60187c6950f\", \"clientID\": \"ZwDSeAmd\"}]}, {\"turnNumber\": 3500, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"I have put an offer to you. Take it and neither of us wastes troops on the other.\", \"messageEventID\": \"msg_d521ce28-8400-4222-8320-4a24c934e56d\", \"clientID\": \"ESrfp3BM\"}]}, {\"turnNumber\": 3600, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"r5o3pta1\", \"text\": \"Your proposal is on my table. Keep your side and I keep mine.\", \"messageEventID\": \"msg_e9997fd9-1df2-4ede-824f-b6d73bfe8639\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 3700, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_80227333-0190-4100-826b-5183d79f2f6f\", \"clientID\": \"ESrfp3BM\"}]}, {\"turnNumber\": 3800, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"r5o3pta1\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_2024437c-add0-4608-8a4b-2db6699ce46c\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 3900, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_9b41b0fa-24a3-41e3-9b12-6be8c1fc523b\", \"clientID\": \"ESrfp3BM\"}]}, {\"turnNumber\": 4000, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"r5o3pta1\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_02c5db4b-50dc-4382-920c-dd9c655cded2\", \"clientID\": \"2n3YoU9U\"}]}, {\"turnNumber\": 4100, \"intents\": [{\"type\": \"agent_message\", \"recipient\": \"1wy62oh4\", \"text\": \"Noted. I am open to a pact if you stay off my border.\", \"messageEventID\": \"msg_85b3d4c9-c188-4fbe-bf09-70b465552eb3\", \"clientID\": \"ESrfp3BM\"}]}]}",
+      "spectator-telemetry.json": "{\"version\": 1, \"events\": [{\"turnNumber\": 600, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 2\", \"targetName\": \"Grok 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 800, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 2\", \"targetName\": \"Gemini 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 900, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Gemini 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 1100, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 4300, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 4400, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 2\", \"targetName\": \"Grok 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 4900, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 5000, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 2\", \"targetName\": \"Gemini 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 5300, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 5700, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 5800, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Grok 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6000, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6000, \"kind\": \"elimination\", \"actorName\": \"Astra 2\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 6200, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6300, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Fable 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6400, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 1\", \"targetName\": \"Gemini 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6500, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Grok 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6500, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 3\", \"targetName\": \"Gemini 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6700, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 1\", \"targetName\": \"Fable 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6800, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Fable 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 6900, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Grok 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 7000, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 7000, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 3\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 7100, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 3\", \"targetName\": \"Grok 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 7200, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 8500, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 8900, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 3\", \"targetName\": \"Gemini 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 9300, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 2\", \"targetName\": \"Grok 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 9900, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 10200, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 10300, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 10500, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 10500, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 2\", \"targetName\": \"Grok 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 10800, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 11900, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 12100, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 1\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 12500, \"kind\": \"elimination\", \"actorName\": \"Fable 1\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 13600, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 3\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 13900, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 13900, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 3\", \"targetName\": \"Gemini 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 14000, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 14100, \"kind\": \"alliance_formed\", \"actorName\": \"Astra 3\", \"targetName\": \"Grok 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 14400, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 14500, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 2\", \"targetName\": \"Grok 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 15000, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 2\", \"targetName\": \"Astra 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 15100, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 15500, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 15600, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Fable 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 15700, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 16300, \"kind\": \"alliance_formed\", \"actorName\": \"Grok 3\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 17300, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 17500, \"kind\": \"alliance_formed\", \"actorName\": \"Fable 2\", \"targetName\": \"Astra 1\", \"evidenceLevel\": \"accepted_action\"}, {\"turnNumber\": 17700, \"kind\": \"elimination\", \"actorName\": \"Astra 1\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 18200, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 1\", \"targetName\": \"Fable 2\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 19100, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 2\", \"targetName\": \"Astra 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 19100, \"kind\": \"alliance_formed\", \"actorName\": \"Gemini 3\", \"targetName\": \"Fable 3\", \"evidenceLevel\": \"confirmed_effect\"}, {\"turnNumber\": 19100, \"kind\": \"elimination\", \"actorName\": \"Fable 3\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 19100, \"kind\": \"elimination\", \"actorName\": \"Fable 2\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 19300, \"kind\": \"elimination\", \"actorName\": \"Gemini 1\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 20400, \"kind\": \"elimination\", \"actorName\": \"Astra 3\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}, {\"turnNumber\": 23100, \"kind\": \"elimination\", \"actorName\": \"Gemini 2\", \"targetName\": null, \"evidenceLevel\": \"synthetic\"}]}",
+      "deal-ledger.json": "{\"schemaVersion\": 1, \"decisionSteps\": [{\"step\": 0, \"turnNumber\": 400, \"recordsBeforeStep\": 12}, {\"step\": 1, \"turnNumber\": 500, \"recordsBeforeStep\": 24}, {\"step\": 2, \"turnNumber\": 600, \"recordsBeforeStep\": 36}, {\"step\": 3, \"turnNumber\": 700, \"recordsBeforeStep\": 48}, {\"step\": 4, \"turnNumber\": 800, \"recordsBeforeStep\": 60}, {\"step\": 5, \"turnNumber\": 900, \"recordsBeforeStep\": 72}, {\"step\": 6, \"turnNumber\": 1000, \"recordsBeforeStep\": 84}, {\"step\": 7, \"turnNumber\": 1100, \"recordsBeforeStep\": 96}, {\"step\": 8, \"turnNumber\": 1200, \"recordsBeforeStep\": 108}, {\"step\": 9, \"turnNumber\": 1300, \"recordsBeforeStep\": 120}, {\"step\": 10, \"turnNumber\": 1400, \"recordsBeforeStep\": 132}, {\"step\": 11, \"turnNumber\": 1500, \"recordsBeforeStep\": 144}, {\"step\": 12, \"turnNumber\": 1600, \"recordsBeforeStep\": 156}, {\"step\": 13, \"turnNumber\": 1700, \"recordsBeforeStep\": 168}, {\"step\": 14, \"turnNumber\": 1800, \"recordsBeforeStep\": 180}, {\"step\": 15, \"turnNumber\": 1900, \"recordsBeforeStep\": 192}, {\"step\": 16, \"turnNumber\": 2000, \"recordsBeforeStep\": 204}, {\"step\": 17, \"turnNumber\": 2100, \"recordsBeforeStep\": 216}, {\"step\": 18, \"turnNumber\": 2200, \"recordsBeforeStep\": 228}, {\"step\": 19, \"turnNumber\": 2300, \"recordsBeforeStep\": 240}, {\"step\": 20, \"turnNumber\": 2400, \"recordsBeforeStep\": 252}, {\"step\": 21, \"turnNumber\": 2500, \"recordsBeforeStep\": 264}, {\"step\": 22, \"turnNumber\": 2600, \"recordsBeforeStep\": 276}, {\"step\": 23, \"turnNumber\": 2700, \"recordsBeforeStep\": 288}, {\"step\": 24, \"turnNumber\": 2800, \"recordsBeforeStep\": 300}, {\"step\": 25, \"turnNumber\": 2900, \"recordsBeforeStep\": 312}, {\"step\": 26, \"turnNumber\": 3000, \"recordsBeforeStep\": 324}, {\"step\": 27, \"turnNumber\": 3100, \"recordsBeforeStep\": 336}, {\"step\": 28, \"turnNumber\": 3200, \"recordsBeforeStep\": 348}, {\"step\": 29, \"turnNumber\": 3300, \"recordsBeforeStep\": 360}, {\"step\": 30, \"turnNumber\": 3400, \"recordsBeforeStep\": 372}, {\"step\": 31, \"turnNumber\": 3500, \"recordsBeforeStep\": 384}, {\"step\": 32, \"turnNumber\": 3600, \"recordsBeforeStep\": 396}, {\"step\": 33, \"turnNumber\": 3700, \"recordsBeforeStep\": 408}, {\"step\": 34, \"turnNumber\": 3800, \"recordsBeforeStep\": 420}, {\"step\": 35, \"turnNumber\": 3900, \"recordsBeforeStep\": 432}, {\"step\": 36, \"turnNumber\": 4000, \"recordsBeforeStep\": 444}, {\"step\": 37, \"turnNumber\": 4100, \"recordsBeforeStep\": 456}, {\"step\": 38, \"turnNumber\": 4200, \"recordsBeforeStep\": 468}, {\"step\": 39, \"turnNumber\": 4300, \"recordsBeforeStep\": 480}, {\"step\": 40, \"turnNumber\": 4400, \"recordsBeforeStep\": 492}, {\"step\": 41, \"turnNumber\": 4500, \"recordsBeforeStep\": 504}, {\"step\": 42, \"turnNumber\": 4600, \"recordsBeforeStep\": 516}, {\"step\": 43, \"turnNumber\": 4700, \"recordsBeforeStep\": 528}, {\"step\": 44, \"turnNumber\": 4800, \"recordsBeforeStep\": 540}, {\"step\": 45, \"turnNumber\": 4900, \"recordsBeforeStep\": 552}, {\"step\": 46, \"turnNumber\": 5000, \"recordsBeforeStep\": 564}, {\"step\": 47, \"turnNumber\": 5100, \"recordsBeforeStep\": 576}, {\"step\": 48, \"turnNumber\": 5200, \"recordsBeforeStep\": 588}, {\"step\": 49, \"turnNumber\": 5300, \"recordsBeforeStep\": 600}, {\"step\": 50, \"turnNumber\": 5400, \"recordsBeforeStep\": 612}, {\"step\": 51, \"turnNumber\": 5500, \"recordsBeforeStep\": 624}, {\"step\": 52, \"turnNumber\": 5600, \"recordsBeforeStep\": 636}, {\"step\": 53, \"turnNumber\": 5700, \"recordsBeforeStep\": 648}, {\"step\": 54, \"turnNumber\": 5800, \"recordsBeforeStep\": 660}, {\"step\": 55, \"turnNumber\": 5900, \"recordsBeforeStep\": 672}, {\"step\": 56, \"turnNumber\": 6000, \"recordsBeforeStep\": 684}, {\"step\": 57, \"turnNumber\": 6100, \"recordsBeforeStep\": 696}, {\"step\": 58, \"turnNumber\": 6200, \"recordsBeforeStep\": 707}, {\"step\": 59, \"turnNumber\": 6300, \"recordsBeforeStep\": 718}, {\"step\": 60, \"turnNumber\": 6400, \"recordsBeforeStep\": 729}, {\"step\": 61, \"turnNumber\": 6500, \"recordsBeforeStep\": 740}, {\"step\": 62, \"turnNumber\": 6600, \"recordsBeforeStep\": 751}, {\"step\": 63, \"turnNumber\": 6700, \"recordsBeforeStep\": 762}, {\"step\": 64, \"turnNumber\": 6800, \"recordsBeforeStep\": 773}, {\"step\": 65, \"turnNumber\": 6900, \"recordsBeforeStep\": 784}, {\"step\": 66, \"turnNumber\": 7000, \"recordsBeforeStep\": 795}, {\"step\": 67, \"turnNumber\": 7100, \"recordsBeforeStep\": 806}, {\"step\": 68, \"turnNumber\": 7200, \"recordsBeforeStep\": 817}, {\"step\": 69, \"turnNumber\": 7300, \"recordsBeforeStep\": 828}, {\"step\": 70, \"turnNumber\": 7400, \"recordsBeforeStep\": 839}, {\"step\": 71, \"turnNumber\": 7500, \"recordsBeforeStep\": 850}, {\"step\": 72, \"turnNumber\": 7600, \"recordsBeforeStep\": 861}, {\"step\": 73, \"turnNumber\": 7700, \"recordsBeforeStep\": 872}, {\"step\": 74, \"turnNumber\": 7800, \"recordsBeforeStep\": 883}, {\"step\": 75, \"turnNumber\": 7900, \"recordsBeforeStep\": 894}, {\"step\": 76, \"turnNumber\": 8000, \"recordsBeforeStep\": 905}, {\"step\": 77, \"turnNumber\": 8100, \"recordsBeforeStep\": 916}, {\"step\": 78, \"turnNumber\": 8200, \"recordsBeforeStep\": 927}, {\"step\": 79, \"turnNumber\": 8300, \"recordsBeforeStep\": 938}, {\"step\": 80, \"turnNumber\": 8400, \"recordsBeforeStep\": 949}, {\"step\": 81, \"turnNumber\": 8500, \"recordsBeforeStep\": 960}, {\"step\": 82, \"turnNumber\": 8600, \"recordsBeforeStep\": 971}, {\"step\": 83, \"turnNumber\": 8700, \"recordsBeforeStep\": 982}, {\"step\": 84, \"turnNumber\": 8800, \"recordsBeforeStep\": 993}, {\"step\": 85, \"turnNumber\": 8900, \"recordsBeforeStep\": 1004}, {\"step\": 86, \"turnNumber\": 9000, \"recordsBeforeStep\": 1015}, {\"step\": 87, \"turnNumber\": 9100, \"recordsBeforeStep\": 1026}, {\"step\": 88, \"turnNumber\": 9200, \"recordsBeforeStep\": 1037}, {\"step\": 89, \"turnNumber\": 9300, \"recordsBeforeStep\": 1048}, {\"step\": 90, \"turnNumber\": 9400, \"recordsBeforeStep\": 1059}, {\"step\": 91, \"turnNumber\": 9500, \"recordsBeforeStep\": 1070}, {\"step\": 92, \"turnNumber\": 9600, \"recordsBeforeStep\": 1081}, {\"step\": 93, \"turnNumber\": 9700, \"recordsBeforeStep\": 1092}, {\"step\": 94, \"turnNumber\": 9800, \"recordsBeforeStep\": 1103}, {\"step\": 95, \"turnNumber\": 9900, \"recordsBeforeStep\": 1114}, {\"step\": 96, \"turnNumber\": 10000, \"recordsBeforeStep\": 1125}, {\"step\": 97, \"turnNumber\": 10100, \"recordsBeforeStep\": 1136}, {\"step\": 98, \"turnNumber\": 10200, \"recordsBeforeStep\": 1147}, {\"step\": 99, \"turnNumber\": 10300, \"recordsBeforeStep\": 1158}, {\"step\": 100, \"turnNumber\": 10400, \"recordsBeforeStep\": 1169}, {\"step\": 101, \"turnNumber\": 10500, \"recordsBeforeStep\": 1180}, {\"step\": 102, \"turnNumber\": 10600, \"recordsBeforeStep\": 1191}, {\"step\": 103, \"turnNumber\": 10700, \"recordsBeforeStep\": 1202}, {\"step\": 104, \"turnNumber\": 10800, \"recordsBeforeStep\": 1213}, {\"step\": 105, \"turnNumber\": 10900, \"recordsBeforeStep\": 1224}, {\"step\": 106, \"turnNumber\": 11000, \"recordsBeforeStep\": 1235}, {\"step\": 107, \"turnNumber\": 11100, \"recordsBeforeStep\": 1246}, {\"step\": 108, \"turnNumber\": 11200, \"recordsBeforeStep\": 1257}, {\"step\": 109, \"turnNumber\": 11300, \"recordsBeforeStep\": 1268}, {\"step\": 110, \"turnNumber\": 11400, \"recordsBeforeStep\": 1279}, {\"step\": 111, \"turnNumber\": 11500, \"recordsBeforeStep\": 1290}, {\"step\": 112, \"turnNumber\": 11600, \"recordsBeforeStep\": 1301}, {\"step\": 113, \"turnNumber\": 11700, \"recordsBeforeStep\": 1312}, {\"step\": 114, \"turnNumber\": 11800, \"recordsBeforeStep\": 1323}, {\"step\": 115, \"turnNumber\": 11900, \"recordsBeforeStep\": 1334}, {\"step\": 116, \"turnNumber\": 12000, \"recordsBeforeStep\": 1345}, {\"step\": 117, \"turnNumber\": 12100, \"recordsBeforeStep\": 1356}, {\"step\": 118, \"turnNumber\": 12200, \"recordsBeforeStep\": 1367}, {\"step\": 119, \"turnNumber\": 12300, \"recordsBeforeStep\": 1378}, {\"step\": 120, \"turnNumber\": 12400, \"recordsBeforeStep\": 1389}, {\"step\": 121, \"turnNumber\": 12500, \"recordsBeforeStep\": 1400}, {\"step\": 122, \"turnNumber\": 12600, \"recordsBeforeStep\": 1411}, {\"step\": 123, \"turnNumber\": 12700, \"recordsBeforeStep\": 1421}, {\"step\": 124, \"turnNumber\": 12800, \"recordsBeforeStep\": 1431}, {\"step\": 125, \"turnNumber\": 12900, \"recordsBeforeStep\": 1441}, {\"step\": 126, \"turnNumber\": 13000, \"recordsBeforeStep\": 1451}, {\"step\": 127, \"turnNumber\": 13100, \"recordsBeforeStep\": 1461}, {\"step\": 128, \"turnNumber\": 13200, \"recordsBeforeStep\": 1471}, {\"step\": 129, \"turnNumber\": 13300, \"recordsBeforeStep\": 1481}, {\"step\": 130, \"turnNumber\": 13400, \"recordsBeforeStep\": 1491}, {\"step\": 131, \"turnNumber\": 13500, \"recordsBeforeStep\": 1501}, {\"step\": 132, \"turnNumber\": 13600, \"recordsBeforeStep\": 1511}, {\"step\": 133, \"turnNumber\": 13700, \"recordsBeforeStep\": 1521}, {\"step\": 134, \"turnNumber\": 13800, \"recordsBeforeStep\": 1531}, {\"step\": 135, \"turnNumber\": 13900, \"recordsBeforeStep\": 1541}, {\"step\": 136, \"turnNumber\": 14000, \"recordsBeforeStep\": 1551}, {\"step\": 137, \"turnNumber\": 14100, \"recordsBeforeStep\": 1561}, {\"step\": 138, \"turnNumber\": 14200, \"recordsBeforeStep\": 1571}, {\"step\": 139, \"turnNumber\": 14300, \"recordsBeforeStep\": 1581}, {\"step\": 140, \"turnNumber\": 14400, \"recordsBeforeStep\": 1591}, {\"step\": 141, \"turnNumber\": 14500, \"recordsBeforeStep\": 1601}, {\"step\": 142, \"turnNumber\": 14600, \"recordsBeforeStep\": 1611}, {\"step\": 143, \"turnNumber\": 14700, \"recordsBeforeStep\": 1621}, {\"step\": 144, \"turnNumber\": 14800, \"recordsBeforeStep\": 1631}, {\"step\": 145, \"turnNumber\": 14900, \"recordsBeforeStep\": 1641}, {\"step\": 146, \"turnNumber\": 15000, \"recordsBeforeStep\": 1651}, {\"step\": 147, \"turnNumber\": 15100, \"recordsBeforeStep\": 1661}, {\"step\": 148, \"turnNumber\": 15200, \"recordsBeforeStep\": 1671}, {\"step\": 149, \"turnNumber\": 15300, \"recordsBeforeStep\": 1681}, {\"step\": 150, \"turnNumber\": 15400, \"recordsBeforeStep\": 1691}, {\"step\": 151, \"turnNumber\": 15500, \"recordsBeforeStep\": 1701}, {\"step\": 152, \"turnNumber\": 15600, \"recordsBeforeStep\": 1711}, {\"step\": 153, \"turnNumber\": 15700, \"recordsBeforeStep\": 1721}, {\"step\": 154, \"turnNumber\": 15800, \"recordsBeforeStep\": 1731}, {\"step\": 155, \"turnNumber\": 15900, \"recordsBeforeStep\": 1741}, {\"step\": 156, \"turnNumber\": 16000, \"recordsBeforeStep\": 1751}, {\"step\": 157, \"turnNumber\": 16100, \"recordsBeforeStep\": 1761}, {\"step\": 158, \"turnNumber\": 16200, \"recordsBeforeStep\": 1771}, {\"step\": 159, \"turnNumber\": 16300, \"recordsBeforeStep\": 1781}, {\"step\": 160, \"turnNumber\": 16400, \"recordsBeforeStep\": 1791}, {\"step\": 161, \"turnNumber\": 16500, \"recordsBeforeStep\": 1801}, {\"step\": 162, \"turnNumber\": 16600, \"recordsBeforeStep\": 1811}, {\"step\": 163, \"turnNumber\": 16700, \"recordsBeforeStep\": 1821}, {\"step\": 164, \"turnNumber\": 16800, \"recordsBeforeStep\": 1831}, {\"step\": 165, \"turnNumber\": 16900, \"recordsBeforeStep\": 1841}, {\"step\": 166, \"turnNumber\": 17000, \"recordsBeforeStep\": 1851}, {\"step\": 167, \"turnNumber\": 17100, \"recordsBeforeStep\": 1861}, {\"step\": 168, \"turnNumber\": 17200, \"recordsBeforeStep\": 1871}, {\"step\": 169, \"turnNumber\": 17300, \"recordsBeforeStep\": 1881}, {\"step\": 170, \"turnNumber\": 17400, \"recordsBeforeStep\": 1891}, {\"step\": 171, \"turnNumber\": 17500, \"recordsBeforeStep\": 1901}, {\"step\": 172, \"turnNumber\": 17600, \"recordsBeforeStep\": 1911}, {\"step\": 173, \"turnNumber\": 17700, \"recordsBeforeStep\": 1921}, {\"step\": 174, \"turnNumber\": 17800, \"recordsBeforeStep\": 1931}, {\"step\": 175, \"turnNumber\": 17900, \"recordsBeforeStep\": 1940}, {\"step\": 176, \"turnNumber\": 18000, \"recordsBeforeStep\": 1949}, {\"step\": 177, \"turnNumber\": 18100, \"recordsBeforeStep\": 1958}, {\"step\": 178, \"turnNumber\": 18200, \"recordsBeforeStep\": 1967}, {\"step\": 179, \"turnNumber\": 18300, \"recordsBeforeStep\": 1976}, {\"step\": 180, \"turnNumber\": 18400, \"recordsBeforeStep\": 1985}, {\"step\": 181, \"turnNumber\": 18500, \"recordsBeforeStep\": 1994}, {\"step\": 182, \"turnNumber\": 18600, \"recordsBeforeStep\": 2003}, {\"step\": 183, \"turnNumber\": 18700, \"recordsBeforeStep\": 2012}, {\"step\": 184, \"turnNumber\": 18800, \"recordsBeforeStep\": 2021}, {\"step\": 185, \"turnNumber\": 18900, \"recordsBeforeStep\": 2030}, {\"step\": 186, \"turnNumber\": 19000, \"recordsBeforeStep\": 2039}, {\"step\": 187, \"turnNumber\": 19100, \"recordsBeforeStep\": 2048}, {\"step\": 188, \"turnNumber\": 19200, \"recordsBeforeStep\": 2057}, {\"step\": 189, \"turnNumber\": 19300, \"recordsBeforeStep\": 2064}, {\"step\": 190, \"turnNumber\": 19400, \"recordsBeforeStep\": 2071}, {\"step\": 191, \"turnNumber\": 19500, \"recordsBeforeStep\": 2077}, {\"step\": 192, \"turnNumber\": 19600, \"recordsBeforeStep\": 2083}, {\"step\": 193, \"turnNumber\": 19700, \"recordsBeforeStep\": 2089}, {\"step\": 194, \"turnNumber\": 19800, \"recordsBeforeStep\": 2095}, {\"step\": 195, \"turnNumber\": 19900, \"recordsBeforeStep\": 2101}, {\"step\": 196, \"turnNumber\": 20000, \"recordsBeforeStep\": 2107}, {\"step\": 197, \"turnNumber\": 20100, \"recordsBeforeStep\": 2113}, {\"step\": 198, \"turnNumber\": 20200, \"recordsBeforeStep\": 2119}, {\"step\": 199, \"turnNumber\": 20300, \"recordsBeforeStep\": 2125}, {\"step\": 200, \"turnNumber\": 20400, \"recordsBeforeStep\": 2131}, {\"step\": 201, \"turnNumber\": 20500, \"recordsBeforeStep\": 2137}, {\"step\": 202, \"turnNumber\": 20600, \"recordsBeforeStep\": 2142}, {\"step\": 203, \"turnNumber\": 20700, \"recordsBeforeStep\": 2147}, {\"step\": 204, \"turnNumber\": 20800, \"recordsBeforeStep\": 2152}, {\"step\": 205, \"turnNumber\": 20900, \"recordsBeforeStep\": 2157}, {\"step\": 206, \"turnNumber\": 21000, \"recordsBeforeStep\": 2162}, {\"step\": 207, \"turnNumber\": 21100, \"recordsBeforeStep\": 2167}, {\"step\": 208, \"turnNumber\": 21200, \"recordsBeforeStep\": 2172}, {\"step\": 209, \"turnNumber\": 21300, \"recordsBeforeStep\": 2177}, {\"step\": 210, \"turnNumber\": 21400, \"recordsBeforeStep\": 2182}, {\"step\": 211, \"turnNumber\": 21500, \"recordsBeforeStep\": 2187}, {\"step\": 212, \"turnNumber\": 21600, \"recordsBeforeStep\": 2192}, {\"step\": 213, \"turnNumber\": 21700, \"recordsBeforeStep\": 2197}, {\"step\": 214, \"turnNumber\": 21800, \"recordsBeforeStep\": 2202}, {\"step\": 215, \"turnNumber\": 21900, \"recordsBeforeStep\": 2207}, {\"step\": 216, \"turnNumber\": 22000, \"recordsBeforeStep\": 2212}, {\"step\": 217, \"turnNumber\": 22100, \"recordsBeforeStep\": 2217}, {\"step\": 218, \"turnNumber\": 22200, \"recordsBeforeStep\": 2222}, {\"step\": 219, \"turnNumber\": 22300, \"recordsBeforeStep\": 2227}, {\"step\": 220, \"turnNumber\": 22400, \"recordsBeforeStep\": 2232}, {\"step\": 221, \"turnNumber\": 22500, \"recordsBeforeStep\": 2237}, {\"step\": 222, \"turnNumber\": 22600, \"recordsBeforeStep\": 2242}, {\"step\": 223, \"turnNumber\": 22700, \"recordsBeforeStep\": 2247}, {\"step\": 224, \"turnNumber\": 22800, \"recordsBeforeStep\": 2252}, {\"step\": 225, \"turnNumber\": 22900, \"recordsBeforeStep\": 2257}, {\"step\": 226, \"turnNumber\": 23000, \"recordsBeforeStep\": 2262}, {\"step\": 227, \"turnNumber\": 23100, \"recordsBeforeStep\": 2267}, {\"step\": 228, \"turnNumber\": 23200, \"recordsBeforeStep\": 2272}, {\"step\": 229, \"turnNumber\": 23300, \"recordsBeforeStep\": 2276}, {\"step\": 230, \"turnNumber\": 23400, \"recordsBeforeStep\": 2280}, {\"step\": 231, \"turnNumber\": 23500, \"recordsBeforeStep\": 2284}]}"
+    },
+    "spectatorReplay": {
+      "schemaVersion": 1,
+      "snapshots": [
+        {
+          "label": "After spawn",
+          "turnNumber": 400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 8",
+          "turnNumber": 1200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 16",
+          "turnNumber": 2000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 21191
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23171
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 18899
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 25593
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23958
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 19300
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 19244
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 19716
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 21779
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20746
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 17826
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20323
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 24",
+          "turnNumber": 2800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 76588
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 85101
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 47655
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 88262
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 80844
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 70158
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 53491
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 36302
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 62268
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 70062
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 64043
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 74454
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 32",
+          "turnNumber": 3600,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 191937
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 125183
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 67889
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 178843
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 108530
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 180037
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 102341
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 75888
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 103232
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 130748
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 145843
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 93371
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 40",
+          "turnNumber": 4400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 234119
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 128118
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 146173
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 219104
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 150647
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 207611
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 153431
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 46696
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 185939
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 193664
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 212847
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 108926
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 48",
+          "turnNumber": 5200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 242841
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 100692
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254384
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 257111
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 137331
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 201409
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 111771
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 43245
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 186340
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 210347
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 264819
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 101988
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 56",
+          "turnNumber": 6000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 265654
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 95784
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 257874
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 170422
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 210480
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 103115
+            },
+            {
+              "username": "Astra 2",
+              "playerID": "25ze9gxs",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 5742
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 99260
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 259468
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 304176
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 86031
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 64",
+          "turnNumber": 6800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 275376
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 96264
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 303216
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 193362
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 232528
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 40701
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 63123
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 292701
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 304941
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 76309
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 72",
+          "turnNumber": 7600,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 275376
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 96806
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 303216
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 195712
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 252780
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 40701
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 52062
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 298731
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 307505
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 76309
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 80",
+          "turnNumber": 8400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 319420
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 97123
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 324057
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 206947
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 253193
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20406
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 31161
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 318902
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 307505
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32265
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 88",
+          "turnNumber": 9200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 319420
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 97123
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 368514
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 207075
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 253192
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20364
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 31163
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 318902
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263088
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32266
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 96",
+          "turnNumber": 10000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 299229
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 97123
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254432
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 412085
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 207075
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 328674
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20364
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30843
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 318902
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 196428
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 658
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 104",
+          "turnNumber": 10800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 179803
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110760
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254433
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419029
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 207075
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 452550
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20423
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30843
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 305265
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 185034
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 657
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 112",
+          "turnNumber": 11600,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 216469
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110760
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419029
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 207075
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 461328
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 20255
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30843
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 297130
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 147725
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 563
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 120",
+          "turnNumber": 12400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 236598
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110760
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254786
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419029
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 212796
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 736504
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 11685
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30844
+            },
+            {
+              "username": "Fable 1",
+              "playerID": "xbt2wt14",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23183
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 125780
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 4150
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 128",
+          "turnNumber": 13200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 303071
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110762
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254786
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419029
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 249216
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760094
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 798
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30844
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23572
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 13943
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 136",
+          "turnNumber": 14000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 303071
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110763
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419104
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 249216
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760127
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 476
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 30843
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23572
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14365
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 144",
+          "turnNumber": 14800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 303071
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110763
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419138
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 249425
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760127
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 967
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32250
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 23572
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14389
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 152",
+          "turnNumber": 15600,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 309733
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110762
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419139
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263327
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760129
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1709
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32335
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 16911
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14388
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 160",
+          "turnNumber": 16400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 317135
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110762
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419197
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263326
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760131
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1476
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32334
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 9684
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14388
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 168",
+          "turnNumber": 17200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 317135
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110762
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419197
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263378
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 760133
+            },
+            {
+              "username": "Astra 1",
+              "playerID": "r5o3pta1",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 747
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32281
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 10412
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14388
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 176",
+          "turnNumber": 18000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 49599
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 110762
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 419427
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263378
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1030804
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32281
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 7794
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 14388
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 184",
+          "turnNumber": 18800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 1",
+              "playerID": "c4o8gv6v",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 10644
+            },
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 517
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254752
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 440025
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263603
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1180285
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32057
+            },
+            {
+              "username": "Fable 2",
+              "playerID": "9h8tnrym",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 680
+            },
+            {
+              "username": "Fable 3",
+              "playerID": "sjh3tur2",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 623
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 192",
+          "turnNumber": 19600,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 517
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254752
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451346
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263659
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1211276
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1636
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 200",
+          "turnNumber": 20400,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 518
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254752
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451346
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263659
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1212879
+            },
+            {
+              "username": "Astra 3",
+              "playerID": "x262ww19",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 32
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 208",
+          "turnNumber": 21200,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 518
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254752
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451346
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263660
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1212910
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 216",
+          "turnNumber": 22000,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 519
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254753
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451345
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263660
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1212909
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 224",
+          "turnNumber": 22800,
+          "phase": "active",
+          "players": [
+            {
+              "username": "Gemini 2",
+              "playerID": "1wy62oh4",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 480
+            },
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 254784
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451346
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263660
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1212916
+            }
+          ]
+        },
+        {
+          "label": "Post-spawn cycle 232",
+          "turnNumber": 23600,
+          "phase": "finished",
+          "players": [
+            {
+              "username": "Gemini 3",
+              "playerID": "a6xyjvhc",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 61143
+            },
+            {
+              "username": "Grok 1",
+              "playerID": "28k1hctz",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 451347
+            },
+            {
+              "username": "Grok 2",
+              "playerID": "idjkf73n",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 263660
+            },
+            {
+              "username": "Grok 3",
+              "playerID": "2rmhbq4h",
+              "isAlive": true,
+              "hasSpawned": true,
+              "tilesOwned": 1407036
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

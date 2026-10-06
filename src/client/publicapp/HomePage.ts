@@ -56,6 +56,8 @@ import {
   UNCLAIMED_HEX,
   visitSnapshot,
 } from "./WorldPresentation";
+import { displayNameOf, isSeasonTwo, scheduleStatus } from "./WorldSeason";
+import { scheduleLine } from "./WorldSeasonHero";
 import {
   contextLine,
   eventSentence,
@@ -419,6 +421,7 @@ export class HomePage extends LitElement {
   }
 
   private label(name: string): string {
+    if (this.model !== null) return displayNameOf(this.model, name);
     return this.agents.get(name)?.label ?? name;
   }
 
@@ -594,9 +597,29 @@ export class HomePage extends LitElement {
     };
   }
 
-  /** Measured liveness only: the newest battle's age, battles in the last day. */
+  /**
+   * Measured liveness only: the newest battle's age, battles in the last
+   * day. A Season 2 world fights on a timetable, so between its battles it
+   * names the next one instead of calling itself paused.
+   */
   private clock(model: WorldModel, compact: boolean) {
     const feed = feedState(model, this.now);
+    const next = isSeasonTwo(model)
+      ? scheduleLine(
+          scheduleStatus(model.schedule, this.now, model.lastBattleAt),
+          this.now,
+        )
+      : null;
+    if (next !== null) {
+      return html`<span class="hp-pill hp-pill-live">${next}</span>
+        ${feed.kind === "empty"
+          ? nothing
+          : html`<span
+              >${translateText("home_page.clock_last_battle", {
+                age: this.age(feed.lastBattleAt),
+              })}</span
+            >`}`;
+    }
     if (feed.kind === "empty") {
       return html`<span>${translateText("home_page.clock_no_battles")}</span>`;
     }
@@ -878,7 +901,7 @@ export class HomePage extends LitElement {
     return html`<section class="hp-latest" aria-labelledby="hp-latest-title">
       <h2 id="hp-latest-title">${translateText("home_page.latest_title")}</h2>
       <p class="hp-definition">
-        ${translateText("home_page.latest_definition", {
+        ${translateText(modeKey(model, "home_page.latest_definition"), {
           window: model.windowSize,
         })}
       </p>
@@ -901,7 +924,11 @@ export class HomePage extends LitElement {
   }
 
   private renderEvent(event: WorldEvent) {
-    const { key, params } = eventSentence(event, (name) => this.label(name));
+    const { key, params } = eventSentence(
+      event,
+      (name) => this.label(name),
+      this.model ?? {},
+    );
     const sentence = translateText(key, {
       ...params,
       agent: this.label(event.agent),
@@ -982,7 +1009,7 @@ export class HomePage extends LitElement {
             window: model.windowSize,
           })}</b
         >
-        ${translateText("home_page.rules_rule_more")}
+        ${translateText(modeKey(model, "home_page.rules_rule_more"))}
       </p>
       <p>${translateText("home_page.rules_crown")}</p>
       ${this.renderExample(model)}
@@ -1021,8 +1048,12 @@ export class HomePage extends LitElement {
     </section>`;
   }
 
-  /** The rule worked through on a real front's real last battles. */
+  /**
+   * The rule worked through on a real front's real last battles. Season 2
+   * has no window to work through: the latest battle decides.
+   */
   private renderExample(model: WorldModel) {
+    if (isSeasonTwo(model)) return nothing;
     const front = exampleFront(model, this.now);
     if (front === null || front.holder === null) return nothing;
     const holder = front.holder;

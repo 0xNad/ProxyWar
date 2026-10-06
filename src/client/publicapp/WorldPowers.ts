@@ -1,4 +1,4 @@
-import { html } from "lit";
+import { html, nothing } from "lit";
 import { translateText } from "../Utils";
 import { legendFront } from "./WorldLegend";
 import { formatNumber, modeKey } from "./WorldText";
@@ -6,7 +6,8 @@ import type { WorldView } from "./WorldView";
 
 /**
  * "Powers": the agents holding fronts or the Crown, then the strongest of
- * the rest, with what they hold and their conquests and wins.
+ * the rest, with what they hold and their conquests and wins. A Season 2
+ * model is named in full with its maker under it.
  */
 export function renderPowers(view: WorldView) {
   const model = view.model;
@@ -67,10 +68,18 @@ export function renderPowers(view: WorldView) {
             );
             return theatre === undefined ? [] : [theatre];
           });
+          const provider = view.provider(agent.name);
           return html`<tr style="--banner:${view.bannerColor(agent.name)}">
             <th scope="row">
               <span class="wp-power-agent">
-                ${view.emblem(agent.name, 26)} ${view.agentLink(agent.name)}
+                ${view.emblem(agent.name, 26)}
+                <span class="wp-power-name"
+                  >${view.agentLink(agent.name)}${provider === null
+                    ? nothing
+                    : html`<span class="wp-power-provider"
+                        >${provider}</span
+                      >`}</span
+                >
               </span>
             </th>
             <td>

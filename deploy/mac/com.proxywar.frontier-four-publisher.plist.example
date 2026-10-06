@@ -19,6 +19,9 @@
     <string>/Users/YOUR_USER/Documents/ProxyWar</string>
     <key>PROXYWAR_ARTIFACTS_ROOT</key>
     <string>/Volumes/YOUR_VOLUME/ProxyWar/live-artifacts</string>
+    <!-- Season 2's games file: the scheduler's games_path in frontier-ffa.json. -->
+    <key>PROXYWAR_FRONTIER_FFA_GAMES</key>
+    <string>/Users/YOUR_USER/Library/Application Support/ProxyWar/frontier-ffa/frontier-ffa-games.jsonl</string>
   </dict>
   <!--
     One run per invocation, every minute; it exits at once while the games

@@ -1,7 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { getMapName, translateText } from "../Utils";
 import { preciseAge } from "./HomePresentation";
-import type { WorldEvent, WorldTheatreId } from "./WorldModelSchema";
+import type { WorldEvent, WorldMode, WorldTheatreId } from "./WorldModelSchema";
 import { battlefieldKey } from "./WorldPresentation";
 
 /** The page's language, for `Intl` formatting. */
@@ -137,6 +137,53 @@ export function formatNumber(value: number): string {
   return format.format(value);
 }
 
+/** A share in the page's language, whole percent: "38%". */
+const percentFormats = new Map<string, Intl.NumberFormat>();
+export function formatPercent(share: number): string {
+  const locale = pageLocale() ?? "";
+  let format = percentFormats.get(locale);
+  if (format === undefined) {
+    format = new Intl.NumberFormat(locale === "" ? undefined : locale, {
+      style: "percent",
+      maximumFractionDigits: 0,
+    });
+    percentFormats.set(locale, format);
+  }
+  return format.format(share);
+}
+
+/** A short decimal in the page's language: "3.2", "16". */
+export function formatDecimal(value: number): string {
+  try {
+    return new Intl.NumberFormat(pageLocale(), {
+      maximumFractionDigits: value < 10 ? 1 : 0,
+    }).format(value);
+  } catch {
+    return String(Math.round(value * 10) / 10);
+  }
+}
+
+/**
+ * How long until something, the way ages read: "in 25 min", "in 1 h 20
+ * min" under three hours, then "in 3 h".
+ */
+export function formatWait(minutes: number): string {
+  const whole = Math.max(1, Math.ceil(minutes));
+  if (whole < 60)
+    return translateText("world_page.wait_minutes", { count: whole });
+  const hours = Math.floor(whole / 60);
+  const rest = whole % 60;
+  if (hours < 3 && rest !== 0) {
+    return translateText("world_page.wait_hours_minutes", {
+      hours,
+      minutes: rest,
+    });
+  }
+  return translateText("world_page.wait_hours", {
+    count: Math.round(whole / 60),
+  });
+}
+
 /** A list in the page's language: "Asia, Europe and Africa". */
 export function formatList(items: readonly string[]): string {
   try {
@@ -163,12 +210,19 @@ export function battlefieldName(map: string): string {
 
 /**
  * The line above the headline: who fights over this map. The league's
- * world names its builders; the Frontier Four names its teams.
+ * world names its builders; the Frontier Four names its teams; Season 2
+ * says what makes it a fair fight.
  */
 export function contextLine(model: {
-  readonly mode?: "league" | "frontier-four";
+  readonly mode?: WorldMode;
   readonly teams?: readonly { readonly label: string }[];
 }): string {
+  if (model.mode === "frontier") {
+    const count = model.teams?.length ?? 0;
+    return count >= 2
+      ? translateText("home_page.context_season2", { count })
+      : translateText("home_page.context_season2_any");
+  }
   if (model.mode === "frontier-four" && (model.teams?.length ?? 0) > 0) {
     return translateText("home_page.context_frontier", {
       teams: formatList(model.teams!.map((team) => team.label)),
@@ -189,6 +243,7 @@ export const FRONTIER_TWINS: Readonly<Record<string, string>> = {
   "home_page.data_as_of": "home_page.data_as_of_frontier",
   "home_page.support_empty": "home_page.support_empty_frontier",
   "home_page.verdict_tied_many": "home_page.verdict_tied_many_frontier",
+  "home_page.verdict_scattered": "home_page.verdict_scattered_frontier",
   "home_page.support_tied": "home_page.support_tied_frontier",
   "home_page.support_tied_many": "home_page.support_tied_many_frontier",
   "home_page.support_scattered": "home_page.support_scattered_frontier",
@@ -203,11 +258,48 @@ export const FRONTIER_TWINS: Readonly<Record<string, string>> = {
   "world_page.front_unclaimed_body": "world_page.front_unclaimed_body_frontier",
 };
 
-/** The key to read for this world's mode: the Frontier Four twin where one exists. */
+/**
+ * League strings with a Season 2 twin. Each side is one model with one
+ * nation, so the twin says "model", and the latest battle on a front
+ * decides it (a window of one), so nothing counts wins over a window.
+ * Twins that say neither are shared with the Frontier Four.
+ */
+export const SEASON_TWO_TWINS: Readonly<Record<string, string>> = {
+  "home_page.rules_rule": "home_page.rules_rule_season2",
+  "home_page.rules_rule_more": "home_page.rules_rule_more_season2",
+  "home_page.rule_unclaimed": "home_page.rule_unclaimed_season2",
+  "home_page.rules_stats": "home_page.rules_stats_frontier",
+  "home_page.data_as_of": "home_page.data_as_of_frontier",
+  "home_page.support_empty": "home_page.support_empty_frontier",
+  "home_page.verdict_tied_many": "home_page.verdict_tied_many_season2",
+  "home_page.verdict_scattered": "home_page.verdict_scattered_season2",
+  "home_page.support_tied": "home_page.support_tied_season2",
+  "home_page.support_tied_many": "home_page.support_tied_many_season2",
+  "home_page.support_scattered": "home_page.support_scattered_season2",
+  "home_page.latest_definition": "home_page.latest_definition_season2",
+  "world_page.rule_place_body": "world_page.rule_place_body_frontier",
+  "world_page.rule_window_title": "world_page.rule_window_title_season2",
+  "world_page.rule_window_body": "world_page.rule_window_body_season2",
+  "world_page.data_note": "world_page.data_note_season2",
+  "world_page.fronts_intro": "world_page.fronts_intro_season2",
+  "world_page.fronts_strip_intro": "world_page.fronts_strip_intro_season2",
+  "world_page.fronts_head_form": "world_page.fronts_head_form_season2",
+  "world_page.dispatches_definition":
+    "world_page.dispatches_definition_season2",
+  "world_page.detail_tally": "world_page.detail_tally_season2",
+  "world_page.map_label": "world_page.map_label_season2",
+  "world_page.powers_agent": "world_page.powers_agent_season2",
+  "world_page.sheet_days": "world_page.sheet_days_season2",
+  "world_page.sheet_days_ongoing": "world_page.sheet_days_ongoing_season2",
+  "world_page.front_unclaimed_body": "world_page.front_unclaimed_body_frontier",
+};
+
+/** The key to read for this world's mode: its twin where one exists. */
 export function modeKey(
-  model: { readonly mode?: "league" | "frontier-four" },
+  model: { readonly mode?: WorldMode },
   key: string,
 ): string {
+  if (model.mode === "frontier") return SEASON_TWO_TWINS[key] ?? key;
   return model.mode === "frontier-four" ? (FRONTIER_TWINS[key] ?? key) : key;
 }
 
@@ -237,23 +329,46 @@ const HELD_UNOPPOSED_KEYS = {
 } as const;
 
 /**
+ * Season 2's takeovers and holds, without scores: the latest battle alone
+ * decides a front, so "1 win to 0" would say nothing.
+ */
+const LATEST_DECIDES_KEYS: Partial<
+  Record<WorldEvent["kind"], { readonly plain: string; readonly onMap: string }>
+> = {
+  conquest: {
+    plain: "home_page.event_conquest_season2",
+    onMap: "home_page.event_conquest_on_season2",
+  },
+  held: {
+    plain: "home_page.event_held_season2",
+    onMap: "home_page.event_held_on_season2",
+  },
+};
+
+/**
  * One league event as a sentence, for the front page's latest takeovers and
  * `/world`'s dispatches: "Auri took Oceania from CYAN HELLSTAR, 2 wins to
  * 1." "On {map}" is added only when the battle was not fought on the
  * front's namesake map. The caller supplies `agent`, so it can splice in a
- * styled name.
+ * styled name. In Season 2 the scores are left out.
  */
 export function eventSentence(
   event: WorldEvent,
   label: (name: string) => string,
+  model: { readonly mode?: WorldMode } = {},
 ): { readonly key: string; readonly params: Record<string, string | number> } {
   const onMap = battlefieldKey(event.map) !== event.theatreId.replace(/_/g, "");
+  const latestDecides =
+    model.mode === "frontier"
+      ? (LATEST_DECIDES_KEYS[event.kind] ?? null)
+      : null;
   const keys =
-    event.rival !== null || event.kind === "claim"
+    latestDecides ??
+    (event.rival !== null || event.kind === "claim"
       ? EVENT_KEYS[event.kind]
       : event.kind === "held"
         ? HELD_UNOPPOSED_KEYS
-        : EVENT_KEYS.claim;
+        : EVENT_KEYS.claim);
   return {
     key: onMap ? keys.onMap : keys.plain,
     params: {
