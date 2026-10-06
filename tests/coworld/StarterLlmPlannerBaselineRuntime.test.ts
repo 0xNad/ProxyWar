@@ -55,7 +55,7 @@ const fakeBedrock = {
 
 const previousEnv = {
   wsUrl: process.env.COWORLD_PLAYER_WS_URL,
-  model: process.env.BEDROCK_MODEL,
+  model: process.env.COWORLD_LLM_MODEL,
   hardening: process.env.PROXYWAR_PROMPT_HARDENING,
   promptCache: process.env.PROXYWAR_PROMPT_CACHE,
   planEvery: process.env.PLAN_EVERY,
@@ -112,7 +112,7 @@ describe("tester-starter-llm baseline runtime arm", () => {
 
   beforeAll(async () => {
     process.env.COWORLD_PLAYER_WS_URL = "ws://baseline-runtime-test.invalid";
-    process.env.BEDROCK_MODEL = "test.sonnet-full";
+    process.env.COWORLD_LLM_MODEL = "test.sonnet-full";
     process.env.PROXYWAR_PROMPT_HARDENING = "0";
     process.env.PROXYWAR_PROMPT_CACHE = "0";
     process.env.PLAN_EVERY = "3";
@@ -123,7 +123,7 @@ describe("tester-starter-llm baseline runtime arm", () => {
       "../../coworld-adapter/tester-starter-llm/llm-player.mjs";
     const { startLlmPlayer } = await import(starterModulePath);
     startLlmPlayer({
-      bedrockClient: fakeBedrock,
+      llmClient: fakeBedrock,
       WebSocketCtor: FakeWebSocket,
     });
   });
@@ -133,8 +133,8 @@ describe("tester-starter-llm baseline runtime arm", () => {
     if (previousEnv.wsUrl === undefined)
       delete process.env.COWORLD_PLAYER_WS_URL;
     else process.env.COWORLD_PLAYER_WS_URL = previousEnv.wsUrl;
-    if (previousEnv.model === undefined) delete process.env.BEDROCK_MODEL;
-    else process.env.BEDROCK_MODEL = previousEnv.model;
+    if (previousEnv.model === undefined) delete process.env.COWORLD_LLM_MODEL;
+    else process.env.COWORLD_LLM_MODEL = previousEnv.model;
     if (previousEnv.hardening === undefined)
       delete process.env.PROXYWAR_PROMPT_HARDENING;
     else process.env.PROXYWAR_PROMPT_HARDENING = previousEnv.hardening;

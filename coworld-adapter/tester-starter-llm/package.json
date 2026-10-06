@@ -3,12 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
-  "description": "ProxyWar LLM agent (Bedrock). Claude plans in the background; every decision is answered instantly from the current plan (hosted matches have a hard wall-clock budget). Keeps playing, loudly degraded, if Bedrock is unreachable.",
+  "description": "ProxyWar LLM agent (Coworld native LLM). Claude plans in the background; every decision is answered instantly from the current plan (hosted matches have a hard wall-clock budget). Keeps playing, loudly degraded, if the hosted provider is unreachable.",
   "scripts": {
     "test": "node --test owner-*.test.mjs"
   },
   "dependencies": {
-    "ws": "8.21.3",
-    "@anthropic-ai/bedrock-sdk": "0.33.1"
+    "ws": "8.21.3"
   }
 }

@@ -196,9 +196,8 @@ async function runPlayer(playerFile, request) {
     env: {
       ...process.env,
       COWORLD_PLAYER_WS_URL: url,
-      AWS_REGION: "us-east-1",
-      AWS_EC2_METADATA_DISABLED: "true",
-      BEDROCK_MODEL: "owner-contract-no-provider-call",
+      COWORLD_LLM_ENDPOINT: `http://127.0.0.1:${address.port}`,
+      COWORLD_LLM_MODEL: "owner-contract-no-provider-call",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -262,7 +261,7 @@ for (const playerFile of PLAYER_FILES) {
       assert.ok(response.messageText.length > 0);
       assert.ok(response.messageText.length <= 280);
     } else {
-      // This harness deliberately provides no Bedrock response. The LLM path
+      // This harness deliberately provides no provider response. The LLM path
       // must stay silent rather than substituting deterministic negotiation.
       assert.equal("selectedMessageActionId" in response, false);
       assert.equal("messageText" in response, false);
