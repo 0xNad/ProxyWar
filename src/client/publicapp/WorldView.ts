@@ -16,6 +16,10 @@ export interface WorldView {
   readonly model: WorldModel;
   readonly now: number;
   label(name: string | null): string;
+  /** Who made a Season 2 model ("Anthropic"); null when the world does not say. */
+  provider(name: string | null): string | null;
+  /** The open starter and the place to test an agent, for the build calls. */
+  readonly links: { readonly starter: string; readonly observatory: string };
   /** Always `#rrggbb`: these values are written into style attributes. */
   bannerColor(name: string | null): string;
   lowContrast(name: string | null): boolean;

@@ -132,6 +132,9 @@ export const proxyWarPublicLeagueArtifacts = [
   // same lock and atomic-write discipline. Its source, `world-ledger.json`,
   // stays private: it is an internal append-only store, not a public API.
   "world.json",
+  // The Frontier's Nerf Watch, written beside world.json by the Frontier
+  // publisher (src/server/agents/FrontierForm.ts); the /world page reads it.
+  "frontier-form.json",
 ] as const;
 
 /**

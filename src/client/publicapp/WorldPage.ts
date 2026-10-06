@@ -28,12 +28,15 @@ import {
 import { pixelMapWidth, separateLabels } from "./WorldMapLayout";
 import { paintWorldFrame, theatreAtPoint } from "./WorldMapRenderer";
 import {
+  fetchFrontierForm,
   fetchWorldModel,
+  type FrontierForm,
   type WorldAgent,
   type WorldModel,
   type WorldTheatre,
   type WorldTheatreId,
 } from "./WorldModelSchema";
+import { renderNerfWatch } from "./WorldNerfWatch";
 import { ensureWorldStyles } from "./WorldPageStyles";
 import { renderPlacards, type PlacardView } from "./WorldPlacards";
 import { renderPowers } from "./WorldPowers";
@@ -49,6 +52,19 @@ import {
   WORLD_REGION_IDS,
 } from "./WorldPresentation";
 import { renderRules } from "./WorldRules";
+import {
+  displayNameOf,
+  isSeasonTwo,
+  OBSERVATORY_URL,
+  providerOf,
+  STARTER_REPOSITORY_URL,
+} from "./WorldSeason";
+import {
+  renderBuildCta,
+  renderLatestBattle,
+  renderSchedule,
+  renderSeasonOneRecap,
+} from "./WorldSeasonHero";
 import {
   battlefieldName,
   contextLine,
@@ -75,6 +91,12 @@ import { ICONS, type WorldView } from "./WorldView";
  * screen answers "who rules the world right now", the map shows where, and
  * everything below explains how each front got there — every claim one
  * click from the battle that decided it.
+ *
+ * In Season 2 of the Frontier (`mode: "frontier"`) the first screen also
+ * says when the next battle is, how the latest one ended in the models'
+ * own words, and what Season 1 came to; under the map, the Nerf Watch
+ * (`frontier-form.json`, fetched beside `world.json` and left out when it
+ * is missing) sets each model's day against its own record.
  */
 
 type LoadState = "loading" | "ready" | "error";
@@ -133,6 +155,8 @@ function storageSet(key: string, value: string): void {
 export class WorldPage extends LitElement {
   @state() private loadState: LoadState = "loading";
   @state() private model: WorldModel | null = null;
+  /** Season 2's Nerf Watch data; null hides the section. */
+  @state() private form: FrontierForm | null = null;
   @state() private hoverFront: WorldTheatreId | null = null;
   @state() private selected: WorldTheatreId | null = null;
   @state() private changed: WorldTheatreId[] = [];
@@ -204,6 +228,9 @@ export class WorldPage extends LitElement {
     try {
       const model = await fetchWorldModel();
       this.now = Date.now();
+      // Its own clock: the form file can move while the world does not.
+      if (isSeasonTwo(model)) void this.loadForm();
+      else this.form = null;
       if (!initial && this.model?.generatedAt === model.generatedAt) return;
       this.colors = assignBannerColors(model);
       this.agents = new Map(model.agents.map((agent) => [agent.name, agent]));
@@ -233,6 +260,13 @@ export class WorldPage extends LitElement {
     } catch {
       if (initial || this.model === null) this.loadState = "error";
     }
+  }
+
+  /** A failed refresh keeps the cards already shown; none were, none show. */
+  private async loadForm(): Promise<void> {
+    const form = await fetchFrontierForm();
+    if (form === null || form.generatedAt === this.form?.generatedAt) return;
+    this.form = form;
   }
 
   protected updated(changed: PropertyValues): void {
@@ -479,7 +513,23 @@ export class WorldPage extends LitElement {
 
   private label(name: string | null): string {
     if (name === null) return translateText("world_page.no_winner");
+    if (this.model !== null) return displayNameOf(this.model, name);
     return this.agents.get(name)?.label ?? name;
+  }
+
+  private provider(name: string | null): string | null {
+    return this.model === null ? null : providerOf(this.model, name);
+  }
+
+  /** An https URL or a same-origin path; anything else is the fallback. */
+  private safeUrl(url: string | undefined, fallback: string): string {
+    if (url === undefined) return fallback;
+    if (url.startsWith("/") && !url.startsWith("//")) return url;
+    try {
+      return new URL(url).protocol === "https:" ? url : fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   private frontName(id: WorldTheatreId): string {
@@ -585,7 +635,8 @@ export class WorldPage extends LitElement {
     const view = this.view(model);
     return html`
       <main class="wp-main">
-        ${this.renderHero(model)} ${renderFronts(view)}
+        ${this.renderHero(model)} ${renderNerfWatch(view, this.form)}
+        ${renderFronts(view)}
         <div class="wp-wrap wp-columns">
           ${renderDispatches(view, this.dispatchesExpanded, () => {
             this.dispatchesExpanded = !this.dispatchesExpanded;
@@ -614,6 +665,14 @@ export class WorldPage extends LitElement {
       model,
       now: this.now,
       label: (name) => this.label(name),
+      provider: (name) => this.provider(name),
+      links: {
+        starter: this.safeUrl(
+          model.links?.enterTheLeagueUrl,
+          STARTER_REPOSITORY_URL,
+        ),
+        observatory: OBSERVATORY_URL,
+      },
       bannerColor: (name) => this.bannerColor(name),
       lowContrast: (name) => this.lowContrast(name),
       swatch: (front) => this.swatch(front),
@@ -634,7 +693,8 @@ export class WorldPage extends LitElement {
   // -------------------------------------------------------------- hero
 
   private renderHero(model: WorldModel) {
-    const feed = feedState(model, this.now);
+    const view = this.view(model);
+    const seasonTwo = isSeasonTwo(model);
     const verdictView = this.verdictView();
     const crown = this.theatre("crown");
     const regions = model.theatres.filter((theatre) => theatre.id !== "crown");
@@ -647,30 +707,8 @@ export class WorldPage extends LitElement {
         <div class="wp-wrap wp-hero-head">
           <div class="wp-eyebrow">
             <span>${contextLine(model)}</span>
-            ${feed.kind === "empty"
-              ? html`<span class="wp-feed"
-                  >${translateText("world_page.feed_empty")}</span
-                >`
-              : html`<span class="wp-feed"
-                  ><span
-                    class="wp-pill ${feed.kind === "live"
-                      ? "wp-pill-live"
-                      : "wp-pill-paused"}"
-                    >${translateText(
-                      feed.kind === "live"
-                        ? "home_page.live_pill"
-                        : "home_page.paused_pill",
-                    )}</span
-                  >
-                  <span
-                    >${translateText(
-                      feed.kind === "live"
-                        ? "world_page.feed_live"
-                        : "world_page.feed_paused",
-                      { age: this.age(feed.lastBattleAt) },
-                    )}</span
-                  ></span
-                >`}
+            ${(seasonTwo ? renderSchedule(view) : null) ??
+            this.renderFeed(model)}
           </div>
           <h1
             id="wp-headline"
@@ -680,6 +718,7 @@ export class WorldPage extends LitElement {
             ${renderVerdict(verdictView, model)}
           </h1>
           <p class="wp-support">${renderSupport(verdictView, model)}</p>
+          ${seasonTwo ? (renderLatestBattle(view) ?? nothing) : nothing}
           <ul class="wp-stats" role="list">
             <li>
               ${translateText("world_page.stat_fronts", {
@@ -687,11 +726,14 @@ export class WorldPage extends LitElement {
                 total: regions.length,
               })}
             </li>
-            <li class=${contested > 0 ? "wp-stat-hot" : ""}>
-              ${translateText("world_page.stat_contested", {
-                count: contested,
-              })}
-            </li>
+            ${seasonTwo && contested === 0
+              ? // One battle decides a Season 2 front: there are no ties.
+                nothing
+              : html`<li class=${contested > 0 ? "wp-stat-hot" : ""}>
+                  ${translateText("world_page.stat_contested", {
+                    count: contested,
+                  })}
+                </li>`}
             ${crown?.holder
               ? html`<li class="wp-stat-crown">
                   ${translateText(
@@ -711,14 +753,46 @@ export class WorldPage extends LitElement {
                 </li>`
               : nothing}
           </ul>
+          ${seasonTwo ? (renderSeasonOneRecap(view) ?? nothing) : nothing}
           ${this.renderSinceVisit()}
         </div>
         ${this.renderMap(model)}
         <div class="wp-wrap wp-guide">
-          ${renderLegend(this.view(model))} ${renderKey(this.view(model))}
+          ${renderLegend(view)} ${renderKey(view)}
+          ${seasonTwo ? (renderBuildCta(view) ?? nothing) : nothing}
         </div>
       </section>
     `;
+  }
+
+  /** Measured liveness: live while battles keep coming, else paused. */
+  private renderFeed(model: WorldModel) {
+    const feed = feedState(model, this.now);
+    if (feed.kind === "empty") {
+      return html`<span class="wp-feed"
+        >${translateText("world_page.feed_empty")}</span
+      >`;
+    }
+    return html`<span class="wp-feed"
+      ><span
+        class="wp-pill ${feed.kind === "live"
+          ? "wp-pill-live"
+          : "wp-pill-paused"}"
+        >${translateText(
+          feed.kind === "live"
+            ? "home_page.live_pill"
+            : "home_page.paused_pill",
+        )}</span
+      >
+      <span
+        >${translateText(
+          feed.kind === "live"
+            ? "world_page.feed_live"
+            : "world_page.feed_paused",
+          { age: this.age(feed.lastBattleAt) },
+        )}</span
+      ></span
+    >`;
   }
 
   /** The verdict's names, dates and clock, as this page draws them. */

@@ -14,6 +14,7 @@ import type { HomePage } from "../../../src/client/publicapp/HomePage";
 import type { WorldModel } from "../../../src/client/publicapp/WorldModelSchema";
 import { installEnglish, removeEnglish } from "./EnglishLangSelector";
 import { worldFixture } from "./WorldFixtures";
+import { SEASON_TWO_NOW, seasonTwoWorld } from "./WorldSeasonFixtures";
 
 /** The fixture's moment: 22 minutes after its newest battle. */
 const NOW = new Date("2026-09-29T22:10:00.000Z");
@@ -108,6 +109,35 @@ describe("home-page", () => {
     expect(page).toContain("Data as of");
     expect(page).not.toContain("League data as of");
     expect(page).not.toMatch(/belongs to the agent|Agent ratings/);
+  });
+  it("says five models with one nation each in Season 2, names them in full and names the next battle instead of pausing", async () => {
+    serve(seasonTwoWorld());
+    vi.setSystemTime(SEASON_TWO_NOW);
+    const el = mount();
+    await settle(el);
+    expect(text(el.querySelector(".hp-context"))).toBe(
+      "Five frontier AI models fight over this map. One nation each, same rules, same number of moves to think.",
+    );
+    expect(text(el.querySelector("h1"))).toBe("Grok 4.7 is winning.");
+    expect(text(el.querySelector(".hp-clock-desktop"))).toBe(
+      "Next battle 19:00 UTC · in 3 h Last battle 2 h 19 min ago",
+    );
+    expect(el.querySelector(".hp-pill-paused")).toBeNull();
+    // The latest battle decides a front: no scores, no window to work through.
+    expect(text(el.querySelector(".hp-latest a .hp-event"))).toBe(
+      "Grok 4.7 took East Asia from Claude Opus 5.5.",
+    );
+    expect(text(el.querySelector(".hp-definition"))).toBe(
+      "The latest battle on a front decides who holds it.",
+    );
+    expect(el.querySelector(".hp-example")).toBeNull();
+    const page = text(el);
+    expect(page).toContain(
+      "A front belongs to the model that won the latest battle on its maps.",
+    );
+    expect(page).not.toMatch(
+      /Four frontier|three nations|teams? holds?|last 1 battles/,
+    );
   });
   it("reads world.json and says what this is and who is winning, with the lead's weak spot", async () => {
     const el = mount();

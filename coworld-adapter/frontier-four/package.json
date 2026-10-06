@@ -1,9 +1,9 @@
 {
   "name": "proxywar-frontier-four",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "license": "MIT",
-  "description": "ProxyWar Frontier Four team agent: the public LLM starter's executor with the model behind Softmax's LLM sidecar (COWORLD_LLM_ENDPOINT, COWORLD_LLM_MODEL). Plans in the background; answers every decision from the current plan.",
+  "description": "ProxyWar Frontier agent: the model (via Softmax's LLM sidecar: COWORLD_LLM_ENDPOINT, COWORLD_LLM_MODEL) writes a plan at fixed checkpoints; a deterministic executor turns it into the offered action ids every step.",
   "dependencies": {
     "ws": "^8.18.0"
   }

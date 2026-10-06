@@ -121,7 +121,7 @@ export function renderDrawer(
           : nothing}
         ${theatre.tallies.length > 0
           ? html`<h3 class="wp-drawer-sub">
-                ${translateText("world_page.detail_tally", {
+                ${translateText(modeKey(model, "world_page.detail_tally"), {
                   window: model.windowSize,
                 })}
               </h3>

@@ -68,7 +68,7 @@ export function renderVerdict(
             count: verdict.names.length,
           });
     case "scattered":
-      return translateText("home_page.verdict_scattered");
+      return translateText(modeKey(model, "home_page.verdict_scattered"));
     case "empty":
       return translateText("home_page.verdict_empty");
   }

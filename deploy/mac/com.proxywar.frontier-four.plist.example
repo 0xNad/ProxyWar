@@ -21,12 +21,13 @@
   <!--
     The scheduler's working directory, state and games file stay in HOME: its
     Python must never touch a removable volume (see
-    docs/PROXYWAR_FRONTIER_FOUR.md). The scheduler loops for ever, so
-    KeepAlive restarts it after a crash; ThrottleInterval keeps a broken
-    start from spinning.
+    docs/PROXYWAR_FRONTIER_FOUR.md). Season 2 lives in its own frontier-ffa
+    directory, which must exist (with frontier-ffa.json in it) before the
+    job loads. The scheduler loops for ever, so KeepAlive restarts it after a
+    crash; ThrottleInterval keeps a broken start from spinning.
   -->
   <key>WorkingDirectory</key>
-  <string>/Users/YOUR_USER/Library/Application Support/ProxyWar/frontier-four</string>
+  <string>/Users/YOUR_USER/Library/Application Support/ProxyWar/frontier-ffa</string>
   <key>StandardOutPath</key>
   <string>/Users/YOUR_USER/Library/Logs/proxywar-frontier-four.log</string>
   <key>StandardErrorPath</key>

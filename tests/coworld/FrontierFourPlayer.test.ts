@@ -1,305 +1,373 @@
 /**
- * The Frontier Four team agent is the public LLM starter's executor behind
- * Softmax's LLM sidecar. These tests drive it over a fake socket against an
- * in-process stand-in for the sidecar and check the three things the port
- * changed: the wire format follows the model slug (Anthropic Messages for
- * `anthropic/*`, Chat Completions for everything else), a team observation
- * reaches the model as team framing with teammates kept out of `rivals`, and
- * a spend cutoff stops the planner for the rest of the episode while the
- * seat keeps answering legally.
+ * The Frontier player (v2) behind Softmax's LLM sidecar: how it calls the
+ * model. These tests drive it over a fake socket against an in-process
+ * sidecar stand-in and check the fairness rules of Season 2: every model
+ * gets the same request, plans land at the same fixed checkpoints with a hard
+ * call cap, the seat waits for its plan (up to a timeout) instead of planning
+ * in the background, a refused control is dropped once and logged, and a
+ * spend cutoff stops the planner while the seat keeps answering legally.
  */
-import { EventEmitter } from "node:events";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
+import type { Server } from "node:http";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  captureStdout,
+  decide,
+  ffaActions,
+  ffaObservation,
+  gameOf,
+  IDS,
+  loadPlayer,
+  signalListenerGuard,
+  startStubSidecar,
+} from "./FrontierPlayerHarness";
 
-const PLAYER = path.resolve("coworld-adapter/frontier-four/player.mjs");
+const PACKAGE_VERSION = (
+  JSON.parse(
+    readFileSync(
+      path.resolve("coworld-adapter/frontier-four/package.json"),
+      "utf8",
+    ),
+  ) as { version: string }
+).version;
 
-interface Captured {
-  path: string;
-  body: Record<string, unknown>;
-}
-
-class FakeSocket extends EventEmitter {
-  readonly sent: Array<Record<string, unknown>> = [];
-  constructor() {
-    super();
-    setTimeout(() => this.emit("open"), 0);
-  }
-  send(payload: string) {
-    this.sent.push(JSON.parse(payload));
-  }
-  close() {
-    this.emit("close");
-  }
-}
-
-const plan = {
-  focus: "attack",
-  preferKinds: ["attack", "donate_troops", "hold"],
-  target: "Fable",
-  avoidTargets: [],
-  dealPolicies: {},
-  breakDealIDs: [],
-  reason: "press the weaker rival",
-};
-
-/** A sidecar stand-in: records requests, answers with the plan, or 429s. */
-function startSidecar(mode: "ok" | "spend_limit"): Promise<{
-  server: Server;
-  url: string;
-  calls: Captured[];
-}> {
-  const calls: Captured[] = [];
-  const server = createServer((request, response) => {
-    let raw = "";
-    request.on("data", (chunk) => (raw += chunk));
-    request.on("end", () => {
-      const body = raw === "" ? {} : JSON.parse(raw);
-      calls.push({ path: request.url ?? "", body });
-      if (mode === "spend_limit") {
-        response.writeHead(429, { "content-type": "application/json" });
-        response.end(
-          JSON.stringify({
-            error: { type: "rate_limit_error", message: "spend limit" },
-            softmax_error: { category: "spend_limit", retryable: false },
-          }),
-        );
-        return;
-      }
-      const text = JSON.stringify(plan);
-      response.writeHead(200, {
-        "content-type": "application/json",
-        "x-coworld-spend-usd": "0.0123",
-      });
-      response.end(
-        JSON.stringify(
-          request.url === "/v1/messages"
-            ? {
-                model: body.model,
-                stop_reason: "end_turn",
-                content: [{ type: "text", text }],
-                usage: { input_tokens: 900, output_tokens: 60 },
-              }
-            : {
-                model: body.model,
-                choices: [
-                  { finish_reason: "stop", message: { content: text } },
-                ],
-                usage: { prompt_tokens: 900, completion_tokens: 60 },
-              },
-        ),
-      );
-    });
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address() as AddressInfo;
-      resolve({ server, url: `http://127.0.0.1:${port}`, calls });
-    });
-  });
-}
-
-const observation = {
-  phase: "active",
-  gameMode: "Team",
-  ownState: {
-    playerID: "P_ME",
-    name: "Astra",
-    team: "Red",
-    tileShare: 12,
-    troops: 4000,
-    troopRatio: 1.1,
-    gold: 20000,
-    borderTiles: 40,
-    incomingAttacks: 0,
-    units: {},
-  },
-  visiblePlayers: [
-    {
-      playerID: "P_MATE",
-      name: "Astra 2",
-      team: "Red",
-      isTeammate: true,
-      isAlive: true,
-      tileShare: 9,
-      relativeTroopRatio: 1.0,
-      sharesBorder: true,
-    },
-    {
-      playerID: "P_ENEMY",
-      name: "Fable",
-      team: "Blue",
-      isTeammate: false,
-      isAlive: true,
-      tileShare: 15,
-      relativeTroopRatio: 0.8,
-      sharesBorder: true,
-      isAllied: false,
-      relation: "neutral",
-      canAttack: true,
-    },
-  ],
-};
-const legalActions = [
-  {
-    id: "act_attack_fable",
-    kind: "attack",
-    label: "Attack Fable",
-    risk: { level: "medium" },
-    metadata: { targetID: "P_ENEMY", targetName: "Fable" },
-  },
-  {
-    id: "act_donate_mate",
-    kind: "donate_troops",
-    label: "Donate troops to Astra 2",
-    risk: { level: "low" },
-    metadata: { targetID: "P_MATE", targetName: "Astra 2" },
-  },
-  { id: "act_hold", kind: "hold", label: "Hold", risk: { level: "low" } },
+const SLUGS = [
+  "openai/gpt-6-astra",
+  "anthropic/claude-fable-5.1",
+  "anthropic/claude-opus-5.5",
+  "google/gemini-3.1-pro-preview",
+  "x-ai/grok-4.7",
 ];
-const legalIds = new Set(legalActions.map((action) => action.id));
 
-async function playSteps(
-  socket: FakeSocket,
-  steps: number,
-): Promise<Array<Record<string, unknown>>> {
-  for (let step = 1; step <= steps; step++) {
-    socket.emit(
-      "message",
-      JSON.stringify({
-        type: "decision_request",
-        requestID: `req_${step}`,
-        protocol: { maxActionsPerDecision: 1, maxSpawnPreferences: 16 },
-        request: {
-          protocolVersion: "proxywar-agent-v1",
-          observation,
-          legalActions,
-          responseContract: {},
-        },
-      }),
-    );
-    // The plan refresh is asynchronous; give it a moment to land.
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  return socket.sent.filter((message) => message.type === "decision_response");
-}
-
-/** A fresh module instance per test: the player keeps its plan in module state. */
-async function loadPlayer(endpoint: string, model: string) {
-  process.env.COWORLD_PLAYER_WS_URL = "ws://fake";
-  process.env.COWORLD_LLM_ENDPOINT = endpoint;
-  process.env.COWORLD_LLM_MODEL = model;
-  process.env.PLAN_EVERY = "1";
-  const href = `${pathToFileURL(PLAYER).href}?t=${Date.now()}-${Math.random()}`;
-  const module = (await import(href)) as {
-    startFrontierPlayer: (options: { WebSocketCtor: unknown }) => FakeSocket;
-  };
-  return module.startFrontierPlayer({ WebSocketCtor: FakeSocket });
-}
-
-describe("Frontier Four player", () => {
+describe("Frontier player: model calls", () => {
   const sidecars: Server[] = [];
-  const signalListeners = {
-    SIGTERM: process.listeners("SIGTERM"),
-    SIGINT: process.listeners("SIGINT"),
-  };
-  beforeEach(() => {
-    delete process.env.OPENROUTER_API_KEY;
-  });
+  let stdout: ReturnType<typeof captureStdout>;
+  let releaseSignals: () => void;
   afterEach(async () => {
     for (const server of sidecars.splice(0)) {
       await new Promise((resolve) => server.close(resolve));
     }
-    // The player installs exit handlers; keep the test runner's own.
-    for (const signal of ["SIGTERM", "SIGINT"] as const) {
-      for (const listener of process.listeners(signal)) {
-        if (!signalListeners[signal].includes(listener)) {
-          process.removeListener(signal, listener);
-        }
-      }
+    stdout?.restore();
+    releaseSignals?.();
+  });
+  const begin = () => {
+    stdout = captureStdout();
+    releaseSignals = signalListenerGuard();
+  };
+
+  it("sends every model the same request: one wire format, one token limit, one reasoning setting", async () => {
+    begin();
+    const bodies: Array<Record<string, unknown>> = [];
+    for (const model of SLUGS) {
+      const sidecar = await startStubSidecar();
+      sidecars.push(sidecar.server);
+      const socket = await loadPlayer({
+        COWORLD_LLM_ENDPOINT: sidecar.url,
+        COWORLD_LLM_MODEL: model,
+      });
+      await decide(socket, ffaObservation(), ffaActions());
+      expect(sidecar.calls).toHaveLength(1);
+      expect(sidecar.calls[0].path).toBe("/v1/chat/completions");
+      bodies.push(sidecar.calls[0].body);
     }
-  });
-
-  it("speaks Anthropic Messages to an anthropic/ slug, with the team framing", async () => {
-    const sidecar = await startSidecar("ok");
-    sidecars.push(sidecar.server);
-    const socket = await loadPlayer(sidecar.url, "anthropic/claude-fable-5.1");
-    const responses = await playSteps(socket, 2);
-
-    expect(responses).toHaveLength(2);
-    expect(
-      responses.every((r) => legalIds.has(r.selectedLegalActionId as string)),
-    ).toBe(true);
-    expect(sidecar.calls.length).toBeGreaterThan(0);
-    const call = sidecar.calls[0];
-    expect(call.path).toBe("/v1/messages");
-    expect(call.body.model).toBe("anthropic/claude-fable-5.1");
-    expect(call.body.max_tokens).toBe(1500);
-    // Stable text in one cached `system` block, the volatile GAME block in
-    // the user turn.
-    const systemBlocks = call.body.system as Array<{
-      type: string;
-      text: string;
-      cache_control?: { type: string };
-    }>;
-    expect(systemBlocks).toHaveLength(1);
-    expect(systemBlocks[0].cache_control).toEqual({ type: "ephemeral" });
-    const system = systemBlocks[0].text;
-    expect(system).toContain("TEAM GAME");
-    const user = (call.body.messages as Array<{ content: string }>)[0].content;
-    expect(user.startsWith("GAME:")).toBe(true);
-    const state = JSON.parse(user.slice("GAME:".length));
-    expect(state.self.team).toBe("Red");
-    expect(state.teammates.map((p: { name: string }) => p.name)).toEqual([
-      "Astra 2",
-    ]);
-    expect(state.rivals.map((p: { name: string }) => p.name)).toEqual([
-      "Fable",
-    ]);
-    // Once the plan landed, the model's target steers the executor.
-    expect(responses[1].selectedLegalActionId).toBe("act_attack_fable");
-    expect(responses[1].llmPlannerDegraded).toBe(false);
-  });
-
-  it("speaks Chat Completions to every other slug", async () => {
-    const sidecar = await startSidecar("ok");
-    sidecars.push(sidecar.server);
-    const socket = await loadPlayer(sidecar.url, "openai/gpt-6-astra");
-    const responses = await playSteps(socket, 2);
-
-    expect(responses).toHaveLength(2);
-    const call = sidecar.calls[0];
-    expect(call.path).toBe("/v1/chat/completions");
-    expect(call.body.model).toBe("openai/gpt-6-astra");
-    expect(call.body.max_tokens).toBe(4000);
-    expect(call.body.reasoning).toEqual({ effort: "low" });
-    const messages = call.body.messages as Array<{
+    for (const [index, body] of bodies.entries()) {
+      expect(body.model).toBe(SLUGS[index]);
+      expect(Object.keys(body).sort()).toEqual([
+        "max_tokens",
+        "messages",
+        "model",
+        "reasoning",
+      ]);
+      expect(body.max_tokens).toBe(3000);
+      expect(body.reasoning).toEqual({ effort: "low" });
+      // Apart from the slug, the requests are byte-identical.
+      expect({ ...body, model: "x" }).toEqual({ ...bodies[0], model: "x" });
+    }
+    const messages = bodies[0].messages as Array<{
       role: string;
       content: string;
     }>;
     expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
-    expect(messages[0].content).toContain("TEAM GAME");
-    expect(responses[1].selectedLegalActionId).toBe("act_attack_fable");
+    expect(messages[0].content).toContain("SECURITY");
+    expect(messages[0].content).not.toContain("TEAM GAME");
+    // The params sent are on record in the usage line.
+    const response = stdout
+      .tagged("PROXYWAR_LLM_USAGE")
+      .find((event) => event.event === "response");
+    expect(response).toMatchObject({
+      // harness.playerVersion is the package's semver (contract B).
+      playerVersion: PACKAGE_VERSION,
+      promptVariant: "frontier-v2",
+      maxOutputTokens: 3000,
+      reasoning: "low",
+      checkpoint: 1,
+      decisionStep: 1,
+      inputTokens: 1200,
+      outputTokens: 300,
+      reasoningTokens: 90,
+      cacheReadTokens: 400,
+    });
+  });
+
+  it("plans synchronously at fixed checkpoints and stops at the call cap", async () => {
+    begin();
+    const sidecar = await startStubSidecar({ latencyMs: () => 80 });
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "x-ai/grok-4.7",
+      PLAN_EVERY: "3",
+      MAX_PLANS: "3",
+    });
+    const responses = [];
+    const elapsed = [];
+    for (let step = 1; step <= 10; step++) {
+      const started = Date.now();
+      responses.push(await decide(socket, ffaObservation(), ffaActions()));
+      elapsed.push(Date.now() - started);
+    }
+    // Checkpoints at step 1 and every third step, until three plans exist.
+    expect(sidecar.calls).toHaveLength(3);
+    const plans = stdout.tagged("PROXYWAR_PLAN");
+    expect(plans.map((p) => [p.checkpoint, p.decisionStep, p.status])).toEqual([
+      [1, 1, "applied"],
+      [2, 3, "applied"],
+      [3, 6, "applied"],
+    ]);
+    // The seat waited for its plan: the very first answer already follows it
+    // (attack the named target), and checkpoint steps took the model's time.
+    expect(responses[0].selectedLegalActionId).toBe(`attack:${IDS.grok}:40`);
+    expect(responses[0].llmPlannerDegraded).toBe(false);
+    for (const index of [0, 2, 5]) expect(elapsed[index]).toBeGreaterThan(60);
+    expect(elapsed[8]).toBeLessThan(60); // step 9: past the cap, no call
+    socket.emit("message", JSON.stringify({ type: "final", slot: 0 }));
+    const summary = stdout
+      .tagged("PROXYWAR_LLM_USAGE")
+      .find((event) => event.event === "summary");
+    expect(summary).toMatchObject({
+      plans: 3,
+      planFailures: 0,
+      checkpoints: 3,
+      attempts: 3,
+      responses: 3,
+      reasoningTokens: 270,
+    });
+  });
+
+  it("drops a control the route refuses, once, logs it, and keeps the rest of the request", async () => {
+    begin();
+    const sidecar = await startStubSidecar({ rejectReasoning: true });
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "anthropic/claude-opus-5.5",
+      PLAN_EVERY: "1",
+      MAX_PLANS: "2",
+    });
+    await decide(socket, ffaObservation(), ffaActions());
+    await decide(socket, ffaObservation(), ffaActions());
+    expect(sidecar.calls.map((call) => "reasoning" in call.body)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(sidecar.calls[1].body.max_tokens).toBe(3000);
+    const drops = stdout
+      .tagged("PROXYWAR_LLM_USAGE")
+      .filter((event) => event.event === "control_dropped");
+    expect(drops).toHaveLength(1);
+    expect(drops[0]).toMatchObject({
+      control: "reasoning",
+      status: "routing_parameters",
+    });
+    expect(
+      stdout
+        .tagged("PROXYWAR_LLM_USAGE")
+        .filter((event) => event.event === "response")
+        .map((event) => event.reasoning),
+    ).toEqual(["dropped", "dropped"]);
+    expect(stdout.tagged("PROXYWAR_PLAN").map((plan) => plan.status)).toEqual([
+      "applied",
+      "applied",
+    ]);
+  });
+
+  it("keeps reasoning when a refusal persists without it: an unrelated 400 never changes later requests", async () => {
+    begin();
+    // The first request and its retry without reasoning are both refused,
+    // so reasoning was not the cause.
+    const sidecar = await startStubSidecar({
+      refuse: (request) =>
+        request <= 2 ? { status: 400, category: "invalid_request" } : null,
+    });
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "anthropic/claude-fable-5.1",
+      PLAN_EVERY: "1",
+      MAX_PLANS: "4",
+    });
+    for (let step = 0; step < 4; step++)
+      await decide(socket, ffaObservation(), ffaActions());
+    expect(sidecar.calls.map((call) => "reasoning" in call.body)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      true,
+    ]);
+    const usage = stdout.tagged("PROXYWAR_LLM_USAGE");
+    expect(usage.filter((e) => e.event === "control_dropped")).toEqual([]);
+    expect(
+      usage.filter((e) => e.event === "response").map((e) => e.reasoning),
+    ).toEqual(["low", "low", "low"]);
+    expect(stdout.tagged("PROXYWAR_PLAN").map((plan) => plan.status)).toEqual([
+      "failed",
+      "applied",
+      "applied",
+      "applied",
+    ]);
+  });
+
+  it("keeps the previous plan when a checkpoint times out, and says so", async () => {
+    begin();
+    const sidecar = await startStubSidecar({
+      latencyMs: (call) => (call === 1 ? 5 : 2000),
+    });
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "google/gemini-3.1-pro-preview",
+      PLAN_EVERY: "2",
+      PLAN_TIMEOUT_MS: "300",
+    });
+    await decide(socket, ffaObservation(), ffaActions());
+    const started = Date.now();
+    const late = await decide(socket, ffaObservation(), ffaActions());
+    const waited = Date.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(250);
+    expect(waited).toBeLessThan(1500);
+    // Still the first plan's move, flagged as a timeout.
+    expect(late.selectedLegalActionId).toBe(`attack:${IDS.grok}:40`);
+    expect(late.degradedCause).toBe("plan-timeout");
+    expect(late.llmPlannerDegraded).toBe(true);
+    expect(stdout.tagged("PROXYWAR_PLAN").map((p) => p.status)).toEqual([
+      "applied",
+      "timeout",
+    ]);
+    // The next decision does not call again: no background refresh.
+    await decide(socket, ffaObservation(), ffaActions());
+    expect(sidecar.calls).toHaveLength(2);
   });
 
   it("stops planning after a spend cutoff and keeps playing, loudly degraded", async () => {
-    const sidecar = await startSidecar("spend_limit");
+    begin();
+    const sidecar = await startStubSidecar({ spendLimit: true });
     sidecars.push(sidecar.server);
-    const socket = await loadPlayer(sidecar.url, "x-ai/grok-4.7");
-    const responses = await playSteps(socket, 4);
-
-    expect(responses).toHaveLength(4);
-    expect(
-      responses.every((r) => legalIds.has(r.selectedLegalActionId as string)),
-    ).toBe(true);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "x-ai/grok-4.7",
+      PLAN_EVERY: "1",
+      MAX_PLANS: "4",
+    });
+    const actions = ffaActions();
+    const legal = new Set(actions.map((action) => action.id));
+    const responses = [];
+    for (let step = 0; step < 4; step++)
+      responses.push(await decide(socket, ffaObservation(), actions));
+    expect(responses.every((r) => legal.has(r.selectedLegalActionId))).toBe(
+      true,
+    );
     // One request reached the sidecar; after the 429 the planner never asks again.
     expect(sidecar.calls).toHaveLength(1);
     const last = responses[3];
     expect(last.llmPlannerDegraded).toBe(true);
     expect(last.fallbackUsed).toBe(true);
     expect(String(last.reason)).toContain("spend limit");
+    expect(
+      stdout
+        .tagged("PROXYWAR_PLAN")
+        .map((plan) => [plan.status, plan.error ?? null]),
+    ).toEqual([
+      ["failed", "spend_limit"],
+      ["failed", "spend_limit"],
+      ["failed", "spend_limit"],
+      ["failed", "spend_limit"],
+    ]);
+  });
+
+  it("gives the model a small prompt: four rivals, a per-kind menu summary, rival ids and spatial facts", async () => {
+    begin();
+    const sidecar = await startStubSidecar();
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "openai/gpt-6-astra",
+    });
+    const observation = ffaObservation();
+    const players = observation.visiblePlayers as Array<
+      Record<string, unknown>
+    >;
+    // Seven more rivals than the prompt shows in full.
+    for (let i = 0; i < 7; i++)
+      players.push({
+        ...players[3],
+        playerID: `extra${i}`,
+        name: `Extra ${i}`,
+        tileShare: 0.01,
+      });
+    await decide(socket, observation, ffaActions());
+    const game = gameOf(sidecar.calls[0]);
+    const rivals = game.rivals as Array<Record<string, unknown>>;
+    expect(rivals).toHaveLength(4);
+    expect(rivals.map((r) => r.name)).toContain("Gemini 1");
+    expect((game.otherRivals as unknown[]).length).toBe(7);
+    // Rival ids and the spatial block reach the model (schema 5 is accepted).
+    const fable = rivals.find((r) => r.name === "Fable 1");
+    expect(fable).toMatchObject({
+      playerID: IDS.fable,
+      bearing: "east",
+      distance: "adjacent",
+      border: { tiles: 40, shareOfYourBorder: 35, defensePosts: 1 },
+      asksYouToAlly: true,
+    });
+    expect(game.spatial).toMatchObject({ quadrant: "west", coastShare: 22 });
+    // The menu is summarised per kind, not listed id by id.
+    expect(game.legalActions).toBeUndefined();
+    expect(game.options).toMatchObject({
+      attackByLand: ["Fable 1", "Grok 1"],
+      expandNeutral: true,
+      boatTo: ["Opus 1"],
+      allianceRequest: ["Fable 1"],
+      breakAlliance: ["Gemini 1"],
+    });
+    expect(JSON.stringify(game)).not.toContain("quick_chat");
+    const user = (
+      sidecar.calls[0].body.messages as Array<{ content: string }>
+    )[1].content;
+    expect(user.length).toBeLessThan(4000);
+    const usage = stdout
+      .tagged("PROXYWAR_LLM_USAGE")
+      .find((event) => event.event === "response");
+    expect(usage?.spatialSchemaVersion).toBe(5);
+  });
+
+  it("drops the spatial block when the server sends none, but keeps rival ids", async () => {
+    begin();
+    const sidecar = await startStubSidecar();
+    sidecars.push(sidecar.server);
+    const socket = await loadPlayer({
+      COWORLD_LLM_ENDPOINT: sidecar.url,
+      COWORLD_LLM_MODEL: "openai/gpt-6-astra",
+    });
+    await decide(socket, ffaObservation({ spatial: undefined }), ffaActions());
+    const game = gameOf(sidecar.calls[0]);
+    expect(game.spatial).toBeUndefined();
+    const fable = (game.rivals as Array<Record<string, unknown>>).find(
+      (r) => r.name === "Fable 1",
+    );
+    expect(fable?.playerID).toBe(IDS.fable);
+    expect(fable?.bearing).toBeUndefined();
   });
 });

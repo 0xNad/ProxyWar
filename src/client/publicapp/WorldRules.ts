@@ -26,7 +26,7 @@ export function renderRules(view: WorldView) {
       <article class="wp-rule">
         <span class="wp-rule-icon">${unsafeSVG(ICONS.flag)}</span>
         <h3>
-          ${translateText("world_page.rule_window_title", {
+          ${translateText(modeKey(model, "world_page.rule_window_title"), {
             window: model.windowSize,
           })}
         </h3>

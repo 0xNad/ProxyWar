@@ -3,6 +3,7 @@ import { translateText } from "../Utils";
 import { CROWN_GLYPH } from "./WorldGlyphs";
 import type { WorldModel, WorldTheatre } from "./WorldModelSchema";
 import { frontDisplayState, type FrontDisplayState } from "./WorldPresentation";
+import { isSeasonTwo } from "./WorldSeason";
 import { modeKey } from "./WorldText";
 import { STATUS_KEYS, type WorldView } from "./WorldView";
 
@@ -41,14 +42,14 @@ export function renderFronts(view: WorldView) {
         ${translateText(modeKey(model, "world_page.fronts_intro"), {
           window: model.windowSize,
         })}
-        ${translateText("world_page.fronts_strip_intro")}
+        ${translateText(modeKey(model, "world_page.fronts_strip_intro"))}
       </p>
     </div>
     <div class="wp-fronts-head" aria-hidden="true">
       <span>${translateText("world_page.fronts_head_front")}</span>
       <span>${translateText("world_page.fronts_head_holder")}</span>
       <span
-        >${translateText("world_page.fronts_head_form", {
+        >${translateText(modeKey(model, "world_page.fronts_head_form"), {
           count: model.windowSize,
         })}</span
       >
@@ -123,8 +124,20 @@ function renderFrontRow(
   </li>`;
 }
 
-/** How close the race for a held front is, in words. */
+/**
+ * How close the race for a held front is, in words. In Season 2 the
+ * latest battle decides a front, so the line says how that battle went.
+ */
 export function contestLine(view: WorldView, theatre: WorldTheatre): string {
+  if (isSeasonTwo(view.model)) {
+    const latest = theatre.window[theatre.window.length - 1];
+    if (latest !== undefined && latest.winner === theatre.holder) {
+      return translateText("world_page.front_won_latest");
+    }
+    if (latest !== undefined && latest.winner === null) {
+      return translateText("world_page.front_kept_no_winner");
+    }
+  }
   if (theatre.challenger === null) {
     return translateText("world_page.front_unchallenged", {
       wins: theatre.holderWins,
