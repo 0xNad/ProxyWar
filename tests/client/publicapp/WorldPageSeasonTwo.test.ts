@@ -135,7 +135,7 @@ describe("world-page, Season 2", () => {
     await settle(el);
     const recap = el.querySelector(".wp-recap");
     expect(text(recap)).toBe(
-      "Season 1: Grok 4.7 won 25 of 37 team battles, Gemini 3.1 Pro won 7, Claude Fable 5.1 won 3, and GPT-6 Astra won 2. Spawn order and an equal-dollar budget tilted Season 1 toward Grok, so Season 2 changes both.",
+      "Season 1: Grok 4.7 won 25 of 37 team battles, Gemini 3.1 Pro won 7, Claude Fable 5.1 won 3, and GPT-6 Astra won 2. Season 1 was not a fair test. Grok always picked its starting spot last because seats went in name order, and the two most expensive models often ran out of budget to think partway through a game. Season 2 rotates who picks first and lets every model think the same number of times.",
     );
     expect(recap?.querySelector("a")).toBeNull();
     const cta = el.querySelector(".wp-hero .wp-cta");
