@@ -1,0 +1,19 @@
+{
+  "scratchpads_enabled": true,
+  "ladder": {
+    "enabled": false,
+    "scheduler": {
+      "strategy": "team_n",
+      "team_count": 2,
+      "team_layout": "interleaved",
+      "distinct_teammates": true,
+      "insufficient_players": "do_not_run",
+      "num_episodes": 1,
+      "variant_rotation": ["teams-3v3"]
+    },
+    "ranking": {
+      "algorithm": "openskill"
+    },
+    "divisions": []
+  }
+}

@@ -13,6 +13,8 @@ import {
   resolveCoworldTeams,
 } from "./coworld-teams.ts";
 
+import { CoworldScratchpads } from "./coworld-scratchpads.ts";
+
 import { CommanderXpFinalizationBarrier } from "./commander-xp-finalization.ts";
 import {
   coworldAppShellRoute,
@@ -148,6 +150,23 @@ export type CoworldConfig = {
 };
 
 class CoworldProtocolServer {
+  scratchpads: CoworldScratchpads | null = null;
+
+  async scratchpadPhase(
+    phase: "read" | "write",
+    result?: unknown,
+  ): Promise<void> {
+    await this.scratchpads?.runPhase(
+      phase,
+      (slot, message) => {
+        const socket = this.players.get(slot);
+        if (socket?.readyState === WebSocket.OPEN)
+          socket.send(JSON.stringify(message));
+      },
+      result,
+    );
+  }
+
   private readonly server = http.createServer((request, response) => {
     void this.handleHttp(request, response);
   });
@@ -509,6 +528,10 @@ class CoworldProtocolServer {
       );
       return;
     }
+    if (message.type === "scratchpad_response") {
+      this.scratchpads?.respond(slot, message);
+      return;
+    }
     if (message.type === "finalization_ack") {
       this.finalizationBarrier?.acknowledge(slot, message);
       return;
@@ -815,7 +838,11 @@ async function runCoworldGameContainer(): Promise<void> {
   await server.listen(host, port);
   try {
     await server.waitForPlayers();
+    server.scratchpads = await CoworldScratchpads.load(config.tokens.length);
+    await server.scratchpadPhase("read");
     const result = await runProxyWarEpisode(config, workspace, server);
+    await server.scratchpadPhase("write", result.results);
+    await server.scratchpads?.save();
     server.setReplayPayload(result.replayPayload);
     await writeUri(
       requiredEnv("COGAME_RESULTS_URI"),

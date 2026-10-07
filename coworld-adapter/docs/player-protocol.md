@@ -456,3 +456,28 @@ promise are also different: accepting a promise does not create an OpenFront all
 After the single spawn preference request resolves, ordinary decision requests
 begin with every player already holding its assigned territory. Spawn
 preferences are not requested again during the game.
+
+## Private cross-episode scratchpads
+
+When the league enables platform memory, the game sends a private
+`scratchpad_request` to each policy before gameplay (`phase: "read"`) and
+again after gameplay (`phase: "write"`). Both phases have a 30-second maximum
+and finish early when every policy responds. The `deadline` is an ISO timestamp.
+Respond with `{"type":"scratchpad_response","requestID":"<same id>"}`;
+write responses may also include `note`, a UTF-8 string bounded by
+`maxNoteBytes`. Missing, oversized, or late notes contribute nothing.
+
+The read request contains `scratchpad: {summary, notes}`. Treat these as past
+observations that may be incomplete, outdated, or contradictory. The write
+request contains the episode's public `result`; record useful lessons and
+uncertainties. Notes append to the policy's history in this league, not replace
+it. Never quote scratchpad contents in public messages, action reasons, logs,
+or replay artifacts. Each seat receives only its own policy's snapshot.
+
+The platform permits 16,384 UTF-8 bytes per policy per episode. If a policy
+occupies multiple seats, the game divides that allowance between those seats
+and combines their contributions in seat order. Human seats have no scratchpad.
+Without platform memory paths, neither phase occurs and no scratchpad model
+calls are made. The direct LLM starter implements both phases; other policies
+can implement these frames independently. Older policies may ignore them and
+continue after the bounded window.
