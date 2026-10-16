@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const coworldCliPackage = "coworld==0.1.60";
 const defaultCoworldServer = "https://softmax.com/api";
 const readVerbs = new Set([
   "leagues",
@@ -109,7 +110,7 @@ export async function readCoworldJson(
     (async (cliArgs: string[]) => {
       const { stdout } = await execFileAsync(
         "uvx",
-        ["coworld", ...cliArgs, "--json"],
+        ["--from", coworldCliPackage, "coworld", ...cliArgs, "--json"],
         { timeout: 180_000, maxBuffer: 128 * 1024 * 1024 },
       );
       return stdout;

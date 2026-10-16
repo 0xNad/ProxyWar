@@ -502,7 +502,7 @@ export interface CoworldRecentRoundEpisodeRead {
 }
 
 /**
- * Bounded read fallback for a failed division-wide episode feed.
+ * Bounded, paginated round reads for the replay and integrity feeds.
  *
  * The latest completed round must itself be readable before this result can
  * count as fresh. Older successful round reads may fill the display window,
@@ -512,7 +512,7 @@ export interface CoworldRecentRoundEpisodeRead {
  * ladder's integrity threshold still contains episodes that finished and
  * published replays — real battles the division-wide replay feed used to
  * return. The hosted API no longer accepts a division filter for episode
- * requests (HTTP 422 since late 2026-09), so this fallback is now the only
+ * requests (HTTP 422 since late 2026-09), so this is the primary
  * replay path; without failed rounds, a run of failed rounds froze every
  * battle surface on the last round that happened to pass. With the flag,
  * "latest round" means the latest terminal round (completed or failed), and
@@ -525,17 +525,21 @@ export async function readRecentRoundEpisodeRows(args: {
   readCoworldJson: (args: string[]) => Promise<unknown>;
   minimumRows: number;
   maximumRounds?: number;
+  maximumPagesPerRound?: number;
   includeFailedRounds?: boolean;
 }): Promise<CoworldRecentRoundEpisodeRead> {
   const includeFailedRounds = args.includeFailedRounds === true;
   const maximumRounds = args.maximumRounds ?? 10;
+  const maximumPagesPerRound = args.maximumPagesPerRound ?? 10;
   if (
     !Number.isInteger(args.minimumRows) ||
     args.minimumRows < 1 ||
     !Number.isInteger(maximumRounds) ||
-    maximumRounds < 1
+    maximumRounds < 1 ||
+    !Number.isInteger(maximumPagesPerRound) ||
+    maximumPagesPerRound < 1
   ) {
-    throw new Error("round episode fallback bounds must be positive integers");
+    throw new Error("round episode read bounds must be positive integers");
   }
   const rounds = asArray(args.roundsRaw)
     .map(asRecord)
@@ -565,33 +569,62 @@ export async function readRecentRoundEpisodeRows(args: {
     if (roundId === null) continue;
     attemptedRoundIds.push(roundId);
     try {
-      const value = await args.readCoworldJson([
-        "episodes",
-        "-r",
-        roundId,
-        "--limit",
-        "100",
-      ]);
-      const rawRoundRows = asArray(value);
       const roundEpisodeRequestIds = new Set<string>();
       const roundRows: unknown[] = [];
-      let roundRowsValid = rawRoundRows.length > 0;
-      for (const entry of rawRoundRows) {
-        const episode = asRecord(entry);
-        const episodeRequestId = asString(episode?.id);
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      let roundRowsValid = false;
+      for (let page = 0; page < maximumPagesPerRound; page += 1) {
+        const value = await args.readCoworldJson([
+          "episodes",
+          "-r",
+          roundId,
+          "--limit",
+          "100",
+          ...(cursor === null ? [] : ["--cursor", cursor]),
+        ]);
+        const pageValue = asRecord(value);
         if (
-          episode === null ||
-          asString(episode.round_id) !== roundId ||
-          episodeRequestId === null ||
-          !isSafeCoworldEpisodeRequestId(episodeRequestId) ||
-          seenEpisodeRequestIds.has(episodeRequestId) ||
-          roundEpisodeRequestIds.has(episodeRequestId)
+          pageValue === null ||
+          !Array.isArray(pageValue.entries) ||
+          !Object.hasOwn(pageValue, "next_cursor")
         ) {
-          roundRowsValid = false;
+          throw new Error("Round episode page lacks pagination metadata");
+        }
+        const rawRoundRows = pageValue.entries;
+        if (rawRoundRows.length === 0) {
+          throw new Error("Round episode page is empty");
+        }
+        for (const entry of rawRoundRows) {
+          const episode = asRecord(entry);
+          const episodeRequestId = asString(episode?.id);
+          if (
+            episode === null ||
+            asString(episode.round_id) !== roundId ||
+            episodeRequestId === null ||
+            !isSafeCoworldEpisodeRequestId(episodeRequestId) ||
+            seenEpisodeRequestIds.has(episodeRequestId) ||
+            roundEpisodeRequestIds.has(episodeRequestId)
+          ) {
+            throw new Error("Round episode page has invalid or duplicate rows");
+          }
+          roundEpisodeRequestIds.add(episodeRequestId);
+          roundRows.push(entry);
+        }
+        const nextCursor = pageValue.next_cursor;
+        if (nextCursor === null) {
+          roundRowsValid = true;
           break;
         }
-        roundEpisodeRequestIds.add(episodeRequestId);
-        roundRows.push(entry);
+        if (
+          typeof nextCursor !== "string" ||
+          nextCursor.length === 0 ||
+          seenCursors.has(nextCursor)
+        ) {
+          throw new Error("Round episode pagination has an invalid cursor");
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
       }
       if (!roundRowsValid) {
         failedRoundIds.push(roundId);

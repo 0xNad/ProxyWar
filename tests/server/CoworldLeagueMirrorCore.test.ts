@@ -493,7 +493,7 @@ describe("CoworldLeagueMirrorCore", () => {
       minimumRows: 24,
       readCoworldJson: async (args) => {
         calls.push(args);
-        return { entries: rows };
+        return { entries: rows, next_cursor: null };
       },
     });
 
@@ -508,6 +508,117 @@ describe("CoworldLeagueMirrorCore", () => {
     });
     expect(result.rows).toHaveLength(25);
   });
+
+  test("readRecentRoundEpisodeRows reads every cursor page before marking a round fresh", async () => {
+    const calls: string[][] = [];
+    const rows = Array.from({ length: 125 }, (_, index) => ({
+      id: `ereq_${index}`,
+      round_id: "round_latest",
+      status: "completed",
+    }));
+    const result = await readRecentRoundEpisodeRows({
+      roundsRaw: [
+        {
+          id: "round_latest",
+          round_number: 12,
+          status: "completed",
+          completed_at: "2026-10-16T20:00:00Z",
+        },
+      ],
+      minimumRows: 1,
+      readCoworldJson: async (args) => {
+        calls.push(args);
+        return args.includes("--cursor")
+          ? { entries: rows.slice(100), next_cursor: null }
+          : { entries: rows.slice(0, 100), next_cursor: "next_page" };
+      },
+    });
+    expect(calls).toEqual([
+      ["episodes", "-r", "round_latest", "--limit", "100"],
+      [
+        "episodes",
+        "-r",
+        "round_latest",
+        "--limit",
+        "100",
+        "--cursor",
+        "next_page",
+      ],
+    ]);
+    expect(result.latestRoundReadable).toBe(true);
+    expect(result.rows).toEqual(rows);
+  });
+
+  test.each([
+    "duplicate",
+    "wrong round",
+    "repeated cursor",
+    "invalid cursor",
+    "missing cursor",
+    "page cap",
+    "error",
+  ])(
+    "readRecentRoundEpisodeRows discards partial rounds after a pagination %s",
+    async (failure) => {
+      let calls = 0;
+      const result = await readRecentRoundEpisodeRows({
+        roundsRaw: [
+          {
+            id: "round_latest",
+            round_number: 12,
+            status: "completed",
+            completed_at: "2026-10-16T20:00:00Z",
+          },
+        ],
+        minimumRows: 1,
+        maximumPagesPerRound: 2,
+        readCoworldJson: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              entries: [
+                {
+                  id: "ereq_first",
+                  round_id: "round_latest",
+                  status: "completed",
+                },
+              ],
+              next_cursor: "page_2",
+            };
+          }
+          if (failure === "error") throw new Error("upstream unavailable");
+          const response: Record<string, unknown> = {
+            entries: [
+              {
+                id: failure === "duplicate" ? "ereq_first" : "ereq_second",
+                round_id:
+                  failure === "wrong round" ? "round_foreign" : "round_latest",
+                status: "completed",
+              },
+            ],
+            next_cursor:
+              failure === "repeated cursor"
+                ? "page_2"
+                : failure === "invalid cursor"
+                  ? 1
+                  : failure === "page cap"
+                    ? "page_3"
+                    : null,
+          };
+          if (failure === "missing cursor") delete response.next_cursor;
+          return response;
+        },
+      });
+      expect(calls).toBe(2);
+      expect(result).toEqual({
+        rows: [],
+        attemptedRoundIds: ["round_latest"],
+        successfulRoundIds: [],
+        failedRoundIds: ["round_latest"],
+        latestRoundReadable: false,
+      });
+    },
+  );
 
   test("readRecentRoundEpisodeRows never calls an older round fresh when the latest round fails", async () => {
     const result = await readRecentRoundEpisodeRows({
@@ -535,6 +646,7 @@ describe("CoworldLeagueMirrorCore", () => {
       readCoworldJson: async (args) => {
         if (args[2] === "round_latest") throw new Error("upstream failure");
         return {
+          next_cursor: null,
           entries: [
             {
               id: "ereq_old",
@@ -605,7 +717,7 @@ describe("CoworldLeagueMirrorCore", () => {
       includeFailedRounds: true,
       readCoworldJson: async (args) => {
         calls.push(args[2]);
-        return { entries: mixedRoundRows(args[2], 4, 21) };
+        return { entries: mixedRoundRows(args[2], 4, 21), next_cursor: null };
       },
     });
 
@@ -627,7 +739,7 @@ describe("CoworldLeagueMirrorCore", () => {
       minimumRows: 8,
       readCoworldJson: async (args) => {
         calls.push(args[2]);
-        return { entries: mixedRoundRows(args[2], 25, 0) };
+        return { entries: mixedRoundRows(args[2], 25, 0), next_cursor: null };
       },
     });
 
@@ -683,7 +795,7 @@ describe("CoworldLeagueMirrorCore", () => {
           },
         ],
         minimumRows: 1,
-        readCoworldJson: async () => ({ entries }),
+        readCoworldJson: async () => ({ entries, next_cursor: null }),
       });
 
       expect(result).toEqual({
