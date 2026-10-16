@@ -26,6 +26,9 @@ import { describe, expect, it } from "vitest";
  * should stay just as conscious: update it only alongside an intended
  * activation.
  *
+ * COGAME_MEMORY_SEAT_MAPPING=1 requests authenticated seat identities for
+ * the private append-v1 scratchpad protocol; leagues must still opt in.
+ *
  * This is a manifest-text pin only. The behavioral guarantee that arming
  * STRUCTURED_DEALS alone (DIPLOMACY_SLOTS left unset) still offers complete
  * deal_accept/deal_reject pairs on a crowded >96-action menu is covered by
@@ -38,6 +41,7 @@ const COWORLD_DIR = path.join(process.cwd(), "coworld-adapter", "coworld");
 
 interface Manifest {
   game: {
+    memory?: { protocol: string };
     runnable: { env: Record<string, string> };
     protocols: { player: { value: string } };
     docs: { readme: { value: string } };
@@ -60,14 +64,17 @@ function readManifest(filename: string): Manifest {
 
 describe("Coworld manifests: canonical production capability activation", () => {
   it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
-    "%s arms exactly deals, free text, and structured spatial observation",
+    "%s arms exactly deals, free text, structured spatial observation, and private scratchpads",
     (filename) => {
-      const env = readManifest(filename).game.runnable.env;
+      const { game } = readManifest(filename);
+      const env = game.runnable.env;
       expect(env).toEqual({
         PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
         PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
         PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
+        COGAME_MEMORY_SEAT_MAPPING: "1",
       });
+      expect(game.memory).toEqual({ protocol: "append-v1" });
       expect(env).not.toHaveProperty("PROXYWAR_TUNE_SPATIAL_MINIMAP");
     },
   );
