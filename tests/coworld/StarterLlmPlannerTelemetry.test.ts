@@ -169,13 +169,13 @@ describe("tester-starter-llm full-prompt hardening", () => {
     ]);
   });
 
-  it("normalizes raw Bedrock usage counters without inventing tokens", async () => {
+  it("normalizes native Messages usage counters without inventing tokens", async () => {
     const source = await fs.readFile(STARTER_FILE, "utf8");
     const tokenCountSrc = extractFunction(source, "tokenCount");
     const optionalTokenCountSrc = extractFunction(source, "optionalTokenCount");
-    const normalizeSrc = extractFunction(source, "normalizeBedrockUsage");
+    const normalizeSrc = extractFunction(source, "normalizeLlmUsage");
     const normalize = new Function(
-      `${tokenCountSrc}\n${optionalTokenCountSrc}\n${normalizeSrc}\nreturn normalizeBedrockUsage;`,
+      `${tokenCountSrc}\n${optionalTokenCountSrc}\n${normalizeSrc}\nreturn normalizeLlmUsage;`,
     )() as (usage: unknown) => Record<string, unknown>;
 
     expect(
@@ -211,7 +211,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
     const source = await fs.readFile(STARTER_FILE, "utf8");
 
     const buildRequest = new Function(
-      `${extractFunction(source, "buildBedrockRequest")}\nreturn buildBedrockRequest;`,
+      `${extractFunction(source, "buildLlmRequest")}\nreturn buildLlmRequest;`,
     )() as (
       model: string,
       staticPrompt: string,
@@ -220,7 +220,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
       promptCache: boolean,
     ) => Record<string, unknown>;
     const responseText = new Function(
-      `${extractFunction(source, "bedrockResponseText")}\nreturn bedrockResponseText;`,
+      `${extractFunction(source, "llmResponseText")}\nreturn llmResponseText;`,
     )() as (response: unknown) => string;
 
     expect(buildRequest("model", "static\n", "dynamic", false, false)).toEqual({

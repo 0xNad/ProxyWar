@@ -42,7 +42,7 @@ const fakeBedrock = {
 
 const previousEnv = {
   wsUrl: process.env.COWORLD_PLAYER_WS_URL,
-  model: process.env.BEDROCK_MODEL,
+  model: process.env.COWORLD_LLM_MODEL,
   planEvery: process.env.PLAN_EVERY,
 };
 
@@ -86,13 +86,13 @@ describe("tester planner all-model provider evidence", () => {
 
   beforeAll(async () => {
     process.env.COWORLD_PLAYER_WS_URL = "ws://all-models.invalid";
-    process.env.BEDROCK_MODEL = "test.first-model";
+    process.env.COWORLD_LLM_MODEL = "test.first-model";
     process.env.PLAN_EVERY = "1";
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const playerModulePath =
       "../../coworld-adapter/tester-starter-llm/llm-player.mjs";
     const { startLlmPlayer } = await import(playerModulePath);
-    startLlmPlayer({ bedrockClient: fakeBedrock, WebSocketCtor: FakeWebSocket });
+    startLlmPlayer({ llmClient: fakeBedrock, WebSocketCtor: FakeWebSocket });
   });
 
   afterAll(() => {
@@ -100,8 +100,8 @@ describe("tester planner all-model provider evidence", () => {
     if (previousEnv.wsUrl === undefined)
       delete process.env.COWORLD_PLAYER_WS_URL;
     else process.env.COWORLD_PLAYER_WS_URL = previousEnv.wsUrl;
-    if (previousEnv.model === undefined) delete process.env.BEDROCK_MODEL;
-    else process.env.BEDROCK_MODEL = previousEnv.model;
+    if (previousEnv.model === undefined) delete process.env.COWORLD_LLM_MODEL;
+    else process.env.COWORLD_LLM_MODEL = previousEnv.model;
     if (previousEnv.planEvery === undefined) delete process.env.PLAN_EVERY;
     else process.env.PLAN_EVERY = previousEnv.planEvery;
   });
@@ -110,18 +110,18 @@ describe("tester planner all-model provider evidence", () => {
     runtime.socket!.emit("message", request("all-fail-1"));
     await vi.waitFor(() => expect(runtime.sent).toHaveLength(1));
     const response = runtime.sent[0];
-    expect(runtime.calls).toHaveLength(5);
+    expect(runtime.calls).toHaveLength(1);
     expect(response).toMatchObject({
       requestID: "all-fail-1",
       fallbackUsed: true,
       llmPlannerDegraded: true,
       providerEvidence: {
         callKind: "planner",
-        provider: "aws-bedrock",
+        provider: "coworld-sidecar",
         requestedModel: "test.first-model",
-        attemptCount: 5,
+        attemptCount: 1,
         completedAttemptCount: 0,
-        failedAttemptCount: 5,
+        failedAttemptCount: 1,
         timedOutAttemptCount: 0,
         rawOutputPresent: false,
       },
@@ -129,11 +129,11 @@ describe("tester planner all-model provider evidence", () => {
     expect(
       (response.providerEvidence as { attemptedModels: string[] })
         .attemptedModels,
-    ).toHaveLength(5);
+    ).toHaveLength(1);
 
     runtime.socket!.emit("message", request("spawn-after-fail", true));
     await vi.waitFor(() => expect(runtime.sent).toHaveLength(2));
     expect(runtime.sent[1]).not.toHaveProperty("providerEvidence");
-    expect(runtime.calls).toHaveLength(5);
+    expect(runtime.calls).toHaveLength(1);
   });
 });
