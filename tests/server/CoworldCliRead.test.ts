@@ -1,3 +1,6 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -16,6 +19,37 @@ const paginationShapeError = Object.assign(new Error("Command failed"), {
 });
 
 describe("CoworldCliRead", () => {
+  it("runs the pinned CLI package for production reads", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "coworld-cli-"));
+    const originalPath = process.env.PATH;
+    try {
+      await fs.writeFile(
+        path.join(directory, "uvx"),
+        "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({args: process.argv.slice(2)}));\n",
+        { mode: 0o755 },
+      );
+      vi.stubEnv("PATH", `${directory}${path.delimiter}${originalPath ?? ""}`);
+      await expect(
+        readCoworldJson(["episodes", "-r", "round_test", "--limit", "100"]),
+      ).resolves.toEqual({
+        args: [
+          "--from",
+          "coworld==0.1.60",
+          "coworld",
+          "episodes",
+          "-r",
+          "round_test",
+          "--limit",
+          "100",
+          "--json",
+        ],
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("recognizes only the known round pagination response regression", () => {
     expect(isCoworldRoundListPaginationShapeError(paginationShapeError)).toBe(
       true,

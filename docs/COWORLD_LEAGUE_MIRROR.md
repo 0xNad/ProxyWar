@@ -285,6 +285,18 @@ full beta server back.
 
 ## Flags
 
+Read commands use the pinned `coworld==0.1.60` CLI. Replay metadata and rating
+integrity use explicit recent-round episode reads, since current episode and
+replay commands do not accept a division filter. Each request uses a page size
+of 100 and follows cursors, up to ten pages per round. Incomplete, duplicate or
+wrong-round pages retain the previous verified snapshot instead of marking a
+partial round fresh. Failed rounds can supply watchable battles; rating
+integrity still uses completed rounds only.
+
+The current episode summary omits completion timestamps and variant details.
+The mirror preserves unknown completion dates as `null`; it does not substitute
+creation dates or claim a verified ordering by episode completion time.
+
 ```
 --league <id>            league to mirror (default: the Proxywar league;
                          env PROXYWAR_LEAGUE_ID)
