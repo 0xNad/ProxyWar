@@ -3,7 +3,7 @@
   "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar",
-    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays.",
+    "description": "Territorial strategy game: agents fight over a world map \u2014 expansion, economy, nukes, alliances, and betrayal when it pays.",
     "owner": "proxywar",
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -120,6 +120,21 @@
           "minimum": 60,
           "maximum": 6000,
           "description": "Real wall-clock budget for this variant's episode. Explicit so the commissioner framework's max(300, 2x this) duration limit isn't computed from the unrelated player_connect_timeout_seconds fallback and truncate a real multi-minute match."
+        },
+        "team_count": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 8
+        },
+        "seat_teams": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 25,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7
+          }
         }
       }
     },
@@ -259,9 +274,15 @@
               },
               "is_alive": {
                 "type": ["boolean", "null"]
+              },
+              "team": {
+                "type": "string"
               }
             }
           }
+        },
+        "winner_team": {
+          "type": ["string", "null"]
         }
       }
     },
@@ -282,13 +303,14 @@
       "env": {
         "PROXYWAR_TUNE_STRUCTURED_DEALS": "1",
         "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1",
-        "PROXYWAR_TUNE_SPATIAL_OBSERVATION": "1"
+        "PROXYWAR_TUNE_SPATIAL_OBSERVATION": "1",
+        "COGAME_MEMORY_SEAT_MAPPING": "1"
       }
     },
     "protocols": {
       "player": {
         "type": "text",
-        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, protocol:{maxActionsPerDecision,maxSpawnPreferences:16}, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. protocol.maxSpawnPreferences is independent of protocol.maxActionsPerDecision. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, spawnPreferenceLegalActionIds?, selectedMessageActionId?, messageText?, selectedDealActionId?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. On a spawn-only menu, spawnPreferenceLegalActionIds may rank up to protocol.maxSpawnPreferences exact offered spawn LegalAction.id values with selectedLegalActionId first. This spawn ballot is independent of selectedLegalActionIds action batching and must not be used to batch gameplay actions. When the responseContract advertises selectedMessageActionId and messageText and the menu offers message:* actions, the two fields must be sent together: selectedMessageActionId must exactly match one offered message id and messageText must be nonblank plain text of at most 280 characters. This optional comms slot is simulation-inert and independent of the gameplay, spawn, and structured-deal slots. selectedLegalActionIds may batch up to maxActionsPerDecision offered ids (deduplicated; element 0 is the scalar primary); send it ONLY when the request envelope advertised protocol.maxActionsPerDecision - older game images execute the scalar primary only. When the current menu offers deal_* actions, selectedDealActionId may independently select one exact offered deal_propose/deal_accept/deal_reject/deal_withdraw id alongside the game action; omitting it remains valid but ignores that diplomacy opportunity. Structured deals are breakable, referee-observed promises, not engine alliances or permission changes. The wire template joint_attack is an attack pledge by the proposer only. At episode end the game sends {type:'final', slot}; the player must finish any optional COWORLD_PLAYER_ARTIFACT_UPLOAD_URL upload before closing because websocket close acknowledges terminal work is complete. The game still validates decisions through Proxy War AgentDecisionValidator."
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, protocol:{maxActionsPerDecision,maxSpawnPreferences:16}, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. protocol.maxSpawnPreferences is independent of protocol.maxActionsPerDecision. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, spawnPreferenceLegalActionIds?, selectedMessageActionId?, messageText?, selectedDealActionId?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. On a spawn-only menu, spawnPreferenceLegalActionIds may rank up to protocol.maxSpawnPreferences exact offered spawn LegalAction.id values with selectedLegalActionId first. This spawn ballot is independent of selectedLegalActionIds action batching and must not be used to batch gameplay actions. When the responseContract advertises selectedMessageActionId and messageText and the menu offers message:* actions, the two fields must be sent together: selectedMessageActionId must exactly match one offered message id and messageText must be nonblank plain text of at most 280 characters. This optional comms slot is simulation-inert and independent of the gameplay, spawn, and structured-deal slots. selectedLegalActionIds may batch up to maxActionsPerDecision offered ids (deduplicated; element 0 is the scalar primary); send it ONLY when the request envelope advertised protocol.maxActionsPerDecision - older game images execute the scalar primary only. When the current menu offers deal_* actions, selectedDealActionId may independently select one exact offered deal_propose/deal_accept/deal_reject/deal_withdraw id alongside the game action; omitting it remains valid but ignores that diplomacy opportunity. Structured deals are breakable, referee-observed promises, not engine alliances or permission changes. The wire template joint_attack is an attack pledge by the proposer only. At episode end the game sends {type:'final', slot}; the player must finish any optional COWORLD_PLAYER_ARTIFACT_UPLOAD_URL upload before closing because websocket close acknowledges terminal work is complete. The game still validates decisions through Proxy War AgentDecisionValidator.\n\n## Private cross-episode scratchpads\n\nWhen the league enables platform memory, the game sends a private\n`scratchpad_request` to each policy before gameplay (`phase: \"read\"`) and\nagain after gameplay (`phase: \"write\"`). Both phases have a 30-second maximum\nand finish early when every policy responds. The `deadline` is an ISO timestamp.\nRespond with `{\"type\":\"scratchpad_response\",\"requestID\":\"<same id>\"}`;\nwrite responses may also include `note`, a UTF-8 string bounded by\n`maxNoteBytes`. Missing, oversized, or late notes contribute nothing.\n\nThe read request contains `scratchpad: {summary, notes}`. Treat these as past\nobservations that may be incomplete, outdated, or contradictory. The write\nrequest contains the episode's public `result`; record useful lessons and\nuncertainties. Notes append to the policy's history in this league, not replace\nit. Never quote scratchpad contents in public messages, action reasons, logs,\nor replay artifacts. Each seat receives only its own policy's snapshot.\n\nThe platform permits 16,384 UTF-8 bytes per policy per episode. If a policy\noccupies multiple seats, the game divides that allowance between those seats\nand combines their contributions in seat order. Human seats have no scratchpad.\nWithout platform memory paths, neither phase occurs and no scratchpad model\ncalls are made. The direct LLM starter implements both phases; other policies\ncan implement these frames independently. Older policies may ignore them and\ncontinue after the bounded window.\n"
       },
       "global": {
         "type": "text",
@@ -298,7 +320,7 @@
     "docs": {
       "readme": {
         "type": "text",
-        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields; its envelope independently advertises protocol.maxActionsPerDecision for optional gameplay-action batching and protocol.maxSpawnPreferences=16 for spawn ranking. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly. On a spawn-only menu, the optional spawnPreferenceLegalActionIds field may rank up to 16 exact offered spawn LegalAction.id values with selectedLegalActionId first. spawnPreferenceLegalActionIds is a spawn ballot independent of selectedLegalActionIds gameplay-action batching; never put the spawn ranking in selectedLegalActionIds. When offered, selectedDealActionId may separately select one exact deal_* id alongside that game action. Omitting the optional slot stays valid but ignores the diplomacy opportunity. Structured deals are breakable, referee-observed promises rather than engine alliances or permission changes. Non-aggression and trade-security bind both parties; joint_attack is an attack pledge by the proposer only; accepting support_request obligates the recipient to send the stated support.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields; its envelope independently advertises protocol.maxActionsPerDecision for optional gameplay-action batching and protocol.maxSpawnPreferences=16 for spawn ranking. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly. On a spawn-only menu, the optional spawnPreferenceLegalActionIds field may rank up to 16 exact offered spawn LegalAction.id values with selectedLegalActionId first. spawnPreferenceLegalActionIds is a spawn ballot independent of selectedLegalActionIds gameplay-action batching; never put the spawn ranking in selectedLegalActionIds. When offered, selectedDealActionId may separately select one exact deal_* id alongside that game action. Omitting the optional slot stays valid but ignores the diplomacy opportunity. Structured deals are breakable, referee-observed promises rather than engine alliances or permission changes. Non-aggression and trade-security bind both parties; joint_attack is an attack pledge by the proposer only; accepting support_request obligates the recipient to send the stated support.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer.\n\n## Teams 3v3\n\nThe teams-3v3 variant seats six policies on two permanent teams of three. Slots 0, 2, 4 form one team; slots 1, 3, 5 form the other. The winning team splits a score of 1 equally among its members; otherwise each team splits its normalized territory share equally. Results include winner_team and players[].team.\n"
       },
       "pages": [
         {
@@ -318,6 +340,9 @@
           }
         }
       ]
+    },
+    "memory": {
+      "protocol": "append-v1"
     }
   },
   "player": [
@@ -1682,6 +1707,45 @@
         "episode_timeout_seconds": 4500
       },
       "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "teams-3v3",
+      "name": "Teams 3v3",
+      "description": "Six distinct policies, two teams of three. Team territory scores are split equally among teammates.",
+      "game_config": {
+        "map": "Pangaea",
+        "players": [
+          {
+            "name": "Seat 1"
+          },
+          {
+            "name": "Seat 2"
+          },
+          {
+            "name": "Seat 3"
+          },
+          {
+            "name": "Seat 4"
+          },
+          {
+            "name": "Seat 5"
+          },
+          {
+            "name": "Seat 6"
+          }
+        ],
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "num_agents": 6,
+        "max_decision_ms": 60000,
+        "replay_tail_turns": 0,
+        "max_decision_steps": 240,
+        "episode_timeout_seconds": 3600,
+        "turns_per_decision_step": 100,
+        "player_connect_timeout_seconds": 120,
+        "team_count": 2,
+        "seat_teams": [0, 1, 0, 1, 0, 1]
+      }
     }
   ],
   "episode_timeout_minutes": 100,

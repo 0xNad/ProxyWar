@@ -1,3 +1,4 @@
+import { createScratchpadPlayer } from "./scratchpad-player.mjs";
 // Proxy War Coworld LLM policy (competitive).
 //
 // Thin Coworld transport around the EXISTING Proxy War starter agent. It does
@@ -621,6 +622,7 @@ export function attachDirectLlmSocketHandlers({
   socket,
   agent,
   providerEvidenceRecorder,
+  scratchpad,
 }) {
   let acceptingDecisions = true;
   let finalReceived = false;
@@ -656,6 +658,7 @@ export function attachDirectLlmSocketHandlers({
         ...(providerEvidence ? { providerEvidence } : {}),
       };
     }
+    scratchpad?.record(response);
     socket.send(JSON.stringify(response));
   };
 
@@ -664,6 +667,29 @@ export function attachDirectLlmSocketHandlers({
     try {
       message = JSON.parse(String(data));
     } catch {
+      return;
+    }
+    if (
+      message.type === "scratchpad_request" &&
+      scratchpad &&
+      acceptingDecisions
+    ) {
+      decisionTail = decisionTail
+        .then(async () => {
+          const response = await scratchpad.respond(message);
+          if (Date.now() <= Date.parse(message.deadline))
+            socket.send(JSON.stringify(response));
+        })
+        .catch(() => {
+          // Never put private model input/output or provider errors into logs.
+          console.error("scratchpad phase failed");
+          socket.send(
+            JSON.stringify({
+              type: "scratchpad_response",
+              requestID: message.requestID,
+            }),
+          );
+        });
       return;
     }
     if (message.type === "final") {
@@ -722,13 +748,18 @@ async function main() {
   // Provider precedence: explicit mock > Bedrock (platform creds) > any starter
   // SDK provider configured via env (openrouter/codex/claude/command) > mock.
   let llmComplete;
+  let scratchpadComplete;
   let providerLabel;
   if (process.env.PROXYWAR_LLM_MOCK === "1") {
     // The explicit local mock is deterministic plumbing, not a model call.
     llmComplete = createMockComplete();
+    scratchpadComplete = llmComplete;
     providerLabel = "mock";
   } else if (USE_BEDROCK) {
     llmComplete = createBedrockComplete(providerEvidenceRecorder);
+    // Scratchpad calls have their own deadlines and never enter gameplay evidence.
+    scratchpadComplete = (prompt) =>
+      createBedrockComplete(createActionProviderEvidenceRecorder())(prompt);
     providerLabel = `bedrock:${MODEL_ID}@${REGION}`;
   } else {
     const envComplete = createLlmCompleteFromEnv();
@@ -742,6 +773,7 @@ async function main() {
           "OPENROUTER_API_KEY), or PROXYWAR_LLM_MOCK=1 for explicit plumbing tests.",
       );
     }
+    scratchpadComplete = envComplete;
     llmComplete = trackActionComplete(
       envComplete,
       envProviderEvidenceDescriptor(),
@@ -749,7 +781,11 @@ async function main() {
     );
     providerLabel = process.env.PROXYWAR_AGENT_LLM_PROVIDER || "env-provider";
   }
-  const agent = createStarterAgent({ llmComplete, modelName: MODEL_ID });
+  const scratchpad = createScratchpadPlayer(llmComplete, scratchpadComplete);
+  const agent = createStarterAgent({
+    llmComplete: scratchpad.complete,
+    modelName: MODEL_ID,
+  });
 
   const socket = new WebSocket(url);
 
@@ -763,6 +799,7 @@ async function main() {
     socket,
     agent,
     providerEvidenceRecorder,
+    scratchpad,
   });
 
   socket.on("close", () => process.exit(0));
