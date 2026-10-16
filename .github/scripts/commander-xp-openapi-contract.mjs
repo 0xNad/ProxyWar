@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 export const COMMANDER_XP_OPENAPI_URL =
   "https://softmax.com/api/observatory/openapi.json";
 export const COMMANDER_XP_OPENAPI_SHA256 =
-  "13204636cff43a3725d0886f2a43c8d9e45a1e859add15f2fcad336129e4409d";
-export const COMMANDER_XP_OPENAPI_BYTES = 418_415;
+  "07ef3f028f90a5f4eaf225a390461c7da0e2b68f00427a24c54eb211ac135c08";
+export const COMMANDER_XP_OPENAPI_BYTES = 418_852;
 export const COMMANDER_XP_CREATE_SCHEMA_NAME =
   "V2CreateExperienceRequestRequest";
 export const COMMANDER_XP_CREATE_SCHEMA_SHA256 =

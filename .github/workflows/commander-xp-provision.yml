@@ -164,8 +164,8 @@ jobs:
           jq -e '
             .schemaVersion == 2 and
             .authority == "softmax-public-openapi-exact-bytes-v1" and
-            .rawSha256 == "13204636cff43a3725d0886f2a43c8d9e45a1e859add15f2fcad336129e4409d" and
-            .byteLength == 418415 and
+            .rawSha256 == "07ef3f028f90a5f4eaf225a390461c7da0e2b68f00427a24c54eb211ac135c08" and
+            .byteLength == 418852 and
             .coworldClientVersion == "0.1.42" and
             .createRequestSchema.sha256 == "3d1b9e7969455eb92f2ee97164ce153517a1d6909bcbb1031b6141bb5050b25a" and
             .rosterSchemas.sha256 == "edfa02dc9fcd7513ce91d4f5bbc6517f1a56d086da32ca37590ab2c29cf255c1"
